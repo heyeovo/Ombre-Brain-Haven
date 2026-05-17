@@ -68,7 +68,8 @@ decay:
 # 你可以把 embedding 独立配置；若 api_key 留空，复用脱水配置的 API key 和 base_url
 embedding:
   enabled: true                   # Enable embedding / 启用向量化
-  model: "gemini-embedding-001"   # Embedding model / 向量化模型
+  model: "BAAI/bge-m3"          # Embedding model / 向量化模型
+  base_url: "https://api.siliconflow.cn/v1"  
   # base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
   # api_key: ""                  
 

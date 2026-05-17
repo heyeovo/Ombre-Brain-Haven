@@ -695,7 +695,7 @@ async def breath(
 
     # --- Exclude pinned/protected from search results (they surface in surfacing mode) ---
     # --- 搜索模式排除钉选桶（它们在浮现模式中始终可见）---
-    matches = [b for b in matches if not (b["metadata"].get("pinned") or b["metadata"].get("protected"))]
+    # matches = [b for b in matches if not (b["metadata"].get("pinned") or b["metadata"].get("protected"))]
 
     # --- Vector similarity channel: find semantically related buckets ---
     # --- 向量相似度通道：找到语义相关的桶 ---

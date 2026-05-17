@@ -284,7 +284,9 @@ class BucketManager:
             post["model_valence"] = max(0.0, min(1.0, float(kwargs["model_valence"])))
 
         # --- Auto-refresh activation time / 自动刷新激活时间 ---
-        post["last_active"] = now_iso()
+        # 只有内容变更时才刷新激活时间
+if "content" in kwargs:
+    post["last_active"] = now_iso()
 
         try:
             with open(file_path, "w", encoding="utf-8") as f:

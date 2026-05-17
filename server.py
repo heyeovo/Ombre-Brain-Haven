@@ -1955,6 +1955,21 @@ async def admin_backfill(request):
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+@mcp.custom_route("/admin/clear-dehydrate-cache", methods=["POST"])
+async def admin_clear_dehydrate_cache(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        import sqlite3
+        conn = sqlite3.connect(dehydrator.cache_db_path)
+        result = conn.execute("DELETE FROM dehydration_cache")
+        count = result.rowcount
+        conn.commit()
+        conn.close()
+        return JSONResponse({"status": "ok", "cleared": count})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 # --- Entry point / 启动入口 ---
 if __name__ == "__main__":

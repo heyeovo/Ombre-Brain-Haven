@@ -725,6 +725,11 @@ async def breath(
         ]
         pinned_parts = []
         for b in pinned_buckets:
+            from rapidfuzz import fuzz
+            name_score = fuzz.partial_ratio(query, b["metadata"].get("name", ""))
+            content_score = fuzz.partial_ratio(query, b.get("content", "")[:500])
+            if max(name_score, content_score) < 40:
+                continue
             clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
             summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
             summary_tokens = count_tokens_approx(summary)
@@ -760,28 +765,42 @@ async def breath(
             logger.warning(f"Failed to dehydrate search result / 检索结果脱水失败: {e}")
             continue
 
-    # --- Random surfacing: when search returns < 3, 40% chance to float old memories ---
-    # --- 随机浮现：检索结果不足 3 条时，40% 概率从低权重旧桶里漂上来 ---
-    if len(matches) < 3 and random.random() < 0.4:
+        # --- 时间涟漪：基于命中桶的时间，找±24h内的相邻桶 ---
+    if len(matches) < 3 and matches:
         try:
             all_buckets = await bucket_mgr.list_all(include_archive=False)
             matched_ids = {b["id"] for b in matches}
-            low_weight = [
-                b for b in all_buckets
-                if b["id"] not in matched_ids
-                and decay_engine.calculate_score(b["metadata"]) < 2.0
-            ]
-            if low_weight:
-                drifted = random.sample(low_weight, min(random.randint(1, 3), len(low_weight)))
-                drift_results = []
-                for b in drifted:
+            ref_time = datetime.fromisoformat(str(matches[0]["metadata"].get("created", "")))
+
+            nearby = []
+            for b in all_buckets:
+                if b["id"] in matched_ids:
+                    continue
+                if b["metadata"].get("pinned") or b["metadata"].get("protected"):
+                    continue
+                if b["metadata"].get("type") in ("permanent", "feel"):
+                    continue
+                try:
+                    created = datetime.fromisoformat(str(b["metadata"].get("created", "")))
+                    delta_hours = abs((ref_time - created).total_seconds()) / 3600
+                    if delta_hours <= 24:
+                        nearby.append((delta_hours, b))
+                except (ValueError, TypeError):
+                    continue
+
+            nearby.sort(key=lambda x: x[0])
+            ripple_buckets = [b for _, b in nearby[:2]]
+
+            if ripple_buckets:
+                ripple_results = []
+                for b in ripple_buckets:
                     clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
                     summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
-                    drift_results.append(f"[surface_type: random]\n{summary}")
-                results.append("--- 忽然想起来 ---\n" + "\n---\n".join(drift_results))
+                    ripple_results.append(f"[surface_type: time_ripple]\n{summary}")
+                results.append("--- 那段时间还有 ---\n" + "\n---\n".join(ripple_results))
         except Exception as e:
-            logger.warning(f"Random surfacing failed / 随机浮现失败: {e}")
-
+            logger.warning(f"Time ripple surfacing failed: {e}")
+            
     if not results:
         await _fire_webhook("breath", {"mode": "empty", "matches": 0})
         return "未找到相关记忆。"

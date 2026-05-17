@@ -1942,6 +1942,19 @@ async def api_system_status(request):
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+@mcp.custom_route("/admin/backfill", methods=["POST"])
+async def admin_backfill(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        import asyncio
+        from backfill_embeddings import backfill
+        asyncio.create_task(backfill(batch_size=20))
+        return JSONResponse({"status": "started"})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 
 # --- Entry point / 启动入口 ---
 if __name__ == "__main__":

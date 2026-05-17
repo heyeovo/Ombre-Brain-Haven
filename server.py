@@ -661,6 +661,7 @@ async def breath(
             all_buckets = await bucket_mgr.list_all(include_archive=False)
             feels = [b for b in all_buckets if b["metadata"].get("type") == "feel"]
             feels.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+            feels = feels[:20]  # 只取最近20条
             if not feels:
                 return "没有留下过 feel。"
             results = []
@@ -715,6 +716,24 @@ async def breath(
 
     results = []
     token_used = 0
+        # --- Query模式：pinned桶强制置顶 ---
+    try:
+        all_buckets_temp = await bucket_mgr.list_all(include_archive=False)
+        pinned_buckets = [
+            b for b in all_buckets_temp
+            if b["metadata"].get("pinned") or b["metadata"].get("protected")
+        ]
+        pinned_parts = []
+        for b in pinned_buckets:
+            clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
+            summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
+            summary_tokens = count_tokens_approx(summary)
+            token_used += summary_tokens
+            pinned_parts.append(f"📌 [核心准则] [bucket_id:{b['id']}] {summary}")
+        if pinned_parts:
+            results.append("=== 核心准则 ===\n" + "\n---\n".join(pinned_parts))
+    except Exception as e:
+        logger.warning(f"Pinned surfacing in search mode failed: {e}")
     for bucket in matches:
         if token_used >= max_tokens:
             break

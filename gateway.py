@@ -4,6 +4,7 @@ import secrets
 import json
 import codecs
 import time
+import asyncio
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -520,32 +521,34 @@ class GatewayService:
             )
 
         async def stream_body():
-            completed = False
+            finalized = False
             stream_state = self._new_stream_capture_state()
+
+            async def finalize_once() -> None:
+                nonlocal finalized
+                if finalized:
+                    return
+                finalized = True
+                await self._finalize_stream_turn(
+                    session_id=session_id,
+                    model=model,
+                    route="/v1/chat/completions",
+                    stream_state=stream_state,
+                    recalled_ids=recalled_ids,
+                    user_message=user_message,
+                )
+
             try:
                 async for chunk in upstream_response.aiter_bytes():
                     if chunk:
                         self._consume_stream_capture_chunk(stream_state, chunk)
+                        if stream_state.get("seen_done"):
+                            await finalize_once()
                         yield chunk
                 self._consume_stream_capture_chunk(stream_state, b"", final=True)
-                completed = True
+                await finalize_once()
             finally:
                 await upstream_response.aclose()
-                if completed:
-                    self._log_cache_usage_from_stream_state(
-                        session_id,
-                        model,
-                        stream_state,
-                        route="/v1/chat/completions",
-                    )
-                    self._capture_reasoning_from_stream_state(session_id, stream_state)
-                    await self._record_successful_round(session_id, recalled_ids)
-                    await self._update_persona_after_assistant_message(
-                        session_id,
-                        user_message,
-                        self._build_stream_assistant_message(stream_state),
-                        recalled_ids or [],
-                    )
 
         return StreamingResponse(
             stream_body(),
@@ -634,6 +637,61 @@ class GatewayService:
             )
         except Exception as exc:
             logger.warning("Persona post-reply update failed | session=%s error=%s", session_id, exc)
+
+    async def _finalize_stream_turn(
+        self,
+        session_id: str,
+        model: str,
+        route: str,
+        stream_state: dict[str, Any],
+        recalled_ids: list[str] | None,
+        user_message: str,
+    ) -> None:
+        self._log_cache_usage_from_stream_state(
+            session_id,
+            model,
+            stream_state,
+            route=route,
+        )
+        self._capture_reasoning_from_stream_state(session_id, stream_state)
+        await self._record_successful_round(session_id, recalled_ids)
+        assistant_message = self._build_stream_assistant_message(stream_state)
+        self._schedule_persona_post_reply_update(
+            session_id,
+            user_message,
+            assistant_message,
+            recalled_ids or [],
+        )
+
+    def _schedule_persona_post_reply_update(
+        self,
+        session_id: str,
+        user_message: str,
+        assistant_message: dict[str, Any] | None,
+        recalled_ids: list[str],
+    ) -> None:
+        async def runner() -> None:
+            await self._update_persona_after_assistant_message(
+                session_id,
+                user_message,
+                assistant_message,
+                recalled_ids,
+            )
+
+        task = asyncio.create_task(runner())
+        task.add_done_callback(
+            lambda done: self._log_persona_post_update_task(session_id, done)
+        )
+
+    def _log_persona_post_update_task(self, session_id: str, task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except Exception as exc:
+            logger.warning(
+                "Persona post-reply background update failed | session=%s error=%s",
+                session_id,
+                exc,
+            )
 
     def _summarize_assistant_tool_calls(self, assistant_message: dict[str, Any]) -> str:
         tool_calls = assistant_message.get("tool_calls")
@@ -1044,7 +1102,7 @@ class GatewayService:
             )
 
         async def stream_body():
-            completed = False
+            finalized = False
             stream_state = self._new_stream_capture_state()
             message_id = f"msg_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
             usage = {"input_tokens": 0, "output_tokens": 0}
@@ -1052,6 +1110,20 @@ class GatewayService:
             next_block_index = 0
             text_block_index: int | None = None
             tool_blocks: dict[int, dict[str, Any]] = {}
+
+            async def finalize_once() -> None:
+                nonlocal finalized
+                if finalized:
+                    return
+                finalized = True
+                await self._finalize_stream_turn(
+                    session_id=session_id,
+                    model=model,
+                    route="/v1/messages",
+                    stream_state=stream_state,
+                    recalled_ids=recalled_ids,
+                    user_message=user_message,
+                )
 
             try:
                 yield self._anthropic_sse(
@@ -1075,6 +1147,8 @@ class GatewayService:
                     if not chunk:
                         continue
                     self._consume_stream_capture_chunk(stream_state, chunk)
+                    if stream_state.get("seen_done"):
+                        await finalize_once()
                     for event in self._openai_sse_chunk_to_anthropic_events(chunk):
                         if event.get("_done"):
                             continue
@@ -1152,10 +1226,11 @@ class GatewayService:
                                             "type": "input_json_delta",
                                             "partial_json": arguments,
                                         },
-                                    },
-                                )
+                                },
+                            )
 
                 self._consume_stream_capture_chunk(stream_state, b"", final=True)
+                await finalize_once()
                 if text_block_index is not None:
                     yield self._anthropic_sse(
                         "content_block_stop",
@@ -1184,24 +1259,8 @@ class GatewayService:
                     "message_stop",
                     {"type": "message_stop"},
                 )
-                completed = True
             finally:
                 await upstream_response.aclose()
-                if completed:
-                    self._log_cache_usage_from_stream_state(
-                        session_id,
-                        model,
-                        stream_state,
-                        route="/v1/messages",
-                    )
-                    self._capture_reasoning_from_stream_state(session_id, stream_state)
-                    await self._record_successful_round(session_id, recalled_ids)
-                    await self._update_persona_after_assistant_message(
-                        session_id,
-                        user_message,
-                        self._build_stream_assistant_message(stream_state),
-                        recalled_ids or [],
-                    )
 
         return StreamingResponse(
             stream_body(),
@@ -1990,6 +2049,7 @@ class GatewayService:
         return {
             "decoder": codecs.getincrementaldecoder("utf-8")(),
             "buffer": "",
+            "seen_done": False,
             "message": {
                 "role": "assistant",
                 "content": "",
@@ -2032,7 +2092,10 @@ class GatewayService:
         if not data_lines:
             return
         payload = "\n".join(data_lines).strip()
-        if not payload or payload == "[DONE]":
+        if not payload:
+            return
+        if payload == "[DONE]":
+            stream_state["seen_done"] = True
             return
 
         try:

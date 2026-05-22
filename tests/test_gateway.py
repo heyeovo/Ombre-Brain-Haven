@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import threading
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 
@@ -99,6 +100,7 @@ class RecordingPersonaEngine(DummyPersonaEngine):
     def __init__(self):
         self.pre_calls = []
         self.post_calls = []
+        self.post_event = threading.Event()
 
     async def update_from_exchange(
         self,
@@ -109,6 +111,7 @@ class RecordingPersonaEngine(DummyPersonaEngine):
         tool_summary: str = "",
     ) -> dict:
         self.post_calls.append({"session_id": session_id, "user_message": user_message})
+        self.post_event.set()
         return await super().update_from_exchange(
             session_id,
             user_message,
@@ -638,6 +641,54 @@ def test_gateway_streams_when_client_requires_stream(monkeypatch, test_config, b
     assert "data: [DONE]" in body
     assert captured[0]["stream"] is True
     assert state_store.get_recent_bucket_ids("sess-stream", 5) == set()
+
+
+def test_gateway_stream_finalize_survives_client_close_after_done(monkeypatch, test_config, bucket_mgr):
+    monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "gateway-secret")
+    monkeypatch.setenv("OMBRE_GATEWAY_UPSTREAM_API_KEY", "upstream-secret")
+
+    def upstream_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n',
+        )
+
+    state_store = GatewayStateStore(f"{test_config['buckets_dir']}\\gateway_state.db")
+    persona_engine = RecordingPersonaEngine()
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream_handler), timeout=10.0)
+    service = GatewayService(
+        config=_gateway_config(test_config),
+        bucket_mgr=bucket_mgr,
+        dehydrator=DummyDehydrator(),
+        embedding_engine=DummyEmbeddingEngine(enabled=False),
+        state_store=state_store,
+        persona_engine=persona_engine,
+        http_client=http_client,
+    )
+    app = create_gateway_app(config=test_config, service=service)
+
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-stream-close",
+            },
+            json={"messages": [{"role": "user", "content": "你好"}], "stream": True},
+        ) as response:
+            for chunk in response.iter_bytes():
+                if b"[DONE]" in chunk:
+                    break
+
+        assert response.status_code == 200
+        assert persona_engine.post_event.wait(2)
+
+    assert persona_engine.post_calls == [
+        {"session_id": "sess-stream-close", "user_message": "你好"}
+    ]
+    assert state_store.get_current_round("sess-stream-close") == 1
 
 
 def test_gateway_streams_tool_call_deltas(monkeypatch, test_config, bucket_mgr):

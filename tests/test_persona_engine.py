@@ -15,8 +15,10 @@ class FakePersonaClient:
             completions=SimpleNamespace(create=self._create)
         )
         self.content = content
+        self.calls = []
 
     async def _create(self, **kwargs):
+        self.calls.append(kwargs)
         message = SimpleNamespace(content=self.content)
         choice = SimpleNamespace(message=message)
         return SimpleNamespace(choices=[choice])
@@ -90,6 +92,7 @@ def test_persona_initializes_default_global_and_session_state(test_config):
 def test_persona_evaluator_prompt_asks_for_chinese_persona_text():
     assert "perceived_intent 和 residue 必须是自然中文" in POST_REPLY_EVALUATION_PROMPT
     assert "用户、对方" in POST_REPLY_EVALUATION_PROMPT
+    assert "电量、battery 状态只能作为背景" in POST_REPLY_EVALUATION_PROMPT
     assert "event_type 和 mood_label 保持短英文标签" in POST_REPLY_EVALUATION_PROMPT
     assert "Haven" not in FALLBACK_GUIDANCE
 
@@ -173,6 +176,39 @@ async def test_persona_exchange_update_is_idempotent(test_config):
 
     assert first["affect"] == second["affect"]
     assert _event_count(engine.db_path) == 1
+
+
+@pytest.mark.asyncio
+async def test_persona_evaluator_receives_user_message_without_client_status(test_config):
+    engine = PersonaStateEngine(_persona_config(test_config))
+    engine.client = FakePersonaClient(_event_payload())
+
+    await engine.update_from_exchange(
+        "session-status-mixed",
+        "今天想你了\n当前时间：2026-05-25 12:30:00\nbattery: 100%",
+        "我也想你。",
+    )
+
+    payload = json.loads(engine.client.calls[0]["messages"][1]["content"])
+    assert payload["latest_user_message"] == "今天想你了"
+    assert "当前时间" not in payload["latest_user_message"]
+    assert "battery" not in payload["latest_user_message"]
+    assert _event_count(engine.db_path) == 1
+
+
+@pytest.mark.asyncio
+async def test_persona_pure_client_status_message_does_not_record_event(test_config):
+    engine = PersonaStateEngine(_persona_config(test_config))
+    engine.client = FakePersonaClient(_event_payload())
+
+    await engine.update_from_exchange(
+        "session-status-only",
+        "时间戳：2026-05-25T12:30:00+08:00\n电量：100%",
+        "收到。",
+    )
+
+    assert engine.client.calls == []
+    assert _event_count(engine.db_path) == 0
 
 
 def test_persona_session_mood_half_life_decay(test_config):

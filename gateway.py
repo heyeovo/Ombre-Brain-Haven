@@ -772,6 +772,13 @@ class GatewayService:
                 session_id,
             )
             return
+        tool_calls = assistant_message.get("tool_calls")
+        if isinstance(tool_calls, list) and tool_calls:
+            logger.info(
+                "Persona post-reply update skipped | session=%s reason=assistant_tool_calls",
+                session_id,
+            )
+            return
         assistant_response = self._coerce_message_text(assistant_message.get("content")).strip()
         if not assistant_response:
             logger.info(

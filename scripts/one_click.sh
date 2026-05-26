@@ -7,6 +7,13 @@ source "${SCRIPT_DIR}/_ops_common.sh"
 cd "$(ombre_repo_root)"
 
 LOCAL_COMPOSE_FILE="compose.local.yml"
+COMPOSE_OUTPUT_FILE="${LOCAL_COMPOSE_FILE}"
+COMPOSE_BRAIN_DATA_VOLUME="./buckets"
+COMPOSE_BRAIN_STATE_VOLUME="./state"
+COMPOSE_BRAIN_CONFIG_VOLUME="./config.yaml"
+COMPOSE_GATEWAY_DATA_VOLUME="./buckets"
+COMPOSE_GATEWAY_STATE_VOLUME="./state"
+COMPOSE_GATEWAY_CONFIG_VOLUME="./config.yaml"
 DEPLOY_TARGET="vps"
 DEPLOY_LABEL="VPS 部署"
 DEFAULT_BRAIN_PORT="18001"
@@ -487,9 +494,10 @@ EOF
 write_compose_file() {
   local brain_port="$1"
   local gateway_port="$2"
+  local compose_file="${COMPOSE_OUTPUT_FILE:-${LOCAL_COMPOSE_FILE}}"
 
-  backup_file "${LOCAL_COMPOSE_FILE}"
-  cat > "${LOCAL_COMPOSE_FILE}" <<EOF
+  backup_file "${compose_file}"
+  cat > "${compose_file}" <<EOF
 services:
   ombre-brain:
     build: .
@@ -504,21 +512,21 @@ services:
       OMBRE_STATE_DIR: /state
 EOF
   if [[ "${FEATURE_SCOPE}" == "full" ]]; then
-    cat >> "${LOCAL_COMPOSE_FILE}" <<EOF
+    cat >> "${compose_file}" <<EOF
       OMBRE_GATEWAY_ADMIN_URL: http://ombre-gateway:8010/api/config
 EOF
   fi
-  cat >> "${LOCAL_COMPOSE_FILE}" <<EOF
+  cat >> "${compose_file}" <<EOF
     ports:
       - "${brain_port}:8000"
     volumes:
-      - ./buckets:/data
-      - ./state:/state
-      - ./config.yaml:/app/config.yaml:ro
+      - ${COMPOSE_BRAIN_DATA_VOLUME}:/data
+      - ${COMPOSE_BRAIN_STATE_VOLUME}:/state
+      - ${COMPOSE_BRAIN_CONFIG_VOLUME}:/app/config.yaml:ro
 EOF
 
   if [[ "${FEATURE_SCOPE}" == "full" ]]; then
-    cat >> "${LOCAL_COMPOSE_FILE}" <<EOF
+    cat >> "${compose_file}" <<EOF
   ombre-gateway:
     build: .
     container_name: ombre-gateway
@@ -533,12 +541,12 @@ EOF
     ports:
       - "${gateway_port}:8010"
     volumes:
-      - ./buckets:/data
-      - ./state:/state
-      - ./config.yaml:/app/config.yaml:ro
+      - ${COMPOSE_GATEWAY_DATA_VOLUME}:/data
+      - ${COMPOSE_GATEWAY_STATE_VOLUME}:/state
+      - ${COMPOSE_GATEWAY_CONFIG_VOLUME}:/app/config.yaml:ro
 EOF
   fi
-  printf '已写入 %s\n' "${LOCAL_COMPOSE_FILE}"
+  printf '已写入 %s\n' "${compose_file}"
 }
 
 ensure_tools() {
@@ -1046,12 +1054,92 @@ choose_compose_file() {
   export COMPOSE_FILE
 }
 
+extract_compose_port() {
+  local compose_file="$1"
+  local container_port="$2"
+  local default="$3"
+  local value
+  value="$(
+    sed -nE "s/^[[:space:]]*-[[:space:]]*\"?([0-9]+):${container_port}\"?[[:space:]]*$/\\1/p" "${compose_file}" \
+      | head -n 1
+  )"
+  printf '%s\n' "${value:-${default}}"
+}
+
+extract_compose_volume() {
+  local compose_file="$1"
+  local target="$2"
+  local default="$3"
+  local occurrence="${4:-1}"
+  local value
+  value="$(
+    sed -nE "s|^[[:space:]]*-[[:space:]]*(.+):${target}(:ro)?[[:space:]]*$|\\1|p" "${compose_file}" \
+      | sed -n "${occurrence}p"
+  )"
+  printf '%s\n' "${value:-${default}}"
+}
+
+refresh_compose_file() {
+  [[ -f "${COMPOSE_FILE}" ]] || {
+    printf '找不到 compose 文件：%s\n' "${COMPOSE_FILE}"
+    return 1
+  }
+
+  local previous_output="${COMPOSE_OUTPUT_FILE}"
+  local previous_scope="${FEATURE_SCOPE}"
+  local previous_label="${FEATURE_LABEL}"
+  local previous_brain_data="${COMPOSE_BRAIN_DATA_VOLUME}"
+  local previous_brain_state="${COMPOSE_BRAIN_STATE_VOLUME}"
+  local previous_brain_config="${COMPOSE_BRAIN_CONFIG_VOLUME}"
+  local previous_gateway_data="${COMPOSE_GATEWAY_DATA_VOLUME}"
+  local previous_gateway_state="${COMPOSE_GATEWAY_STATE_VOLUME}"
+  local previous_gateway_config="${COMPOSE_GATEWAY_CONFIG_VOLUME}"
+  local brain_port gateway_port
+
+  if grep -Eq '^[[:space:]]{0,2}ombre-gateway:' "${COMPOSE_FILE}"; then
+    FEATURE_SCOPE="full"
+    FEATURE_LABEL="部署全部"
+  else
+    FEATURE_SCOPE="mcp"
+    FEATURE_LABEL="只用 Ombre MCP 部分"
+  fi
+
+  COMPOSE_OUTPUT_FILE="${COMPOSE_FILE}"
+  brain_port="$(extract_compose_port "${COMPOSE_FILE}" "8000" "${DEFAULT_BRAIN_PORT}")"
+  gateway_port="$(extract_compose_port "${COMPOSE_FILE}" "8010" "${DEFAULT_GATEWAY_PORT}")"
+  COMPOSE_BRAIN_DATA_VOLUME="$(extract_compose_volume "${COMPOSE_FILE}" "/data" "./buckets" 1)"
+  COMPOSE_BRAIN_STATE_VOLUME="$(extract_compose_volume "${COMPOSE_FILE}" "/state" "./state" 1)"
+  COMPOSE_BRAIN_CONFIG_VOLUME="$(extract_compose_volume "${COMPOSE_FILE}" "/app/config.yaml" "./config.yaml" 1)"
+  COMPOSE_GATEWAY_DATA_VOLUME="$(extract_compose_volume "${COMPOSE_FILE}" "/data" "${COMPOSE_BRAIN_DATA_VOLUME}" 2)"
+  COMPOSE_GATEWAY_STATE_VOLUME="$(extract_compose_volume "${COMPOSE_FILE}" "/state" "${COMPOSE_BRAIN_STATE_VOLUME}" 2)"
+  COMPOSE_GATEWAY_CONFIG_VOLUME="$(extract_compose_volume "${COMPOSE_FILE}" "/app/config.yaml" "${COMPOSE_BRAIN_CONFIG_VOLUME}" 2)"
+
+  printf '刷新 compose：%s / %s\n' "${COMPOSE_FILE}" "${FEATURE_LABEL}"
+  printf '保留端口：Ombre-Brain=%s' "${brain_port}"
+  [[ "${FEATURE_SCOPE}" == "full" ]] && printf '，Gateway=%s' "${gateway_port}"
+  printf '\n'
+  write_compose_file "${brain_port}" "${gateway_port}"
+
+  COMPOSE_OUTPUT_FILE="${previous_output}"
+  FEATURE_SCOPE="${previous_scope}"
+  FEATURE_LABEL="${previous_label}"
+  COMPOSE_BRAIN_DATA_VOLUME="${previous_brain_data}"
+  COMPOSE_BRAIN_STATE_VOLUME="${previous_brain_state}"
+  COMPOSE_BRAIN_CONFIG_VOLUME="${previous_brain_config}"
+  COMPOSE_GATEWAY_DATA_VOLUME="${previous_gateway_data}"
+  COMPOSE_GATEWAY_STATE_VOLUME="${previous_gateway_state}"
+  COMPOSE_GATEWAY_CONFIG_VOLUME="${previous_gateway_config}"
+}
+
 update_version() {
   select_deploy_target_for_task "更新版本"
   if [[ "${DEPLOY_TARGET}" == "mobile" ]]; then
     update_mobile_runtime
   else
     choose_compose_file
+    if prompt_yes_no '同时刷新 compose 文件为当前模板吗（会先备份，保留端口和数据挂载）' 'n'; then
+      refresh_compose_file || return 1
+    fi
     "${SCRIPT_DIR}/update_deploy.sh"
   fi
 }

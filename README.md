@@ -962,7 +962,7 @@ docker compose -f compose.hk.yml exec -T ombre-brain python scripts/cleanup_migr
 - `scripts/one_click.sh`：新手入口。菜单包含首次部署、更新版本、错误排查、向量库相关。首次部署会先选择 `VPS / Windows / 手机`，再选择 `只用 Ombre MCP 部分 / 部署全部`。只用 MCP 时只启动 MCP 工具和 Dashboard，不配置、不启动 Gateway；部署全部时才会继续填写 Gateway 上游、token 和 OpenAI-compatible 客户端地址。VPS 和 Windows 走 Docker 并生成本机专用的 `compose.local.yml`；手机按 Termux/Python 直跑并生成 `start_mobile.sh`。模型配置和 key 会交互式填写，key 写入 `.env`，非密钥配置写入 `config.yaml`，最后生成 `connection_guide.txt` 告诉客户端 URL 怎么填。
 - `./ob`：短入口，等同于 `bash scripts/one_click.sh`。也可以在菜单里选“安装短命令 ob”，写入当前用户的 shell 配置；之后任意位置输入 `ob` 就能打开菜单。
 - `scripts/doctor.sh`：适合“更新后不能用、端口不通、怀疑 key 没配好”。它只读检查，不会重启服务、不改配置、不打印 key。会提示 `.env/config.yaml`、Docker Compose 状态、健康接口、容器内环境变量和最近错误日志；如果 compose 里没有启用 Gateway，会自动跳过 Gateway token 检查。
-- `scripts/update_deploy.sh`：适合“我只想更新到最新版”。它会 `git pull --ff-only`，如果 compose 里是 `build:` 就重建镜像，否则先 pull 镜像，再启动容器，最后做健康检查。
+- `scripts/update_deploy.sh`：适合“我只想更新到最新版”。它会 `git pull --ff-only`，如果 compose 里是 `build:` 就重建镜像，否则先 pull 镜像，再启动容器，最后做健康检查。通过 `one_click.sh` 走“更新版本”时，会额外询问是否刷新 compose 模板；刷新前会备份，并保留原来的端口和 buckets/state/config 挂载。
 - `scripts/embedding_backfill.sh`：只补缺失的 embedding，适合升级后发现部分记忆没有语义召回。
 - `scripts/embedding_rebuild.sh`：重建全部 embedding，适合 embedding 模型、base_url 或 embedding 文本格式改过之后使用。它会消耗更多 API 次数。
 - `scripts/embedding_cleanup_orphans.sh`：检查 `embeddings.db` 里已经没有对应 bucket 文件的记录，并要求输入确认后删除。

@@ -188,3 +188,45 @@ def test_import_dedupes_items_inside_same_extraction_batch(test_config, bucket_m
     deduped = engine._dedupe_extracted_items(items)
 
     assert [item["name"] for item in deduped] == ["A", "C"]
+
+
+def test_import_dedupe_ignores_affect_anchor_inside_same_batch(test_config, bucket_mgr):
+    engine = ImportEngine(test_config, bucket_mgr, DummyDehydrator())
+    items = [
+        {"name": "A", "content": "小雨想让导入去重只看正文主体。"},
+        {
+            "name": "B",
+            "content": (
+                "小雨想让导入去重只看正文主体。\n\n"
+                "### affect_anchor\n\n"
+                "> 小雨把旧信放到桌上。\n"
+                "> Dbmaj9 -> Ab/C -> Bbm9\n\n"
+                "含义：这只是温度。"
+            ),
+        },
+    ]
+
+    deduped = engine._dedupe_extracted_items(items)
+
+    assert [item["name"] for item in deduped] == ["A"]
+
+
+@pytest.mark.asyncio
+async def test_import_existing_bucket_dedupe_ignores_affect_anchor(test_config, bucket_mgr):
+    await bucket_mgr.create(
+        content=(
+            "小雨决定让导入去重忽略和弦块。\n\n"
+            "### affect_anchor\n\n"
+            "> 小雨把旧信放到桌上。\n"
+            "> Dbmaj9 -> Ab/C -> Bbm9\n\n"
+            "含义：这只是温度。"
+        ),
+        name="导入去重",
+        domain=["记忆系统"],
+    )
+    engine = ImportEngine(test_config, bucket_mgr, DummyDehydrator())
+
+    duplicate = await engine._find_duplicate_bucket("小雨决定让导入去重忽略和弦块。")
+
+    assert duplicate is not None
+    assert duplicate["metadata"]["name"] == "导入去重"

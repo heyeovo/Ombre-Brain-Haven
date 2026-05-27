@@ -84,6 +84,30 @@ def test_exact_duplicate_plan_does_not_delete_bucket_with_comments():
     assert plans == []
 
 
+def test_exact_duplicate_plan_ignores_affect_anchor():
+    cleanup = _load_cleanup_module()
+    buckets = [
+        _bucket("keep", "小雨决定重复清理只看正文主体。", importance=8),
+        _bucket(
+            "dupe",
+            (
+                "小雨决定重复清理只看正文主体。\n\n"
+                "### affect_anchor\n\n"
+                "> 小雨把旧信放到桌上。\n"
+                "> Dbmaj9 -> Ab/C -> Bbm9\n\n"
+                "含义：这只是温度。"
+            ),
+            importance=5,
+        ),
+    ]
+
+    plans = cleanup.exact_duplicate_plans(buckets, min_chars=5)
+
+    assert len(plans) == 1
+    assert plans[0].keep_id == "keep"
+    assert plans[0].delete_ids == ["dupe"]
+
+
 def test_near_duplicate_pairs_are_reported_for_manual_review_only():
     cleanup = _load_cleanup_module()
     buckets = [

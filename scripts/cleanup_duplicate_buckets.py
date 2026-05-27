@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 from bucket_manager import BucketManager
 from embedding_engine import EmbeddingEngine
-from utils import load_config
+from utils import load_config, strip_affect_anchor
 
 
 NON_DELETABLE_TYPES = {"permanent", "feel", "archived"}
@@ -34,12 +34,14 @@ class DuplicatePlan:
 
 def normalize_content(text: str) -> str:
     text = re.sub(r"\[\[([^\]]+)\]\]", r"\1", str(text or ""))
+    text = strip_affect_anchor(text)
     text = re.sub(r"[\s\u3000]+", "", text.lower())
     return re.sub(r"[^0-9a-zA-Z_\u4e00-\u9fff]+", "", text)
 
 
 def similarity_text(text: str) -> str:
     text = re.sub(r"\[\[([^\]]+)\]\]", r"\1", str(text or "").lower())
+    text = strip_affect_anchor(text)
     text = re.sub(r"[^0-9a-zA-Z_\u4e00-\u9fff]+", " ", text)
     return " ".join(token for token in jieba.lcut(text) if token.strip())
 

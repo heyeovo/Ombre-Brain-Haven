@@ -467,7 +467,8 @@ async def test_comment_bucket_adds_ring_and_touches_source(monkeypatch, bucket_m
     assert bucket["metadata"]["activation_count"] == 1
     assert bucket["metadata"]["last_active"] != "2026-05-04T08:00:00+00:00"
     assert embedding_call[0] == bucket_id
-    assert "现在再看到它" in embedding_call[1]
+    assert "小雨把旧记忆拿出来看" in embedding_call[1]
+    assert "现在再看到它" not in embedding_call[1]
 
 
 @pytest.mark.asyncio
@@ -606,7 +607,7 @@ async def test_dashboard_content_api_edits_body_preserves_comments(monkeypatch, 
     assert bucket["metadata"]["comments"][0]["id"] == comment["id"]
     assert bucket["metadata"]["last_active"] == before["metadata"]["last_active"]
     assert "新正文" in embedding_call[1]
-    assert "正文下面的小雨年轮" in embedding_call[1]
+    assert "正文下面的小雨年轮" not in embedding_call[1]
 
 
 @pytest.mark.asyncio
@@ -738,7 +739,8 @@ async def test_hold_feel_with_source_writes_comment_not_digested(monkeypatch, bu
     assert bucket["metadata"]["model_valence"] == 0.76
     assert not bucket["metadata"].get("digested")
     assert embedding_call[0] == source_id
-    assert "被认出来的安静" in embedding_call[1]
+    assert "小雨说这段记忆以后还要回来看" in embedding_call[1]
+    assert "被认出来的安静" not in embedding_call[1]
 
 
 @pytest.mark.asyncio

@@ -28,7 +28,7 @@ from typing import Optional
 import jieba
 from rapidfuzz import fuzz
 
-from utils import bucket_text_for_embedding, count_tokens_approx, now_iso
+from utils import bucket_text_for_embedding, count_tokens_approx, now_iso, strip_affect_anchor
 
 logger = logging.getLogger("ombre_brain.import")
 
@@ -267,12 +267,14 @@ _IMPORT_DUPLICATE_SIMILARITY = 88.0
 
 def _normalize_import_text(text: str) -> str:
     text = re.sub(r"\[\[([^\]]+)\]\]", r"\1", str(text or ""))
+    text = strip_affect_anchor(text)
     text = re.sub(r"[\s\u3000]+", "", text.lower())
     return re.sub(r"[^0-9a-zA-Z_\u4e00-\u9fff]+", "", text)
 
 
 def _import_similarity_text(text: str) -> str:
     text = re.sub(r"\[\[([^\]]+)\]\]", r"\1", str(text or "").lower())
+    text = strip_affect_anchor(text)
     text = re.sub(r"[^0-9a-zA-Z_\u4e00-\u9fff]+", " ", text)
     return " ".join(token for token in jieba.lcut(text) if token.strip())
 

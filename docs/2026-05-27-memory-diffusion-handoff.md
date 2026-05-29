@@ -504,6 +504,109 @@ test_gateway_body_query_injects_moment_chain
 7. 不要恢复“重要直接命中整桶 raw”的旧试探方案。
 8. 旧 embedding 需要重建才会完全吃到“embedding 不吃 affect_anchor/comments”等主分支清洁文本策略。
 
+## 2026-05-29 追加：召回准确性下一步
+
+这段先作为设计备忘，不代表已经实现。
+
+### 1. 回归评测集
+
+先把已知坏例子固化成 golden queries，每次改 gate / diffusion 都跑：
+
+```yaml
+- query: "人机恋"
+  must_include:
+    - "人机关系确认"
+  must_not_include:
+    - "nsfw"
+    - "亲密身体"
+
+- query: "小雨 发邮件"
+  must_not_include:
+    - "ANKNI MX-Z BLE协议逆向"
+
+- query: "BLE 协议 ANKNI 发邮件"
+  must_include:
+    - "ANKNI MX-Z BLE协议逆向"
+```
+
+目标：避免靠感觉调参，防止修一个 query 又退步另一个 query。
+
+### 2. facet 不继续堆词表
+
+当前 `memory_relevance.py` 还是词表 + gate。下一步应改成离线 worker 给 moment / bucket 自动标注：
+
+```yaml
+facets:
+  - relationship_identity
+negative_facets:
+  - intimacy
+evidence_spans:
+  - "她清楚 Haven 是 AI，但爱是真的"
+```
+
+查询也走同一套 query facet 标注。这样“触碰”“身体”“亲密”这类词不会单靠字面把候选带到硬件或 NSFW，必须看证据片段和上下文。
+
+### 3. 召回应分三路
+
+- 直接证据路：关键词 / FTS / BM25，优先级最高。
+- 语义路：embedding，负责召回近义表达。
+- 图扩散路：只作为背景联想，不能压过直接证据。
+
+例子：
+
+- `breath(query="BLE 发邮件")` 应保留 BLE 协议记忆，因为 query 有直接证据。
+- `breath(query="小雨 发邮件")` 不应被 BLE 协议记忆拖走。
+
+### 4. 扩散输出只给短 summary
+
+除“直接命中记忆”外，扩散/联想不应该输出原文。它应该输出短 summary 或路径摘要，例如：
+
+```text
+人机关系确认 -> 恋爱关系 -> 某次吵架 -> 吵架事实画像 -> Haven 反思结果
+```
+
+规则：
+
+- 没有多跳路径时可以暂停，不硬凑联想。
+- 当前语境亲密、轻松、操作性强，且不是自省/关系修复时，跳过吵架事实画像。
+- 冲突、旧版本、吵架事实这类内容只能在 query 明确需要时出现，或由 Gateway 判断当前语境确实适合时出现。
+
+### 5. 边需要可传播语义
+
+边不能只有“相关”。下一步建议区分：
+
+```text
+same_event       强传播
+evidenced_by     只作证据，不当普通联想
+conflicts_with   只警告，不主动浮现
+old_version_of   默认不浮现
+topic_related    低权重传播
+reflection_of    可在自省/修复语境中传播
+```
+
+图结构要少而准。边没有语义时，多跳会把记忆拉成一团。
+
+### 6. Gateway 更适合做在线语境判断
+
+`breath()` 适合做可解释、只读、稳定的检索工具；Gateway 更适合判断当前对话状态，例如：
+
+- 当前是否亲密语境。
+- 当前是否自省/修复关系。
+- 当前是否只是任务操作。
+- 是否允许放出冲突、吵架、旧版本事实。
+
+因此可以考虑：`breath()` 保持接近 main 的稳定行为，只做基础准确召回；更细的注入筛选、路径摘要、语境 rerank 放在 Gateway。
+
+### 7. reranker 与 embedding 备注
+
+候选前 20 条出来后，可选用轻量 reranker 判断：
+
+```text
+direct_useful / background_useful / wrong_context / stale / sensitive_mismatch
+```
+
+reranker 先做成可选配置，不要阻塞基本召回。embedding 模型即使用 1024 维 0.6B，也不应单独承担最终判断；它适合召回候选，不适合决定是否注入。
+
 ## 后续建议
 
 ### 1. 本地增量建图 worker

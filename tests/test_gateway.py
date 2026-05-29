@@ -242,6 +242,44 @@ def _joined_message_content(messages: list[dict]) -> str:
     )
 
 
+def _create_moment_diffusion_pair(
+    bucket_mgr,
+    config: dict,
+    *,
+    relation_type: str = "supports",
+    target_name: str = "扩散摘要目标",
+    target_content: str = "扩散目标原文-绝对不能出现 ABC123。",
+    target_resolved: bool = False,
+) -> tuple[str, str]:
+    from memory_edges import MemoryEdgeStore
+
+    seed_id = _create_bucket(
+        bucket_mgr,
+        content="种子项目现在需要被直接召回。",
+        name="种子项目",
+        hours_ago=24,
+        importance=10,
+        domain=["测试"],
+    )
+    target_id = _create_bucket(
+        bucket_mgr,
+        content=target_content,
+        name=target_name,
+        hours_ago=240,
+        importance=10,
+        domain=["测试"],
+        resolved=target_resolved,
+    )
+    MemoryEdgeStore(config).add_edge(
+        seed_id,
+        target_id,
+        relation_type,
+        confidence=1.0,
+        reason="test diffusion edge",
+    )
+    return seed_id, target_id
+
+
 def test_gateway_state_store_cooldown_curve(tmp_path):
     store = GatewayStateStore(str(tmp_path / "gateway_state.db"))
     origin = datetime(2026, 4, 20, 12, 0, 0)
@@ -2116,6 +2154,164 @@ def test_gateway_body_query_injects_moment_chain(
     assert "dynamic_context" not in summary_payload
     assert "stable_context" not in summary_payload
     assert summary_payload["recalled_moment_ids"] == debug_payload["recalled_moment_ids"]
+
+
+def test_gateway_diffused_memory_uses_summary_only_for_moments(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        recalled_memory_budget=500,
+        related_memory_budget=1200,
+        inject_total_budget=2200,
+        current_inner_state_interval_rounds=0,
+    )
+    seed_id, _target_id = _create_moment_diffusion_pair(bucket_mgr, cfg)
+    cfg["memory_diffusion"] = {"max_hops": 1, "min_activation": 0.0, "top_k": 2}
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(seed_id, 0.99)],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-summary-only",
+            },
+            json={"messages": [{"role": "user", "content": "种子项目现在怎样"}]},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    assert "Context Mode" in injected
+    assert "context_mode: task" in injected
+    assert "Recalled Memory" in injected
+    assert "种子项目现在需要被直接召回" in injected
+    assert "Diffused Memory" in injected
+    assert "扩散摘要目标" in injected
+    assert "扩散目标原文-绝对不能出现 ABC123" not in injected
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_mode"),
+    [
+        ("亲亲，种子项目现在怎样", "intimate"),
+        ("哈哈逗你玩，种子项目现在怎样", "playful"),
+        ("请排查种子项目配置", "task"),
+    ],
+)
+def test_gateway_context_mode_skips_conflict_or_old_diffusion_by_default(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+    query,
+    expected_mode,
+):
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        recalled_memory_budget=500,
+        related_memory_budget=1200,
+        inject_total_budget=2200,
+        current_inner_state_interval_rounds=0,
+    )
+    seed_id, _target_id = _create_moment_diffusion_pair(
+        bucket_mgr,
+        cfg,
+        relation_type="blocks",
+        target_name="旧版冲突链",
+        target_content="旧版冲突链原文-不应出现在普通语境 SKIPME。",
+        target_resolved=True,
+    )
+    cfg["memory_diffusion"] = {"max_hops": 1, "min_activation": 0.0, "top_k": 2}
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(seed_id, 0.99)],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": f"sess-skip-{expected_mode}",
+            },
+            json={"messages": [{"role": "user", "content": query}]},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    assert f"context_mode: {expected_mode}" in injected
+    assert "Recalled Memory" in injected
+    assert "旧版冲突链" not in injected
+    assert "SKIPME" not in injected
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_mode"),
+    [
+        ("我们吵架了怎么修复种子项目", "conflict_repair"),
+        ("连续性为什么会影响种子项目", "reflective_repair"),
+        ("我们吵架那段记忆和种子项目有什么关系", "memory_lookup"),
+    ],
+)
+def test_gateway_repair_or_explicit_query_keeps_caution_summary_only(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+    query,
+    expected_mode,
+):
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        recalled_memory_budget=500,
+        related_memory_budget=1200,
+        inject_total_budget=2200,
+        current_inner_state_interval_rounds=0,
+    )
+    seed_id, _target_id = _create_moment_diffusion_pair(
+        bucket_mgr,
+        cfg,
+        relation_type="blocks",
+        target_name="旧版冲突链",
+        target_content="旧版冲突链原文-允许摘要但不能泄出原文 KEEP_SUMMARY_ONLY。",
+        target_resolved=True,
+    )
+    cfg["memory_diffusion"] = {"max_hops": 1, "min_activation": 0.0, "top_k": 2}
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(seed_id, 0.99)],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": f"sess-allow-{expected_mode}",
+            },
+            json={"messages": [{"role": "user", "content": query}]},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    assert f"context_mode: {expected_mode}" in injected
+    assert "Diffused Memory" in injected
+    assert "旧版冲突链" in injected
+    assert "conflict_or_blocking_path" in injected
+    assert "KEEP_SUMMARY_ONLY" not in injected
 
 
 def test_gateway_relationship_identity_query_prefers_identity_over_intimacy(

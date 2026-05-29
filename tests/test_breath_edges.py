@@ -345,7 +345,7 @@ async def test_search_direct_moment_includes_neighbor_context_and_temperature(pa
 
 
 @pytest.mark.asyncio
-async def test_search_diffuses_memory_across_two_hops_with_context(patch_breath):
+async def test_search_related_memory_stays_one_hop_by_default(patch_breath):
     import server
 
     patch_breath(
@@ -366,8 +366,9 @@ async def test_search_diffuses_memory_across_two_hops_with_context(patch_breath)
     assert "=== 直接命中记忆 ===" in result
     assert "=== 联想浮现 ===" in result
     assert "[bucket_id:B]" in result
-    assert "[bucket_id:C]" in result
-    assert "C deeper emotional context" in result
+    assert "B related event context" in result
+    assert "[bucket_id:C]" not in result
+    assert "C deeper emotional context" not in result
 
 
 @pytest.mark.asyncio
@@ -387,7 +388,8 @@ async def test_diffused_memory_uses_compact_summary_not_full_json(patch_breath, 
     result = await server.breath(query="A", max_tokens=500)
     diffused_block = result.split("=== 联想浮现 ===", 1)[1]
 
-    assert "B related event context" in diffused_block
+    assert "B short summary" in diffused_block
+    assert "B related event context" not in diffused_block
     assert "core_facts" not in diffused_block
     assert "todos" not in diffused_block
     assert "keywords" not in diffused_block

@@ -1103,6 +1103,14 @@ def _compact_diffused_summary(bucket: dict, dehydrated: str, max_chars: int = 18
     return _clip_text(f"{title}: {context}" if context else title, max_chars)
 
 
+def _breath_one_hop_diffusion_options(top_k: int):
+    return replace(
+        diffusion_options_from_config(config),
+        max_hops=1,
+        top_k=max(0, int(top_k or 0)),
+    )
+
+
 def _summary_from_jsonish_text(text: str) -> str:
     if not text:
         return ""
@@ -1415,7 +1423,7 @@ async def _build_mcp_diffused_memory_block(
         seed_scores_for_buckets(source_buckets),
         edges,
         bucket_map,
-        options=diffusion_options_from_config(config),
+        options=_breath_one_hop_diffusion_options(len(source_ids) * limit_per_source),
         exclude_ids=source_set,
         node_salience=node_salience,
         node_resonance=node_resonance,
@@ -1792,7 +1800,7 @@ async def _build_mcp_moment_diffused_memory_block(
         _seed_scores_for_moments(seed_moments),
         edges,
         moment_map,
-        options=diffusion_options_from_config(config),
+        options=_breath_one_hop_diffusion_options(len(seed_moments) * limit_per_source),
         exclude_ids={moment["moment_id"] for moment in seed_moments if moment.get("moment_id")},
         query_text=query_text,
     )
@@ -2174,7 +2182,7 @@ async def breath(
 ) -> str:
     """读取记忆,不写入。
     调用方式: 新对话用 breath(is_session_start=True); 查过去用 breath(query="主题词"); 只读模型感受用 breath(domain="feel"); 只读悄悄话用 breath(domain="whisper")。
-    默认从本次命中的普通记忆沿持久化 memory_edges 做多跳联想浮现; embedding 相似边只是检索/图谱参考,不是可手写的记忆关系。
+    默认只从本次命中的普通记忆沿持久化 memory_edges 带一跳联想浮现; embedding 相似边只是检索/图谱参考,不是可手写的记忆关系。
     如果夜梦与当前语境共振,breath 会追加 ===== 梦境 ===== 块;梦只浮现一次。
     include_core/core_limit 控制 pinned/protected 核心准则数量; include_related=False 可关闭联想浮现块。
     """
@@ -2434,7 +2442,8 @@ async def breath(
         logger.warning(f"Failed to list buckets for moment recall / moment 召回列桶失败: {e}")
         all_buckets = matches
 
-    moments, grouped_moments, moment_edges = await _refresh_moment_graph(all_buckets)
+    bucket_map = {bucket["id"]: bucket for bucket in all_buckets if bucket.get("id")}
+    _, grouped_moments, _ = await _refresh_moment_graph(all_buckets)
     bucket_boosts = seed_scores_for_buckets(matches)
     moment_candidates = memory_moment_store.search_moments(
         query,
@@ -2477,7 +2486,6 @@ async def breath(
         related_header = "=== 联想浮现 ===\n"
         related_budget = max_tokens - token_used - count_tokens_approx(related_header)
         related_parts = []
-        related_used_bucket_ids = set(displayed_bucket_ids)
         secondary_moments = _secondary_direct_moments(
             query,
             returned_moments,
@@ -2493,16 +2501,23 @@ async def breath(
                 break
             related_parts.append(block)
             related_budget -= block_tokens
-            related_used_bucket_ids.add(str(moment.get("bucket_id") or ""))
 
-        related_block = await _build_mcp_moment_diffused_memory_block(
-            returned_moments,
-            moments,
-            moment_edges,
+        related_source_buckets = []
+        seen_source_bucket_ids = set()
+        for moment in returned_moments:
+            bucket_id = str(moment.get("bucket_id") or "")
+            bucket = bucket_map.get(bucket_id)
+            if not bucket or bucket_id in seen_source_bucket_ids:
+                continue
+            related_source_buckets.append(bucket)
+            seen_source_bucket_ids.add(bucket_id)
+
+        related_block = await _build_mcp_diffused_memory_block(
+            related_source_buckets,
+            all_buckets,
             max(0, related_budget),
             related_per_memory,
             edge_min_confidence,
-            exclude_bucket_ids=related_used_bucket_ids,
             query_text=query,
         )
         if related_block:

@@ -540,6 +540,8 @@ class GatewayService:
         favorite_memory = ""
         favorite_ids: list[str] = []
         related_memory = ""
+        context_mode = ""
+        persona_state: dict[str, Any] | None = None
         injected_ids: list[str] | None = None
 
         if is_new_user_turn:
@@ -548,6 +550,9 @@ class GatewayService:
                     session_id, current_user_query
                 )
                 persona_block = self.persona_engine.format_state_block(persona_state)
+            if persona_state is None:
+                persona_state = self._get_persona_state_for_context_mode(session_id)
+            context_mode = self._classify_context_mode(current_user_query, persona_state)
             if self._should_inject_interval(session_id, self.core_memory_interval_rounds):
                 core_memory = await self._build_core_memory_block(all_buckets)
             recent_context = await self._build_recent_context_block(all_buckets)
@@ -578,6 +583,7 @@ class GatewayService:
                 all_moments,
                 moment_edges,
                 current_user_query,
+                context_mode=context_mode,
             )
             injected_ids = list(
                 dict.fromkeys(
@@ -603,6 +609,7 @@ class GatewayService:
             relationship_weather=relationship_weather,
             favorite_memory=favorite_memory,
             related_memory=related_memory,
+            context_mode=context_mode,
         )
 
         forward_payload = deepcopy(payload)
@@ -625,6 +632,7 @@ class GatewayService:
                 recalled_memory=recalled_memory,
                 related_memory=related_memory,
                 favorite_ids=favorite_ids,
+                context_mode=context_mode,
             )
         return forward_payload, injected_ids
 
@@ -1860,6 +1868,88 @@ class GatewayService:
         next_round = self.state_store.get_current_round(session_id) + 1
         return next_round == 1 or next_round % interval_rounds == 0
 
+    def _get_persona_state_for_context_mode(self, session_id: str) -> dict[str, Any]:
+        getter = getattr(self.persona_engine, "get_current_state", None)
+        if not callable(getter):
+            return {}
+        try:
+            state = getter(session_id)
+        except Exception as exc:
+            logger.warning("Gateway context mode state lookup failed | session=%s error=%s", session_id, exc)
+            return {}
+        return state if isinstance(state, dict) else {}
+
+    def _classify_context_mode(self, query: str, persona_state: dict[str, Any] | None = None) -> str:
+        text = " ".join(str(query or "").lower().split())
+        state = persona_state if isinstance(persona_state, dict) else {}
+        affect = state.get("affect", {}) if isinstance(state.get("affect"), dict) else {}
+        relationship = state.get("relationship", {}) if isinstance(state.get("relationship"), dict) else {}
+        defensiveness = self._safe_float(relationship.get("defensiveness"), 0.0)
+        security = self._safe_float(affect.get("security"), 0.5)
+        tenderness = self._safe_float(affect.get("tenderness"), 0.0)
+        longing = self._safe_float(affect.get("longing"), 0.0)
+
+        conflict_terms = (
+            "冲突", "吵架", "争吵", "矛盾", "误会", "生气", "闹别扭",
+            "conflict", "fight", "argument", "angry", "upset",
+        )
+        repair_terms = (
+            "修复", "和好", "道歉", "解释", "哪里不对", "为什么", "怎么会",
+            "repair", "resolve", "apolog", "what happened", "why did",
+        )
+        reflective_terms = (
+            "反思", "想想之前", "之前怎么", "旧版本", "旧版", "旧链", "旧窗口",
+            "恢复", "找回", "连续性", "过去那段", "reflect", "old version",
+            "old path", "previous version", "continuity",
+        )
+        memory_terms = (
+            "记忆", "记得", "想起", "回忆", "查一下", "找一下", "哪段",
+            "以前", "过去", "remember", "recall", "memory", "look up",
+        )
+        intimate_terms = (
+            "今天是雨天", "亲亲", "抱抱", "抱我", "吻", "亲密", "想你", "爱你",
+            "老婆", "宝宝", "亲爱的", "身体", "欲望", "intimate", "kiss",
+            "hug", "miss you", "love you",
+        )
+        playful_terms = (
+            "哈哈", "嘿嘿", "逗你", "调戏", "开玩笑", "撒娇", "坏东西",
+            "joke", "playful", "tease", "flirt",
+        )
+        task_terms = (
+            "代码", "bug", "报错", "测试", "部署", "接口", "配置", "文件", "分支",
+            "实现", "排查", "工作", "需求", "pytest", "python", "node", "gateway",
+            "test", "debug", "deploy", "config", "branch",
+        )
+
+        has_conflict = self._text_has_any(text, conflict_terms)
+        has_repair = self._text_has_any(text, repair_terms)
+        if has_conflict and (has_repair or defensiveness >= 0.35 or security <= 0.4):
+            return "conflict_repair"
+        if self._text_has_any(text, reflective_terms):
+            return "reflective_repair"
+        if self._text_has_any(text, memory_terms):
+            return "memory_lookup"
+        if self._text_has_any(text, intimate_terms) or (
+            tenderness >= 0.78 and longing >= 0.45 and self._text_has_any(text, ("你", "我们", "haven", "小雨"))
+        ):
+            return "intimate"
+        if self._text_has_any(text, playful_terms):
+            return "playful"
+        if self._text_has_any(text, task_terms):
+            return "task"
+        return "task"
+
+    @staticmethod
+    def _text_has_any(text: str, terms: tuple[str, ...]) -> bool:
+        return any(term and term in text for term in terms)
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
     def _query_requests_favorite_memory(self, query: str) -> bool:
         text = (query or "").strip().lower()
         if not text:
@@ -2364,6 +2454,8 @@ class GatewayService:
         moments: list[dict],
         edges: list[dict],
         query_text: str = "",
+        *,
+        context_mode: str = "",
     ) -> str:
         if self.related_memory_budget <= 0 or not seed_moments:
             return ""
@@ -2371,6 +2463,7 @@ class GatewayService:
         remaining = self.related_memory_budget
         parts = []
         related_max_chars = 90 if self._query_wants_body_chain(query_text) else 180
+        allow_caution_paths = self._allows_caution_diffusion(query_text, context_mode)
         used_bucket_ids = {
             str(moment.get("bucket_id") or "")
             for moment in seed_moments
@@ -2378,7 +2471,9 @@ class GatewayService:
         }
 
         for moment in self._secondary_direct_moments(query_text, moment_candidates, used_bucket_ids):
-            block = self._format_moment_line(
+            if self._moment_is_caution_or_old(moment) and not allow_caution_paths:
+                continue
+            block = self._format_diffused_moment_line(
                 moment,
                 max_chars=related_max_chars,
                 note="related_query_hit",
@@ -2428,8 +2523,17 @@ class GatewayService:
                     moment = replacement
                     if moment.get("moment_id") in seen_moment_ids:
                         continue
-            note = "conflict_or_blocking_path" if path_has_caution(hit.best_path) else "background_association_not_current_fact"
-            block = self._format_moment_line(moment, max_chars=related_max_chars, note=note)
+            path = self._select_diffusion_path_for_context(hit.paths, moment_map, allow_caution_paths)
+            if path is None:
+                continue
+            note = self._diffused_path_note(path, moment_map)
+            block = self._format_diffused_moment_line(
+                moment,
+                max_chars=related_max_chars,
+                note=note,
+                path=path,
+                moment_map=moment_map,
+            )
             tokens = count_tokens_approx(block)
             if tokens > remaining and parts:
                 break
@@ -2468,6 +2572,144 @@ class GatewayService:
             hidden.sort(key=lambda moment: self._recall_rank(query, moment))
             return hidden[:5]
         return hidden[: max(0, min(2, self.inject_max_cards))]
+
+    def _allows_caution_diffusion(self, query: str, context_mode: str) -> bool:
+        if str(context_mode or "").strip() in {"reflective_repair", "conflict_repair"}:
+            return True
+        return self._query_explicitly_requests_caution_memory(query)
+
+    def _query_explicitly_requests_caution_memory(self, query: str) -> bool:
+        text = " ".join(str(query or "").lower().split())
+        return self._text_has_any(
+            text,
+            (
+                "冲突", "吵架", "争吵", "矛盾", "误会", "旧版本", "旧版", "旧链",
+                "旧窗口", "已解决", "过期", "归档", "conflict", "fight",
+                "argument", "old version", "old path", "old chain", "resolved",
+                "archived", "deprecated", "obsolete",
+            ),
+        )
+
+    def _select_diffusion_path_for_context(
+        self,
+        paths: tuple[Any, ...],
+        moment_map: dict[str, dict],
+        allow_caution_paths: bool,
+    ) -> Any | None:
+        for path in paths or ():
+            if allow_caution_paths or not self._diffusion_path_is_caution_or_old(path, moment_map):
+                return path
+        return None
+
+    def _diffusion_path_is_caution_or_old(self, path: Any, moment_map: dict[str, dict]) -> bool:
+        return path_has_caution(path) or self._diffusion_path_has_old_moment(path, moment_map)
+
+    def _diffusion_path_has_old_moment(self, path: Any, moment_map: dict[str, dict]) -> bool:
+        return any(
+            self._moment_is_caution_or_old(moment_map.get(str(node_id)))
+            for node_id in getattr(path, "nodes", ()) or ()
+        )
+
+    def _moment_is_caution_or_old(self, moment: dict | None) -> bool:
+        if not isinstance(moment, dict):
+            return False
+        meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+        if meta.get("resolved") or meta.get("digested") or meta.get("bucket_resolved") or meta.get("bucket_digested"):
+            return True
+        if str(meta.get("type") or meta.get("bucket_type") or "").lower() == "archived":
+            return True
+        haystack = " ".join(
+            [
+                str(meta.get("name") or meta.get("bucket_name") or ""),
+                " ".join(str(item) for item in meta.get("tags", []) or meta.get("bucket_tags", []) or []),
+                " ".join(str(item) for item in meta.get("domain", []) or meta.get("bucket_domain", []) or []),
+                str(moment.get("text") or ""),
+            ]
+        ).lower()
+        return self._text_has_any(
+            haystack,
+            (
+                "冲突", "吵架", "争吵", "矛盾", "误会", "旧版本", "旧版", "旧链",
+                "旧窗口", "已解决", "过期", "归档", "conflict", "fight",
+                "argument", "old version", "old path", "old chain", "resolved",
+                "archived", "deprecated", "obsolete",
+            ),
+        )
+
+    def _diffused_path_note(self, path: Any, moment_map: dict[str, dict]) -> str:
+        if path_has_caution(path):
+            return "conflict_or_blocking_path"
+        if self._diffusion_path_has_old_moment(path, moment_map):
+            return "old_or_resolved_path"
+        return "background_association_not_current_fact"
+
+    def _format_diffused_moment_line(
+        self,
+        moment: dict,
+        *,
+        max_chars: int,
+        note: str,
+        path: Any | None = None,
+        moment_map: dict[str, dict] | None = None,
+    ) -> str:
+        summary = self._diffused_moment_summary(
+            moment,
+            max_chars=max_chars,
+            path=path,
+            moment_map=moment_map or {},
+        )
+        suffix = f" ({note})" if note else ""
+        return (
+            f"- [bucket_id:{moment.get('bucket_id') or ''}] [moment_id:{moment.get('moment_id') or ''}] "
+            f"{summary}{suffix}"
+        )
+
+    def _diffused_moment_summary(
+        self,
+        moment: dict,
+        *,
+        max_chars: int,
+        path: Any | None = None,
+        moment_map: dict[str, dict],
+    ) -> str:
+        label = MOMENT_SECTION_LABELS.get(str(moment.get("section") or ""), str(moment.get("section") or "moment"))
+        title = self._moment_bucket_title(moment) or str(moment.get("bucket_id") or "memory")
+        status = self._moment_status_label(moment)
+        parts = [f"{label} summary from {title}"]
+        if status:
+            parts.append(status)
+        path_summary = self._moment_path_summary(path, moment_map) if path is not None else ""
+        if path_summary:
+            parts.append(f"path {path_summary}")
+        return self._clip_text("; ".join(parts), max_chars)
+
+    def _moment_status_label(self, moment: dict) -> str:
+        meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+        if meta.get("resolved") or meta.get("bucket_resolved"):
+            return "resolved"
+        if meta.get("digested") or meta.get("bucket_digested"):
+            return "digested"
+        if str(meta.get("type") or meta.get("bucket_type") or "").lower() == "archived":
+            return "archived"
+        return ""
+
+    def _moment_path_summary(self, path: Any, moment_map: dict[str, dict]) -> str:
+        steps = getattr(path, "steps", ()) or ()
+        nodes = tuple(str(node_id) for node_id in (getattr(path, "nodes", ()) or ()))
+        if not nodes:
+            return ""
+        labels = [self._moment_node_label(moment_map.get(nodes[0]), nodes[0])]
+        for step in steps:
+            target_id = str(getattr(step, "target", "") or "")
+            relation = str(getattr(step, "relation_type", "") or "relates_to")
+            arrow = "<-" if getattr(step, "direction", "") == "incoming" else "->"
+            labels.append(f"{arrow}{relation}-> {self._moment_node_label(moment_map.get(target_id), target_id)}")
+        return self._clip_text(" ".join(labels), 140)
+
+    def _moment_node_label(self, moment: dict | None, fallback_id: str) -> str:
+        if isinstance(moment, dict):
+            return self._clip_text(self._moment_bucket_title(moment) or str(moment.get("bucket_id") or fallback_id), 48)
+        return self._clip_text(fallback_id, 48)
 
     def _moment_diffusion_map(self, moments: list[dict]) -> dict[str, dict]:
         mapped = {}
@@ -2917,6 +3159,7 @@ class GatewayService:
         relationship_weather: str,
         favorite_memory: str,
         related_memory: str,
+        context_mode: str = "",
     ) -> tuple[str, str]:
         stable_sections = []
         if core_memory.strip():
@@ -2938,6 +3181,7 @@ class GatewayService:
                 recent_context,
                 recalled_memory,
                 related_memory,
+                context_mode,
             ]
         ):
             dynamic_sections = [
@@ -2949,6 +3193,7 @@ class GatewayService:
                     dynamic_sections.extend(["", title, content])
 
             add_section("Recent Context", recent_context)
+            add_section("Context Mode", f"context_mode: {context_mode}" if context_mode.strip() else "")
             add_section("Recalled Memory", recalled_memory)
             add_section("Diffused Memory", related_memory)
             if persona_block.strip():
@@ -2978,6 +3223,7 @@ class GatewayService:
         recalled_memory: str,
         related_memory: str,
         favorite_ids: list[str],
+        context_mode: str = "",
     ) -> dict[str, Any]:
         recalled_moment_ids = [
             str(moment.get("moment_id") or "")
@@ -3001,6 +3247,7 @@ class GatewayService:
             "diffused_bucket_ids": diffused_bucket_ids,
             "recalled_moment_ids": recalled_moment_ids,
             "diffused_moment_ids": self._extract_moment_ids_from_context(related_memory),
+            "context_mode": context_mode,
             "recalled_memory": recalled_memory,
             "diffused_memory": related_memory,
             "stable_context": stable_context,

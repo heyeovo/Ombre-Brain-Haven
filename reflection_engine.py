@@ -44,7 +44,8 @@ CLASSIFY_PROMPT = """你是 Ombre-Brain 的记忆关系整理器。
 
 规则：
 - tags 最多 5 个，只用确实匹配的标签。
-- relation_type 只能用 triggers / causes / updates / contradicts / supports / promises / blocks / belongs_to / emotional_echo / relates_to。
+- relation_type 只能用 triggers / causes / precedes / context_of / same_event / updates / contradicts / supports / promises / blocks / belongs_to / emotional_echo / relates_to。
+- same_event 用于同一事件、同一场景或同一句暗号的两条记忆；context_of 用于候选旧记忆给新记忆提供前情；precedes 用于候选旧记忆在时间上早于新记忆。
 - edges 最多 3 条，target_memory_id 必须来自候选旧记忆。
 - confidence 表示这次判断有多可靠。
 - affect_anchor 只给重要且有情绪温度的记忆。普通技术进度、部署日志、路径、端口、报错、临时待办不要加。
@@ -298,10 +299,15 @@ class ReflectionEngine:
             relation_type = str(edge.get("relation_type") or "relates_to").strip()
             if relation_type not in RELATION_TYPES:
                 relation_type = "relates_to"
+            source = bucket_id
+            edge_target = target
+            if relation_type in {"context_of", "precedes"}:
+                source = target
+                edge_target = bucket_id
             edges.append(
                 {
-                    "source": bucket_id,
-                    "target": target,
+                    "source": source,
+                    "target": edge_target,
                     "relation_type": relation_type,
                     "confidence": self._clamp(edge.get("confidence", confidence)),
                     "reason": str(edge.get("reason") or "").strip(),

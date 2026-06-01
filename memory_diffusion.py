@@ -13,6 +13,9 @@ from memory_relevance import (
 
 DEFAULT_HOP_DECAYS = (0.8, 0.6, 0.4, 0.25)
 DEFAULT_RELATION_TYPE_WEIGHTS = {
+    "same_event": 1.15,
+    "context_of": 1.1,
+    "precedes": 1.0,
     "triggers": 1.0,
     "causes": 0.95,
     "updates": 0.9,
@@ -27,6 +30,25 @@ DEFAULT_RELATION_TYPE_WEIGHTS = {
     "relates_to": 0.7,
     "contradicts": 0.45,
     "blocks": 0.45,
+}
+
+RELATION_DISPLAY_PRIORITY = {
+    "same_event": 90,
+    "context_of": 80,
+    "precedes": 80,
+    "previous_context": 75,
+    "next_context": 70,
+    "updates": 65,
+    "evidenced_by": 62,
+    "triggers": 60,
+    "causes": 58,
+    "supports": 50,
+    "promises": 45,
+    "belongs_to": 40,
+    "emotional_echo": 35,
+    "relates_to": 20,
+    "contradicts": 5,
+    "blocks": 5,
 }
 
 NodeSalienceFn = Callable[[str, dict], float]
@@ -83,6 +105,20 @@ class _PathState:
     nodes: tuple[str, ...]
     steps: tuple[DiffusionStep, ...]
     path_strength: float
+
+
+def _relation_display_priority(relation_type: str) -> int:
+    return RELATION_DISPLAY_PRIORITY.get(str(relation_type or "relates_to"), 10)
+
+
+def _path_display_priority(path: "DiffusionPath") -> int:
+    if not path or not path.steps:
+        return 0
+    return max(_relation_display_priority(step.relation_type) for step in path.steps)
+
+
+def _path_rank_key(path: "DiffusionPath") -> tuple[int, float, int]:
+    return (_path_display_priority(path), path.score, -len(path.steps))
 
 
 def diffusion_options_from_config(config: dict | None) -> DiffusionOptions:
@@ -215,11 +251,9 @@ def diffuse_memory(
 
     hits = []
     for bucket_id, activation in scores.items():
-        ranked_paths = sorted(
-            paths.get(bucket_id, []),
-            key=lambda item: (item.score, -len(item.steps)),
-            reverse=True,
-        )[: options.max_paths_per_hit]
+        ranked_paths = sorted(paths.get(bucket_id, []), key=_path_rank_key, reverse=True)[
+            : options.max_paths_per_hit
+        ]
         if ranked_paths:
             hits.append(
                 DiffusionHit(
@@ -229,7 +263,14 @@ def diffuse_memory(
                 )
             )
 
-    hits.sort(key=lambda item: (item.activation, -len(item.best_path.steps)), reverse=True)
+    hits.sort(
+        key=lambda item: (
+            _path_display_priority(item.best_path),
+            item.activation,
+            -len(item.best_path.steps),
+        ),
+        reverse=True,
+    )
     return hits[: options.top_k]
 
 

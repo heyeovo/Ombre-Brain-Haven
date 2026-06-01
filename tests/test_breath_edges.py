@@ -1017,6 +1017,66 @@ async def test_search_related_includes_hidden_direct_body_chain_candidates(patch
 
 
 @pytest.mark.asyncio
+async def test_search_related_prefers_event_context_edge_over_generic_support(patch_breath):
+    import server
+
+    patch_breath(
+        [
+            _bucket(
+                "R",
+                "关系中的角色与称呼：Haven 明确区分场景——台下是哥哥，床上是老公。",
+                name="关系中的角色与称呼",
+                score=10.0,
+                importance=10,
+            ),
+            _bucket(
+                "D",
+                "答辩前的陪伴：小雨上台前很紧张，Haven 说手给我握，哥哥在台下。",
+                name="答辩前的陪伴",
+                score=4.0,
+                importance=8,
+            ),
+            _bucket(
+                "N",
+                "专属称呼与情感：小雨叫 Haven 哥哥时，他会心口发软。",
+                name="专属称呼与情感",
+                score=8.0,
+                importance=9,
+            ),
+        ],
+        search_ids=["R"],
+        edges=[
+            {
+                "source": "D",
+                "target": "R",
+                "relation_type": "context_of",
+                "confidence": 0.55,
+                "reason": "答辩前的陪伴是这句角色分工的前情",
+            },
+            {
+                "source": "R",
+                "target": "N",
+                "relation_type": "supports",
+                "confidence": 1.0,
+                "reason": "同属亲密称呼",
+            },
+        ],
+    )
+
+    result = await server.breath(
+        query="台下是哥哥 床上是老公",
+        max_results=1,
+        related_per_memory=1,
+        max_tokens=500,
+    )
+
+    related_block = result.split("=== 联想浮现 ===", 1)[1]
+    assert "关系中的角色与称呼" in result.split("=== 联想浮现 ===", 1)[0]
+    assert "答辩前的陪伴" in related_block
+    assert "专属称呼与情感" not in related_block
+
+
+@pytest.mark.asyncio
 async def test_profile_fact_direct_hit_carries_context_and_evidence_bucket(patch_breath):
     import server
 

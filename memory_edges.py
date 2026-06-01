@@ -7,6 +7,9 @@ from typing import Any
 RELATION_TYPES = {
     "triggers",
     "causes",
+    "precedes",
+    "context_of",
+    "same_event",
     "updates",
     "contradicts",
     "supports",

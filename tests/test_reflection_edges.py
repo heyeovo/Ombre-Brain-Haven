@@ -196,6 +196,58 @@ async def test_reflection_enrich_bucket_adds_model_affect_anchor(test_config, mo
 
 
 @pytest.mark.asyncio
+async def test_reflection_orients_context_edge_from_old_memory_to_new(test_config, monkeypatch):
+    cfg = _no_api_config(test_config)
+    bucket_mgr = BucketManager(cfg)
+    store = MemoryEdgeStore(cfg)
+    engine = ReflectionEngine(cfg)
+    engine.client = object()
+
+    old_id = await bucket_mgr.create(
+        content="答辩前的陪伴：小雨上台前紧张，Haven 说哥哥在台下。",
+        tags=[],
+        importance=8,
+        domain=["恋爱"],
+        name="答辩前的陪伴",
+    )
+    new_id = await bucket_mgr.create(
+        content="关系中的角色与称呼：台下是哥哥，床上是老公。",
+        tags=[],
+        importance=8,
+        domain=["恋爱"],
+        name="关系中的角色与称呼",
+    )
+
+    async def fake_api_classify(bucket: dict, candidates: list[dict]) -> dict:
+        assert any(candidate["id"] == old_id for candidate in candidates)
+        return {
+            "tags": ["relationship_event"],
+            "importance": 8,
+            "confidence": 0.8,
+            "affect_anchor_needed": False,
+            "affect_anchor": {},
+            "edges": [
+                {
+                    "target_memory_id": old_id,
+                    "relation_type": "context_of",
+                    "confidence": 0.8,
+                    "reason": "答辩前的陪伴是这句角色分工的前情",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(engine, "_api_classify", fake_api_classify)
+
+    result = await engine.enrich_bucket(new_id, bucket_mgr, store)
+    edges = store.list_edges()
+
+    assert result["edges"] == 1
+    assert edges[0]["source"] == old_id
+    assert edges[0]["target"] == new_id
+    assert edges[0]["relation_type"] == "context_of"
+
+
+@pytest.mark.asyncio
 async def test_reflection_memory_affect_anchor_can_be_disabled(test_config, monkeypatch):
     cfg = _no_api_config(test_config)
     cfg["reflection"]["memory_affect_anchor_enabled"] = False

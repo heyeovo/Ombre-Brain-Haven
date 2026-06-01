@@ -301,6 +301,9 @@ memory_diffusion:
   include_incoming: true
   max_paths_per_hit: 3
   relation_type_weights:
+    same_event: 1.15
+    context_of: 1.1
+    precedes: 1.0
     triggers: 1.0
     causes: 0.95
     updates: 0.9

@@ -68,6 +68,24 @@ def test_diffusion_accumulates_multiple_paths_to_same_node():
     assert len(hits[0].paths) == 2
 
 
+def test_diffusion_prefers_narrative_context_edge_for_display():
+    bucket_map = {bucket_id: _bucket(bucket_id) for bucket_id in ["A", "B", "C"]}
+    edges = [
+        {"source": "A", "target": "B", "relation_type": "supports", "confidence": 1.0},
+        {"source": "C", "target": "A", "relation_type": "context_of", "confidence": 0.55},
+    ]
+
+    hits = diffuse_memory(
+        {"A": 1.0},
+        edges,
+        bucket_map,
+        options=DiffusionOptions(max_hops=1, top_k=1, min_activation=0.0),
+    )
+
+    assert hits[0].bucket_id == "C"
+    assert hits[0].best_path.steps[0].relation_type == "context_of"
+
+
 def test_diffusion_uses_external_node_salience():
     bucket_map = {bucket_id: _bucket(bucket_id) for bucket_id in ["A", "B", "C"]}
     edges = [

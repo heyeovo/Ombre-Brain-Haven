@@ -3463,6 +3463,8 @@ class GatewayService:
         extracted = self._summary_from_jsonish_text(raw)
         if extracted:
             return self._clip_text(extracted, max_chars)
+        if raw:
+            return self._clip_text(raw, max_chars)
 
         meta = bucket.get("metadata", {}) or {}
         title = str(meta.get("name") or bucket.get("id") or "memory").strip()

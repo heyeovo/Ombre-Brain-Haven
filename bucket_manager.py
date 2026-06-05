@@ -26,6 +26,7 @@
 # ============================================================
 
 import os
+import re
 import math
 import logging
 import shutil
@@ -284,9 +285,9 @@ class BucketManager:
             post["model_valence"] = max(0.0, min(1.0, float(kwargs["model_valence"])))
 
         # --- Auto-refresh activation time / 自动刷新激活时间 ---
-        # 只有内容变更时才刷新激活时间
-        if "content" in kwargs:
-            post["last_active"] = now_iso()
+        # 修改：内容变更也不会刷新激活时间
+        # if "content" in kwargs:
+        #    post["last_active"] = now_iso()
 
         try:
             with open(file_path, "w", encoding="utf-8") as f:
@@ -456,6 +457,14 @@ class BucketManager:
         if not query or not query.strip():
             return []
 
+    # --- Bucket ID direct lookup / 桶ID直接读取，跳过语义搜索 ---
+        if re.fullmatch(r"[0-9a-f]{12}", query.strip()):
+            bucket = await self.get(query.strip())
+            if bucket:
+                bucket["score"] = 100.0
+                return [bucket]
+            return []
+    
         limit = limit or self.max_results
         all_buckets = await self.list_all(include_archive=False)
 
@@ -570,7 +579,7 @@ class BucketManager:
             )
             * 2
         )
-        content_score = fuzz.partial_ratio(query, bucket.get("content", "")[:1000]) * self.content_weight
+        content_score = fuzz.partial_ratio(query, bucket.get("content", "")[:3000]) * self.content_weight
 
         return (name_score + domain_score + tag_score + content_score) / (100 * (3 + 2.5 + 2 + self.content_weight))
 

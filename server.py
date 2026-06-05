@@ -685,7 +685,7 @@ async def breath(
     try:
         matches = await bucket_mgr.search(
             query,
-            limit=max(max_results, 20),
+            limit=max(max_results),
             domain_filter=domain_filter,
             query_valence=q_valence,
             query_arousal=q_arousal,
@@ -700,19 +700,27 @@ async def breath(
 
     # --- Vector similarity channel: find semantically related buckets ---
     # --- 向量相似度通道：找到语义相关的桶 ---
-    matched_ids = {b["id"] for b in matches}
-    try:
-        vector_results = await embedding_engine.search_similar(query, top_k=max(max_results, 20))
-        for bucket_id, sim_score in vector_results:
-            if bucket_id not in matched_ids and sim_score > 0.5:
-                bucket = await bucket_mgr.get(bucket_id)
-                if bucket:
-                    bucket["score"] = round(sim_score * 100, 2)
-                    bucket["vector_match"] = True
-                    matches.append(bucket)
-                    matched_ids.add(bucket_id)
-    except Exception as e:
-        logger.warning(f"Vector search failed, using keyword only / 向量搜索失败: {e}")
+    # 关键词有结果就跳过语义
+    if len(matches) == 0:
+        matched_ids = {b["id"] for b in matches}
+        try:
+            vector_results = await embedding_engine.search_similar(
+                query, top_k=max_results
+            )
+            for bucket_id, sim_score in vector_results:
+                if bucket_id not in matched_ids and sim_score > 0.7:
+                    bucket = await bucket_mgr.get(bucket_id)
+                    if bucket:
+                        meta = bucket.get("metadata", {})
+                        if (meta.get("type") == "archived" 
+                                or meta.get("digested", False)):
+                            continue
+                        bucket["score"] = round(sim_score * 100, 2)
+                        bucket["vector_match"] = True
+                        matches.append(bucket)
+                        matched_ids.add(bucket_id)
+        except Exception as e:
+            logger.warning(f"Vector search failed / 向量搜索失败: {e}")
 
     results = []
     token_used = 0
@@ -779,6 +787,8 @@ async def breath(
                 if b["metadata"].get("pinned") or b["metadata"].get("protected"):
                     continue
                 if b["metadata"].get("type") in ("permanent", "feel"):
+                    continue
+                if b["metadata"].get("digested", False):
                     continue
                 try:
                     created = datetime.fromisoformat(str(b["metadata"].get("created", "")))

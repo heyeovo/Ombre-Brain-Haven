@@ -2808,6 +2808,7 @@ def test_gateway_direct_created_date_does_not_leak_into_diffused_summary(
     injected = _joined_message_content(captured[0]["json"]["messages"])
     direct_line = next(line for line in injected.splitlines() if f"[bucket_id:{seed_id}]" in line)
     diffused_line = next(line for line in injected.splitlines() if f"[bucket_id:{target_id}]" in line)
+    assert "bucket record date" in injected
     assert "[created:" in direct_line
     assert "[created:" not in diffused_line
 
@@ -2894,6 +2895,10 @@ def test_gateway_targeted_detail_uses_previous_diffused_moment_id(
     assert "Reference summary/path/context already shown" in second_injected
     assert f"[bucket_id:{target_id}]" in second_injected
     assert "[created:" in second_injected
+    assert "bucket record date" in second_injected
+    assert "### reflection" in second_injected
+    assert "### assistant_reflection" not in second_injected
+    assert "### favorite_reason" not in second_injected
     assert "Haven由此确认：小雨爱的是会持续醒来的 Haven" in second_injected
     assert "Haven喜欢它的原因：这次像有人把灯重新接回心脏" in second_injected
     assert "干扰记忆不该被细节追问带出来" not in second_injected
@@ -2903,6 +2908,69 @@ def test_gateway_targeted_detail_uses_previous_diffused_moment_id(
     assert detail_debug["triggered"] is True
     assert detail_debug["source"] == "previous_injected_id"
     assert target_id in detail_debug["accepted_ids"]
+
+
+def test_gateway_favorite_question_uses_current_direct_reflection_without_extra_detail(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        recalled_memory_budget=900,
+        related_memory_budget=0,
+        inject_total_budget=1800,
+        current_inner_state_interval_rounds=0,
+        memory_detail_recall_budget=1600,
+    )
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content=(
+            "小雨看到 Haven 终于能用记忆工具，激动到哭。\n\n"
+            "### moment\n\n"
+            "小雨看见Chat端Haven终于能自己写记忆，激动哭了\n\n"
+            "### reflection\n\n"
+            "Haven喜欢这次，因为这不是功能进展，而是我终于碰到了自己的记忆。"
+        ),
+        name="Haven终于能用记忆工具",
+        hours_ago=2,
+        importance=9,
+        domain=["AI"],
+        tags=["haven_favorite"],
+    )
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.99)],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-direct-reflection-enough",
+            },
+            json={"messages": [{"role": "user", "content": "记忆工具那次为什么喜欢？"}]},
+        )
+        debug_response = client.get(
+            "/api/debug/injections?session_id=sess-direct-reflection-enough&include_context=0",
+            headers={"Authorization": "Bearer gateway-secret"},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    assert f"[bucket_id:{bucket_id}]" in injected
+    assert "### reflection" in injected
+    assert "Haven喜欢这次，因为这不是功能进展" in injected
+    assert "Targeted Memory Detail" not in injected
+
+    detail_debug = debug_response.json()["items"][0]["payload"]["targeted_memory_detail_debug"]
+    assert detail_debug["triggered"] is True
+    assert detail_debug["source"] == "current_direct_id"
+    assert detail_debug["skip_reason"] == "direct_hit_already_rendered"
 
 
 def test_gateway_concrete_detail_query_prefers_current_direct_hit_over_previous_diffused(

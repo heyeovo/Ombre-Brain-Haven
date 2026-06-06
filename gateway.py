@@ -2046,13 +2046,35 @@ class GatewayService:
     @staticmethod
     def _current_direct_hit_needs_targeted_detail(recalled_memory: str, intent: dict[str, bool]) -> bool:
         if intent.get("favorite_reason"):
-            return True
+            rendered = str(recalled_memory or "").lower()
+            if "bucket_window" in rendered or "bucket_capsule" in rendered:
+                return True
+            return not GatewayService._rendered_has_reflection_detail(rendered)
         if intent.get("reflection"):
             rendered = str(recalled_memory or "").lower()
             if "bucket_window" in rendered or "bucket_capsule" in rendered:
                 return True
-            return "reflection" not in rendered and "由此确认" not in rendered and "明白" not in rendered
+            return not GatewayService._rendered_has_reflection_detail(rendered)
         return False
+
+    @staticmethod
+    def _rendered_has_reflection_detail(rendered: str) -> bool:
+        text = str(rendered or "").lower()
+        return any(
+            marker in text
+            for marker in (
+                "### reflection",
+                " reflection ",
+                "favorite_reason",
+                "favorite reason",
+                "喜欢它的原因",
+                "喜欢的原因",
+                "由此确认",
+                "因此确认",
+                "明白",
+                "理解",
+            )
+        )
 
     def _recent_memory_reference_context(
         self,
@@ -2134,10 +2156,8 @@ class GatewayService:
 
         if selected or intent.get("raw"):
             add_section("### moment", ("body", "moment", "fact", "original", "evidence_context", "context"), 2)
-        if intent.get("reflection"):
-            add_section("### assistant_reflection", ("reflection",), 3)
-        if intent.get("favorite_reason"):
-            add_section("### favorite_reason", ("favorite_reason",), 3)
+        if intent.get("reflection") or intent.get("favorite_reason"):
+            add_section("### reflection", ("reflection", "favorite_reason"), 3)
         if intent.get("raw") or intent.get("reflection") or intent.get("favorite_reason"):
             add_section("### followup", ("followup", "comment"), 2)
         return "\n".join(lines).strip()
@@ -6023,6 +6043,11 @@ class GatewayService:
 
             add_section("Recent Context", recent_context)
             add_section("Context Mode", f"context_mode: {context_mode}" if context_mode.strip() else "")
+            if "[created:" in str(recalled_memory or "") or "[created:" in str(targeted_memory_detail or ""):
+                add_section(
+                    "Date Boundary",
+                    "[created:YYYY-MM-DD] is the bucket record date, not necessarily the event date; prefer event dates in the memory text.",
+                )
             add_section("Recalled Memory", recalled_memory)
             add_section("Targeted Memory Detail", targeted_memory_detail)
             add_section("Diffused Memory", related_memory)

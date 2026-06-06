@@ -1239,7 +1239,7 @@ async def dream() -> str:
             f"主题:{domains} V{val:.1f}/A{aro:.1f} "
             f"创建:{created}\n"
             f"ID: {b['id']}\n"
-            f"{strip_wikilinks(b['content'][:500])}"
+            f"{strip_wikilinks(b['content'][:2000])}"
         )
 
     header = (
@@ -1422,7 +1422,8 @@ async def api_search(request):
     
     try:
         # 2. 将 include_archive 传入 search 方法
-        matches = await bucket_mgr.search(query, limit=10, include_archive=include_archive)
+        limit = int(request.query_params.get("limit", 50))
+        matches = await bucket_mgr.search(query, limit=limit, include_archive=include_archive)
         
         result = []
         for b in matches:

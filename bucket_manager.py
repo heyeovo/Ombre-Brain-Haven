@@ -504,7 +504,7 @@ class BucketManager:
 
         # --- Layer 1.5: embedding pre-filter (optional, reduces multi-dim ranking set) ---
         # --- 第1.5层：embedding 预筛（可选，缩小精排候选集）---
-        if self.embedding_engine and self.embedding_engine.enabled:
+        if self.embedding_engine and self.embedding_engine.enabled and not include_archive:
             try:
                 vector_results = await self.embedding_engine.search_similar(query, top_k=50)
                 if vector_results:

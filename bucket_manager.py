@@ -376,6 +376,21 @@ class BucketManager:
         except Exception as e:
             logger.warning(f"Failed to touch bucket / 触碰桶失败: {bucket_id}: {e}")
 
+    async def soft_touch(self, bucket_id: str) -> None:
+        """Search hit: refresh last_active + small activation bump, no ripple."""
+        file_path = self._find_bucket_file(bucket_id)
+        if not file_path:
+            return
+        try:
+            post = frontmatter.load(file_path)
+            post["last_active"] = now_iso()                          # 更新时间
+            current_count = post.get("activation_count", 1)
+            post["activation_count"] = round(current_count + 0.3, 1)  # 轻量 +0.3
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(frontmatter.dumps(post))
+        except Exception as e:
+            logger.warning(f"soft_touch failed: {bucket_id}: {e}")
+    
     async def _time_ripple(self, source_id: str, reference_time: datetime, hours: float = 48.0) -> None:
         """
         Slightly boost activation_count of buckets created/activated near the reference time.

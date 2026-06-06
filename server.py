@@ -573,6 +573,7 @@ async def breath(
         unresolved = [
             b for b in all_buckets
             if not b["metadata"].get("resolved", False)
+            and not b["metadata"].get("digested", False)   # 加这行
             and b["metadata"].get("type") not in ("permanent", "feel")
             and not b["metadata"].get("pinned", False)
             and not b["metadata"].get("protected", False)
@@ -685,7 +686,7 @@ async def breath(
     try:
         matches = await bucket_mgr.search(
             query,
-            limit=max(max_results),
+            limit=max_results,
             domain_filter=domain_filter,
             query_valence=q_valence,
             query_arousal=q_arousal,
@@ -762,7 +763,7 @@ async def breath(
             summary_tokens = count_tokens_approx(summary)
             if token_used + summary_tokens > max_tokens:
                 break
-            await bucket_mgr.touch(bucket["id"])
+            await bucket_mgr.soft_touch(bucket["id"])
             if bucket.get("vector_match"):
                 summary = f"[语义关联] [bucket_id:{bucket['id']}] {summary}"
             else:
@@ -1037,6 +1038,8 @@ async def trace(
     digested: int = -1,
     content: str = "",
     delete: bool = False,
+    touch: bool = False,      # 新增：轻触激活
+    ripple: bool = False,     # 新增：完整激活+涟漪（仅 touch=True 时有效）
 ) -> str:
     """修改记忆元数据或内容。resolved=1沉底/0激活,pinned=1钉选/0取消,digested=1隐藏(保留但不浮现)/0取消隐藏,content=替换桶正文,delete=True删除。只传需改的,-1或空=不改。"""
 
@@ -1079,6 +1082,15 @@ async def trace(
     if content:
         updates["content"] = content
 
+    # --- Touch / activate ---
+    if touch:
+        if ripple:
+            await bucket_mgr.touch(bucket_id)
+            return f"已完整激活记忆桶 {bucket_id}（含涟漪）"
+        else:
+            await bucket_mgr.soft_touch(bucket_id)
+            return f"已轻触激活记忆桶 {bucket_id}"
+        
     if not updates:
         return "没有任何字段需要修改。"
 
@@ -1201,6 +1213,8 @@ async def dream() -> str:
     candidates = [
         b for b in all_buckets
         if b["metadata"].get("type") not in ("permanent", "feel")
+        and not b["metadata"].get("resolved", False)   
+        and not b["metadata"].get("digested", False)   
         and not b["metadata"].get("pinned", False)
         and not b["metadata"].get("protected", False)
     ]
@@ -1364,6 +1378,22 @@ async def api_bucket_detail(request):
         "content": strip_wikilinks(bucket.get("content", "")),
         "score": decay_engine.calculate_score(meta),
     })
+
+@mcp.custom_route("/api/touch/{bucket_id}", methods=["POST"])
+async def api_touch_bucket(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    bucket_id = request.path_params["bucket_id"]
+    ripple = request.query_params.get("ripple", "").lower() in ("1", "true")
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if ripple:
+        await bucket_mgr.touch(bucket_id)
+    else:
+        await bucket_mgr.soft_touch(bucket_id)
+    return JSONResponse({"ok": True, "ripple": ripple})
 
 
 @mcp.custom_route("/api/search", methods=["GET"])

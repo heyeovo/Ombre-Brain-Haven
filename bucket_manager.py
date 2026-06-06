@@ -504,15 +504,19 @@ class BucketManager:
 
         # --- Layer 1.5: embedding pre-filter (optional, reduces multi-dim ranking set) ---
         # --- 第1.5层：embedding 预筛（可选，缩小精排候选集）---
-        if self.embedding_engine and self.embedding_engine.enabled and not include_archive:
+        if self.embedding_engine and self.embedding_engine.enabled:
             try:
-                vector_results = await self.embedding_engine.search_similar(query, top_k=50)
+                vector_results = await self.embedding_engine.search_similar(query, top_k=150)
                 if vector_results:
                     vector_ids = {bid for bid, _ in vector_results}
                     emb_candidates = [b for b in candidates if b["id"] in vector_ids]
-                    if emb_candidates:  # only replace if there's non-empty overlap
-                        candidates = emb_candidates
-                    # else: keep original candidates as fallback
+                    if emb_candidates:
+                        if include_archive:
+                            # 有 embedding 的走 embedding 精排，没有 embedding 的（归档桶）fuzzy 兜底
+                            no_emb = [b for b in candidates if b["id"] not in vector_ids]
+                            candidates = emb_candidates + no_emb
+                        else:
+                            candidates = emb_candidates
             except Exception as e:
                 logger.warning(f"Embedding pre-filter failed, using fuzzy only / embedding 预筛失败: {e}")
 

@@ -246,12 +246,13 @@ async def auth_login(request):
     if _verify_any_password(password):
         token = _create_session()
         resp = JSONResponse({"ok": True})
-        resp.set_cookie("ombre_session", token, httponly=True, samesite="lax", max_age=86400 * 7)
+        resp.set_cookie("ombre_session", token, httponly=True, 
+                samesite="none", secure=True, max_age=86400 * 7)
         return resp
     return JSONResponse({"error": "密码错误"}, status_code=401)
 
 
-@mcp.custom_route("/auth/logout", methods=["POST"])
+@mcp.custom_route("/auth/logout", methods=["POST"])mm
 async def auth_logout(request):
     """Invalidate session."""
     from starlette.responses import JSONResponse
@@ -2067,10 +2068,13 @@ if __name__ == "__main__":
             _app = mcp.sse_app()
         _app.add_middleware(
             CORSMiddleware,
-            allow_origins=["*"],
+            allow_origins=[
+                "https://ob-dashboard2.vercel.app",
+                "http://localhost:3000",
+            ],
+            allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
-            expose_headers=["*"],
         )
         logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
         uvicorn.run(_app, host="0.0.0.0", port=OMBRE_PORT)

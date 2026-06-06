@@ -251,7 +251,7 @@ async def auth_login(request):
     return JSONResponse({"error": "密码错误"}, status_code=401)
 
 
-@mcp.custom_route("/auth/logout", methods=["POST"])mm
+@mcp.custom_route("/auth/logout", methods=["POST"])
 async def auth_logout(request):
     """Invalidate session."""
     from starlette.responses import JSONResponse

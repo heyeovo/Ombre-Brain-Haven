@@ -512,13 +512,12 @@ class BucketManager:
                     emb_candidates = [b for b in candidates if b["id"] in vector_ids]
                     if emb_candidates:
                         if include_archive:
-                            # 有 embedding 的走 embedding 精排，没有 embedding 的（归档桶）fuzzy 兜底
                             no_emb = [b for b in candidates if b["id"] not in vector_ids]
                             candidates = emb_candidates + no_emb
                         else:
                             candidates = emb_candidates
             except Exception as e:
-                logger.warning(f"Embedding pre-filter failed, using fuzzy only / embedding 预筛失败: {e}")
+                logger.warning(f"Embedding pre-filter failed: {e}")
 
         # --- Layer 2: weighted multi-dim ranking ---
         # --- 第二层：多维加权精排 ---

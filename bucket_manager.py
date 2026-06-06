@@ -461,6 +461,7 @@ class BucketManager:
         domain_filter: list[str] = None,
         query_valence: float = None,
         query_arousal: float = None,
+        include_archive: bool = False,
     ) -> list[dict]:
         """
         Multi-dimensional indexed search for memory buckets.
@@ -481,7 +482,7 @@ class BucketManager:
             return []
     
         limit = limit or self.max_results
-        all_buckets = await self.list_all(include_archive=False)
+        all_buckets = await self.list_all(include_archive=include_archive)
 
         if not all_buckets:
             return []
@@ -753,6 +754,26 @@ class BucketManager:
             return False
 
         logger.info(f"Archived bucket / 归档记忆桶: {bucket_id} → archive/{primary_domain}/")
+        return True
+
+    async def unarchive(self, bucket_id: str) -> bool:
+        file_path = self._find_bucket_file(bucket_id)
+        if not file_path or self.archive_dir not in str(file_path):
+            return False
+        try:
+            post = frontmatter.load(file_path)
+            domain = post.get("domain", ["未分类"])
+            primary_domain = sanitize_name(domain[0]) if domain else "未分类"
+            dynamic_subdir = os.path.join(self.dynamic_dir, primary_domain)
+            os.makedirs(dynamic_subdir, exist_ok=True)
+            dest = safe_path(dynamic_subdir, os.path.basename(file_path))
+            post["type"] = "dynamic"
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(frontmatter.dumps(post))
+            shutil.move(file_path, str(dest))
+        except Exception as e:
+            logger.error(f"Failed to unarchive bucket: {bucket_id}: {e}")
+            return False
         return True
 
     # ---------------------------------------------------------

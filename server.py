@@ -1379,6 +1379,17 @@ async def api_bucket_detail(request):
         "score": decay_engine.calculate_score(meta),
     })
 
+@mcp.custom_route("/api/unarchive/{bucket_id}", methods=["POST"])
+async def api_unarchive_bucket(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    bucket_id = request.path_params["bucket_id"]
+    success = await bucket_mgr.unarchive(bucket_id)
+    if not success:
+        return JSONResponse({"error": "not found or not archived"}, status_code=404)
+    return JSONResponse({"ok": True})
+
 @mcp.custom_route("/api/touch/{bucket_id}", methods=["POST"])
 async def api_touch_bucket(request):
     from starlette.responses import JSONResponse
@@ -1395,18 +1406,24 @@ async def api_touch_bucket(request):
         await bucket_mgr.soft_touch(bucket_id)
     return JSONResponse({"ok": True, "ripple": ripple})
 
-
 @mcp.custom_route("/api/search", methods=["GET"])
 async def api_search(request):
     """Search buckets by query."""
     from starlette.responses import JSONResponse
     err = _require_auth(request)
     if err: return err
+    
     query = request.query_params.get("q", "")
     if not query:
         return JSONResponse({"error": "missing q parameter"}, status_code=400)
+    
+    # 1. 在这里解析参数
+    include_archive = request.query_params.get("include_archive", "false").lower() in ("1", "true")
+    
     try:
-        matches = await bucket_mgr.search(query, limit=10)
+        # 2. 将 include_archive 传入 search 方法
+        matches = await bucket_mgr.search(query, limit=10, include_archive=include_archive)
+        
         result = []
         for b in matches:
             meta = b.get("metadata", {})

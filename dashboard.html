@@ -3139,6 +3139,9 @@ function renderProfileFactCard(fact) {
   var status = profileFactStatus(fact);
   var conf = fact.confidence == null ? '—' : Number(fact.confidence).toFixed(2);
   var evidence = Array.isArray(fact.evidence) ? fact.evidence : [];
+  var confirmButton = status.cls === 'active'
+    ? ''
+    : '<button type="button" onclick="runProfileFactAction(\'' + jsString(id) + '\', \'confirm\')">确认</button>';
   var evidenceHtml = evidence.length
     ? evidence.map(function(item) {
         var bucketId = String(item.bucket_id || '');
@@ -3161,7 +3164,7 @@ function renderProfileFactCard(fact) {
         '</div>' +
       '</div>' +
       '<div class="profile-actions">' +
-        '<button type="button" onclick="runProfileFactAction(\'' + jsString(id) + '\', \'confirm\')">确认</button>' +
+        confirmButton +
         '<button type="button" onclick="editProfileFact(\'' + jsString(id) + '\')">编辑</button>' +
         '<button type="button" class="danger" onclick="runProfileFactAction(\'' + jsString(id) + '\', \'deprecate\')">废弃</button>' +
         '<button type="button" onclick="showDetail(\'' + jsString(id) + '\')">打开</button>' +

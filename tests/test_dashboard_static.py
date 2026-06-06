@@ -146,6 +146,15 @@ def test_dashboard_exposes_profile_fact_page():
     assert ".profile-proposal-panel" in html
 
 
+def test_dashboard_hides_confirm_button_for_active_profile_facts():
+    html = Path("dashboard.html").read_text(encoding="utf-8")
+
+    assert "var confirmButton = status.cls === 'active'" in html
+    assert "? ''" in html
+    assert "confirmButton +\n        '<button type=\"button\" onclick=\"editProfileFact" in html
+    assert "runProfileFactAction(\\'' + jsString(id) + '\\', \\'confirm\\')" in html
+
+
 def test_dashboard_exposes_word_map_page():
     html = Path("dashboard.html").read_text(encoding="utf-8")
 

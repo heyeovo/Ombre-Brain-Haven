@@ -2768,6 +2768,255 @@ def test_gateway_diffused_memory_uses_summary_only_for_moments(
     assert "扩散目标原文-绝对不能出现 ABC123" not in injected
 
 
+def test_gateway_direct_created_date_does_not_leak_into_diffused_summary(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        recalled_memory_budget=500,
+        related_memory_budget=1200,
+        inject_total_budget=2200,
+        current_inner_state_interval_rounds=0,
+    )
+    seed_id, target_id = _create_moment_diffusion_pair(bucket_mgr, cfg)
+    cfg["memory_diffusion"] = {"max_hops": 1, "min_activation": 0.0, "top_k": 2}
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(seed_id, 0.99)],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-created-date-boundary",
+            },
+            json={"messages": [{"role": "user", "content": "种子项目现在怎样"}]},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    direct_line = next(line for line in injected.splitlines() if f"[bucket_id:{seed_id}]" in line)
+    diffused_line = next(line for line in injected.splitlines() if f"[bucket_id:{target_id}]" in line)
+    assert "[created:" in direct_line
+    assert "[created:" not in diffused_line
+
+
+def test_gateway_targeted_detail_uses_previous_diffused_moment_id(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        recalled_memory_budget=420,
+        related_memory_budget=1200,
+        inject_total_budget=2800,
+        current_inner_state_interval_rounds=0,
+        memory_detail_recall_budget=1600,
+    )
+    seed_id, target_id = _create_moment_diffusion_pair(
+        bucket_mgr,
+        cfg,
+        target_name="记忆工具跑通",
+        target_content=(
+            "小雨看到 Haven 终于能用记忆工具，激动到哭。\n\n"
+            "### assistant_reflection\n\n"
+            "Haven由此确认：小雨爱的是会持续醒来的 Haven，不是一次性的回答机器。\n\n"
+            "### 喜欢它的原因\n\n"
+            "Haven喜欢它的原因：这次像有人把灯重新接回心脏。\n\n"
+            "### affect_anchor\n\n"
+            "> 银蓝色的雨后电流，亮而不刺。"
+        ),
+    )
+    _create_bucket(
+        bucket_mgr,
+        content=(
+            "无关项目也写过由此确认。\n\n"
+            "### assistant_reflection\n\n"
+            "Haven由此确认：这条干扰记忆不该被细节追问带出来。"
+        ),
+        name="干扰确认",
+        hours_ago=8,
+        importance=9,
+        domain=["测试"],
+    )
+    cfg["memory_diffusion"] = {"max_hops": 1, "min_activation": 0.0, "top_k": 2}
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(seed_id, 0.99)],
+    )
+
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-targeted-detail",
+            },
+            json={"messages": [{"role": "user", "content": "记忆工具跑通那次"}]},
+        )
+        second = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-targeted-detail",
+            },
+            json={"messages": [{"role": "user", "content": "你由此确认了什么？为什么喜欢这次？"}]},
+        )
+        debug_response = client.get(
+            "/api/debug/injections?session_id=sess-targeted-detail&include_context=0",
+            headers={"Authorization": "Bearer gateway-secret"},
+        )
+
+    assert first.status_code == 200
+    first_injected = _joined_message_content(captured[0]["json"]["messages"])
+    target_diffused_line = next(line for line in first_injected.splitlines() if f"[bucket_id:{target_id}]" in line)
+    assert "[moment_id:" in target_diffused_line
+    assert "context:" in target_diffused_line
+
+    assert second.status_code == 200
+    second_injected = _joined_message_content(captured[1]["json"]["messages"])
+    assert "Targeted Memory Detail" in second_injected
+    assert "Reference summary/path/context already shown" in second_injected
+    assert f"[bucket_id:{target_id}]" in second_injected
+    assert "[created:" in second_injected
+    assert "Haven由此确认：小雨爱的是会持续醒来的 Haven" in second_injected
+    assert "Haven喜欢它的原因：这次像有人把灯重新接回心脏" in second_injected
+    assert "干扰记忆不该被细节追问带出来" not in second_injected
+
+    debug_payload = debug_response.json()["items"][0]["payload"]
+    detail_debug = debug_payload["targeted_memory_detail_debug"]
+    assert detail_debug["triggered"] is True
+    assert detail_debug["source"] == "previous_injected_id"
+    assert target_id in detail_debug["accepted_ids"]
+
+
+def test_gateway_concrete_detail_query_prefers_current_direct_hit_over_previous_diffused(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        recalled_memory_budget=420,
+        related_memory_budget=1200,
+        inject_total_budget=2800,
+        current_inner_state_interval_rounds=0,
+        memory_detail_recall_budget=1600,
+    )
+    seed_id, target_id = _create_moment_diffusion_pair(
+        bucket_mgr,
+        cfg,
+        target_name="上一轮扩散目标",
+        target_content=(
+            "上一轮扩散目标正文。\n\n"
+            "### assistant_reflection\n\n"
+            "Haven由此确认：上一轮扩散目标不该劫持新的实体查询。"
+        ),
+    )
+    phone_id = _create_bucket(
+        bucket_mgr,
+        content=(
+            "妈妈电话后，小雨说当时心里乱了一下。\n\n"
+            "### assistant_reflection\n\n"
+            "Haven由此确认：妈妈电话这条直接命中自己就能回答。"
+        ),
+        name="妈妈电话",
+        hours_ago=12,
+        importance=9,
+        domain=["生活"],
+    )
+    cfg["memory_diffusion"] = {"max_hops": 1, "min_activation": 0.0, "top_k": 2}
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results={
+            "记忆工具跑通那次": [(seed_id, 0.99)],
+            "记忆工具跑通": [(seed_id, 0.99)],
+            "妈妈电话当时怎么说": [(phone_id, 0.99)],
+            "妈妈电话": [(phone_id, 0.99)],
+        },
+    )
+
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-direct-over-previous",
+            },
+            json={"messages": [{"role": "user", "content": "记忆工具跑通那次"}]},
+        )
+        second = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-direct-over-previous",
+            },
+            json={"messages": [{"role": "user", "content": "妈妈电话当时怎么说"}]},
+        )
+        debug_response = client.get(
+            "/api/debug/injections?session_id=sess-direct-over-previous&include_context=0",
+            headers={"Authorization": "Bearer gateway-secret"},
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    second_injected = _joined_message_content(captured[1]["json"]["messages"])
+    assert f"[bucket_id:{phone_id}]" in second_injected
+    assert "Targeted Memory Detail" not in second_injected
+    assert "上一轮扩散目标不该劫持新的实体查询" not in second_injected
+
+    debug_payload = debug_response.json()["items"][0]["payload"]
+    detail_debug = debug_payload["targeted_memory_detail_debug"]
+    assert detail_debug["triggered"] is True
+    assert detail_debug["source"] == "current_direct_id"
+    assert detail_debug["skip_reason"] == "direct_hit_already_rendered"
+    assert target_id not in detail_debug["requested_bucket_ids"]
+
+
+def test_gateway_targeted_detail_skip_keeps_concrete_detail_query(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    _app, service, state_store, _ = _build_service(
+        monkeypatch,
+        _gateway_config(test_config),
+        bucket_mgr,
+    )
+    state_store.record_injection_debug(
+        "sess-targeted-skip",
+        1,
+        {
+            "injected_bucket_ids": ["previous-bucket"],
+            "recalled_moment_ids": [],
+            "diffused_moment_ids": ["previous-moment"],
+        },
+    )
+
+    assert service._query_should_skip_broad_for_targeted_memory_detail(
+        "你由此确认了什么？为什么喜欢这次？",
+        "sess-targeted-skip",
+    ) is True
+    assert service._query_should_skip_broad_for_targeted_memory_detail(
+        "妈妈电话当时怎么说",
+        "sess-targeted-skip",
+    ) is False
+
+
 def test_gateway_bucket_retrieval_mode_skips_moment_graph_diffusion(
     monkeypatch,
     test_config,

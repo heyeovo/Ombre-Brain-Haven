@@ -2881,11 +2881,36 @@ def _bucket_metadata_for_dehydration(bucket: dict) -> dict:
     return {key: value for key, value in meta.items() if key not in {"tags", "comments"}}
 
 
+def _date_yyyy_mm_dd(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.match(r"^\d{4}-\d{2}-\d{2}", text)
+    return match.group(0) if match else text[:10]
+
+
+def _bucket_date_meta_parts(bucket: dict | None = None, moment: dict | None = None) -> list[str]:
+    bucket = bucket or {}
+    moment = moment or {}
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    moment_meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+    created = _date_yyyy_mm_dd(
+        meta.get("created")
+        or moment_meta.get("bucket_created")
+        or moment.get("created_at")
+    )
+    return [f"[created:{created}]"] if created else []
+
+
 def _direct_bucket_header(bucket: dict, moment: dict) -> str:
     bucket_id = str(bucket.get("id") or moment.get("bucket_id") or "")
     title = _moment_bucket_title(moment) or str((bucket.get("metadata", {}) or {}).get("name") or bucket_id)
     section = str(moment.get("section") or "body")
-    return f"[bucket_id:{bucket_id}] [moment_id:{moment.get('moment_id') or ''}] {section} {title}".strip()
+    date_part = " ".join(_bucket_date_meta_parts(bucket, moment))
+    return (
+        f"[bucket_id:{bucket_id}] [moment_id:{moment.get('moment_id') or ''}] "
+        f"{date_part} {section} {title}"
+    ).strip()
 
 
 def _rendered_bucket_content(bucket: dict) -> str:

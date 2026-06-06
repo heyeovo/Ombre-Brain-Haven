@@ -105,6 +105,16 @@ MEMORY_DETAIL_REQUEST_RE = re.compile(
     r"^\s*\[memory_detail\s+ids\s*=\s*([\"'])(?P<ids>[^\"']+)\1\s*\]\s*",
     re.IGNORECASE,
 )
+EXPLICIT_BUCKET_ID_RE = re.compile(
+    r"\[bucket_id:(?P<bracket>[^\]\s]+)\]"
+    r"|(?:bucket_id|bucket id|bucket-id|记忆桶|桶id|桶ID)\s*[:=：]\s*(?P<plain>[A-Za-z0-9_.:-]+)",
+    re.IGNORECASE,
+)
+EXPLICIT_MOMENT_ID_RE = re.compile(
+    r"\[moment_id:(?P<bracket>[^\]\s]+)\]"
+    r"|(?:moment_id|moment id|moment-id|片段id|片段ID)\s*[:=：]\s*(?P<plain>[A-Za-z0-9_.:-]+)",
+    re.IGNORECASE,
+)
 QUERY_PLANNER_SYSTEM_PROMPT = """You are Ombre Memory Query Planner.
 Return only strict JSON. Do not write memory. Do not choose final memories.
 Split the user's long mixed message into 1-3 short memory search anchors.
@@ -979,6 +989,8 @@ class GatewayService:
         favorite_memory = ""
         favorite_ids: list[str] = []
         related_memory = ""
+        targeted_memory_detail = ""
+        targeted_memory_detail_debug: dict[str, Any] = self._targeted_memory_detail_debug_base()
         memory_detail_recall_instruction = ""
         dream_context = ""
         dream_context_status: dict[str, Any] = {"status": "skipped", "reason": "not_current_user_turn"}
@@ -989,6 +1001,10 @@ class GatewayService:
         query_planner_debug: dict[str, Any] = self._query_planner_debug_base(current_user_query)
 
         if is_new_user_turn:
+            skip_broad_dynamic_recall = self._query_should_skip_broad_for_targeted_memory_detail(
+                current_user_query,
+                session_id,
+            )
             if self.persona_engine.enabled and self._should_inject_interval(
                 session_id,
                 self.current_inner_state_interval_rounds,
@@ -1004,7 +1020,14 @@ class GatewayService:
                 core_memory = await self._build_core_memory_block(all_buckets)
             portrait_memory, portrait_memory_debug = self._build_portrait_memory_block(all_buckets)
             if self.recalled_budget > 0 or self.related_memory_budget > 0:
-                if self.retrieval_mode == "bucket":
+                if skip_broad_dynamic_recall:
+                    logger.info(
+                        "Gateway broad dynamic recall skipped | session=%s reason=targeted_memory_detail_query",
+                        session_id,
+                    )
+                    suppressed_moments = []
+                    suppressed_buckets = []
+                elif self.retrieval_mode == "bucket":
                     selected_buckets, suppressed_buckets, query_planner_debug = await self._select_dynamic_buckets(
                         current_user_query,
                         session_id,
@@ -1068,8 +1091,45 @@ class GatewayService:
                 )
             else:
                 related_memory = ""
+            current_direct_bucket_ids = [
+                str(moment.get("bucket_id") or "")
+                for moment in recalled_moments
+                if moment.get("bucket_id")
+            ]
+            current_direct_moment_ids = [
+                str(moment.get("moment_id") or "")
+                for moment in recalled_moments
+                if moment.get("moment_id")
+            ]
+            current_diffused_bucket_ids = self._extract_bucket_ids_from_context(related_memory)
+            current_diffused_moment_ids = self._extract_moment_ids_from_context(related_memory)
+            current_shown_bucket_ids = list(
+                dict.fromkeys(
+                    current_direct_bucket_ids
+                    + current_diffused_bucket_ids
+                    + favorite_ids
+                )
+            )
+            current_shown_moment_ids = list(
+                dict.fromkeys(current_direct_moment_ids + current_diffused_moment_ids)
+            )
+            targeted_memory_detail, targeted_memory_detail_debug = self._build_targeted_memory_detail(
+                all_buckets,
+                session_id=session_id,
+                query=current_user_query,
+                current_shown_bucket_ids=current_shown_bucket_ids,
+                current_shown_moment_ids=current_shown_moment_ids,
+                current_direct_bucket_ids=current_direct_bucket_ids,
+                current_direct_moment_ids=current_direct_moment_ids,
+                current_diffused_bucket_ids=current_diffused_bucket_ids,
+                current_diffused_moment_ids=current_diffused_moment_ids,
+                recalled_memory=recalled_memory,
+            )
             if self.memory_detail_recall_enabled and (
-                recalled_memory.strip() or related_memory.strip() or favorite_memory.strip()
+                recalled_memory.strip()
+                or related_memory.strip()
+                or favorite_memory.strip()
+                or targeted_memory_detail.strip()
             ):
                 memory_detail_recall_instruction = (
                     "Internal memory detail request: if a shown memory summary is clearly relevant "
@@ -1108,6 +1168,11 @@ class GatewayService:
                         if moment.get("bucket_id")
                     ]
                     + favorite_ids
+                    + [
+                        str(bucket_id)
+                        for bucket_id in targeted_memory_detail_debug.get("accepted_ids", []) or []
+                        if str(bucket_id or "").strip()
+                    ]
                 )
             )
         else:
@@ -1125,6 +1190,7 @@ class GatewayService:
             relationship_weather=relationship_weather,
             favorite_memory=favorite_memory,
             related_memory=related_memory,
+            targeted_memory_detail=targeted_memory_detail,
             dream_context=dream_context,
             memory_detail_recall_instruction=memory_detail_recall_instruction,
             context_mode=context_mode,
@@ -1152,6 +1218,8 @@ class GatewayService:
                 recalled_moments=recalled_moments,
                 recalled_memory=recalled_memory,
                 related_memory=related_memory,
+                targeted_memory_detail=targeted_memory_detail,
+                targeted_memory_detail_debug=targeted_memory_detail_debug,
                 dream_context=dream_context,
                 dream_context_status=dream_context_status,
                 recent_context=recent_context,
@@ -1572,6 +1640,503 @@ class GatewayService:
         }
 
     @staticmethod
+    def _targeted_memory_detail_debug_base() -> dict[str, Any]:
+        return {
+            "triggered": False,
+            "skip_reason": "",
+            "requested_bucket_ids": [],
+            "requested_moment_ids": [],
+            "accepted_ids": [],
+            "accepted_moment_ids": [],
+            "missing_ids": [],
+            "source": "",
+            "detail_tokens": 0,
+        }
+
+    @staticmethod
+    def _extract_explicit_bucket_ids_from_text(text: str) -> list[str]:
+        ids = []
+        seen = set()
+        for match in EXPLICIT_BUCKET_ID_RE.finditer(str(text or "")):
+            bucket_id = (match.group("bracket") or match.group("plain") or "").strip()
+            if not bucket_id or bucket_id in seen:
+                continue
+            seen.add(bucket_id)
+            ids.append(bucket_id)
+        return ids
+
+    @staticmethod
+    def _extract_explicit_moment_ids_from_text(text: str) -> list[str]:
+        ids = []
+        seen = set()
+        for match in EXPLICIT_MOMENT_ID_RE.finditer(str(text or "")):
+            moment_id = (match.group("bracket") or match.group("plain") or "").strip()
+            if not moment_id or moment_id in seen:
+                continue
+            seen.add(moment_id)
+            ids.append(moment_id)
+        return ids
+
+    def _query_requests_targeted_memory_detail(self, query: str) -> bool:
+        text = str(query or "").strip().lower()
+        if not text:
+            return False
+        if self._extract_explicit_bucket_ids_from_text(text) or self._extract_explicit_moment_ids_from_text(text):
+            return True
+        detail_terms = (
+            "细节",
+            "详细",
+            "具体",
+            "原文",
+            "完整",
+            "整条",
+            "整桶",
+            "当时怎么说",
+            "当时说了什么",
+            "具体怎么说",
+            "怎么写的",
+            "detail",
+            "details",
+        )
+        reflection_terms = (
+            "由此确认",
+            "因此确认",
+            "确认了什么",
+            "确认什么",
+            "由此明白",
+            "明白了什么",
+            "由此认为",
+            "因此认为",
+            "为什么喜欢",
+            "喜欢这次",
+            "喜欢它的原因",
+            "喜欢的原因",
+            "favorite reason",
+        )
+        deictic_terms = (
+            "这次",
+            "这条",
+            "这个",
+            "那次",
+            "那条",
+            "那个",
+            "当时",
+            "由此",
+            "因此",
+            "它",
+            "刚才",
+            "上面",
+            "上一条",
+            "这个片段",
+            "这个记忆",
+        )
+        if self._text_has_any(text, reflection_terms):
+            return True
+        return self._text_has_any(text, deictic_terms) and self._text_has_any(text, detail_terms)
+
+    def _query_should_skip_broad_for_targeted_memory_detail(self, query: str, session_id: str) -> bool:
+        if not self._query_requests_targeted_memory_detail(query):
+            return False
+        if self._extract_explicit_bucket_ids_from_text(query) or self._extract_explicit_moment_ids_from_text(query):
+            return True
+        if self._query_has_concrete_targeted_detail_anchor(query):
+            return False
+        recent_bucket_ids, recent_moment_ids = self._recent_memory_reference_ids(session_id)
+        if recent_bucket_ids or recent_moment_ids:
+            return True
+        intent = self._targeted_memory_detail_intent(query)
+        return bool(intent.get("reflection") or intent.get("favorite_reason"))
+
+    @staticmethod
+    def _query_has_concrete_targeted_detail_anchor(query: str) -> bool:
+        text = str(query or "").strip().lower()
+        if not text:
+            return False
+        for pattern in (
+            EXPLICIT_BUCKET_ID_RE,
+            EXPLICIT_MOMENT_ID_RE,
+        ):
+            text = pattern.sub("", text)
+        noise_terms = (
+            "为什么喜欢",
+            "喜欢它的原因",
+            "喜欢的原因",
+            "喜欢这次",
+            "由此确认",
+            "因此确认",
+            "确认了什么",
+            "确认什么",
+            "由此明白",
+            "明白了什么",
+            "由此认为",
+            "因此认为",
+            "当时怎么说",
+            "当时说了什么",
+            "具体怎么说",
+            "怎么写的",
+            "怎么说",
+            "怎么写",
+            "细节",
+            "详细",
+            "具体",
+            "原文",
+            "完整",
+            "整条",
+            "整桶",
+            "这次",
+            "这条",
+            "这个片段",
+            "这个记忆",
+            "这个",
+            "那次",
+            "那条",
+            "那个",
+            "当时",
+            "由此",
+            "因此",
+            "刚才",
+            "上面",
+            "上一条",
+            "什么",
+            "为什么",
+            "你",
+            "我",
+            "小雨",
+            "haven",
+            "吗",
+            "呢",
+            "了",
+            "的",
+        )
+        for term in noise_terms:
+            text = text.replace(term, "")
+        compact = re.sub(r"[\W_]+", "", text, flags=re.UNICODE)
+        return len(compact) >= 3
+
+    def _recent_memory_reference_ids(self, session_id: str) -> tuple[list[str], list[str]]:
+        items = self.state_store.list_injection_debug(
+            session_id=session_id,
+            limit=1,
+            include_context=False,
+        )
+        if not items:
+            return [], []
+        payload = items[0].get("payload") if isinstance(items[0], dict) else {}
+        if not isinstance(payload, dict):
+            return [], []
+        moment_ids = list(
+            dict.fromkeys(
+                [
+                    str(item)
+                    for item in (
+                        (payload.get("recalled_moment_ids") or [])
+                        + (payload.get("diffused_moment_ids") or [])
+                    )
+                    if str(item or "").strip()
+                ]
+            )
+        )
+        bucket_ids = list(
+            dict.fromkeys(
+                [
+                    str(item)
+                    for item in payload.get("injected_bucket_ids", []) or []
+                    if str(item or "").strip()
+                ]
+            )
+        )
+        return bucket_ids, moment_ids
+
+    def _targeted_memory_detail_intent(self, query: str) -> dict[str, bool]:
+        text = str(query or "").strip().lower()
+        wants_reflection = self._text_has_any(
+            text,
+            (
+                "由此确认",
+                "因此确认",
+                "确认",
+                "明白",
+                "认为",
+                "理解",
+                "反思",
+                "reflection",
+            ),
+        )
+        wants_favorite = self._text_has_any(
+            text,
+            (
+                "为什么喜欢",
+                "喜欢这次",
+                "喜欢它",
+                "喜欢的原因",
+                "喜欢它的原因",
+                "favorite",
+            ),
+        )
+        wants_raw = self._text_has_any(
+            text,
+            (
+                "细节",
+                "详细",
+                "具体",
+                "原文",
+                "完整",
+                "整条",
+                "整桶",
+                "怎么说",
+                "怎么写",
+                "detail",
+            ),
+        )
+        return {
+            "reflection": wants_reflection,
+            "favorite_reason": wants_favorite,
+            "raw": wants_raw or not (wants_reflection or wants_favorite),
+        }
+
+    def _build_targeted_memory_detail(
+        self,
+        all_buckets: list[dict],
+        *,
+        session_id: str,
+        query: str,
+        current_shown_bucket_ids: list[str],
+        current_shown_moment_ids: list[str],
+        current_direct_bucket_ids: list[str],
+        current_direct_moment_ids: list[str],
+        current_diffused_bucket_ids: list[str],
+        current_diffused_moment_ids: list[str],
+        recalled_memory: str,
+    ) -> tuple[str, dict[str, Any]]:
+        debug = self._targeted_memory_detail_debug_base()
+        if not self._query_requests_targeted_memory_detail(query):
+            debug["skip_reason"] = "not_targeted_detail_query"
+            return "", debug
+        debug["triggered"] = True
+
+        explicit_bucket_ids = self._extract_explicit_bucket_ids_from_text(query)
+        explicit_moment_ids = self._extract_explicit_moment_ids_from_text(query)
+        recent_bucket_ids, recent_moment_ids = self._recent_memory_reference_ids(session_id)
+        intent = self._targeted_memory_detail_intent(query)
+
+        max_items = max(1, int(self.memory_detail_recall_max_ids or 1))
+        if explicit_bucket_ids or explicit_moment_ids:
+            bucket_ids = explicit_bucket_ids
+            moment_ids = explicit_moment_ids
+            debug["source"] = "explicit_id"
+        elif current_direct_bucket_ids or current_direct_moment_ids:
+            if not self._current_direct_hit_needs_targeted_detail(recalled_memory, intent):
+                debug["source"] = "current_direct_id"
+                debug["skip_reason"] = "direct_hit_already_rendered"
+                debug["requested_bucket_ids"] = list(dict.fromkeys(current_direct_bucket_ids))
+                debug["requested_moment_ids"] = list(dict.fromkeys(current_direct_moment_ids))
+                return "", debug
+            bucket_ids = current_direct_bucket_ids
+            moment_ids = current_direct_moment_ids
+            debug["source"] = "current_direct_id"
+        elif current_diffused_bucket_ids or current_diffused_moment_ids:
+            bucket_ids = current_diffused_bucket_ids
+            moment_ids = current_diffused_moment_ids
+            debug["source"] = "current_diffused_id"
+        elif current_shown_bucket_ids or current_shown_moment_ids:
+            bucket_ids = current_shown_bucket_ids
+            moment_ids = current_shown_moment_ids
+            debug["source"] = "current_injected_id"
+        else:
+            bucket_ids = recent_bucket_ids
+            moment_ids = recent_moment_ids
+            debug["source"] = "previous_injected_id"
+
+        bucket_ids = [item for item in dict.fromkeys(str(item) for item in bucket_ids) if item][:max_items]
+        moment_ids = [item for item in dict.fromkeys(str(item) for item in moment_ids) if item][:max_items]
+        debug["requested_bucket_ids"] = bucket_ids
+        debug["requested_moment_ids"] = moment_ids
+        if not bucket_ids and not moment_ids:
+            debug["skip_reason"] = "no_shown_or_explicit_ids"
+            return "", debug
+
+        bucket_map = {
+            str(bucket.get("id") or ""): bucket
+            for bucket in all_buckets
+            if isinstance(bucket, dict) and bucket.get("id")
+        }
+        moment_map: dict[str, dict[str, Any]] = {}
+        moments_by_bucket: dict[str, list[dict[str, Any]]] = {}
+        for bucket in bucket_map.values():
+            try:
+                moments = parse_bucket_moments(bucket, self.relevance_options)
+            except Exception as exc:
+                logger.warning("Gateway targeted detail parse failed for %s: %s", bucket.get("id"), exc)
+                moments = []
+            bucket_id = str(bucket.get("id") or "")
+            moments_by_bucket[bucket_id] = moments
+            for moment in moments:
+                moment_id = str(moment.get("moment_id") or "")
+                if moment_id:
+                    moment_map[moment_id] = moment
+
+        accepted_bucket_ids: list[str] = []
+        accepted_moment_ids: list[str] = []
+        missing_ids: list[str] = []
+        for moment_id in moment_ids:
+            moment = moment_map.get(moment_id)
+            if not moment:
+                missing_ids.append(moment_id)
+                continue
+            accepted_moment_ids.append(moment_id)
+            bucket_id = str(moment.get("bucket_id") or "")
+            if bucket_id and bucket_id not in accepted_bucket_ids:
+                accepted_bucket_ids.append(bucket_id)
+        for bucket_id in bucket_ids:
+            if bucket_id not in bucket_map:
+                missing_ids.append(bucket_id)
+                continue
+            if bucket_id not in accepted_bucket_ids:
+                accepted_bucket_ids.append(bucket_id)
+        accepted_bucket_ids = accepted_bucket_ids[:max_items]
+        debug["accepted_ids"] = accepted_bucket_ids
+        debug["accepted_moment_ids"] = accepted_moment_ids
+        debug["missing_ids"] = missing_ids
+        if not accepted_bucket_ids:
+            debug["skip_reason"] = "no_allowed_ids"
+            return "", debug
+
+        per_bucket_budget = max(120, self.memory_detail_recall_budget // max(1, len(accepted_bucket_ids)))
+        reference_context = self._recent_memory_reference_context(
+            session_id,
+            bucket_ids=accepted_bucket_ids,
+            moment_ids=accepted_moment_ids,
+        )
+        blocks = [
+            "Targeted private memory detail for this turn. Fetched only by bucket_id/moment_id already shown to or provided by the user. Use quietly; do not mention lookup.",
+            "reflection/favorite_reason are Haven-side understanding, not Xiaoyu profile facts.",
+        ]
+        if reference_context:
+            blocks.append("Reference summary/path/context already shown:\n" + reference_context)
+        for bucket_id in accepted_bucket_ids:
+            bucket = bucket_map.get(bucket_id)
+            if not bucket:
+                continue
+            selected_moment_ids = [
+                moment_id
+                for moment_id in accepted_moment_ids
+                if str(moment_map.get(moment_id, {}).get("bucket_id") or "") == bucket_id
+            ]
+            block = self._format_targeted_bucket_detail(
+                bucket,
+                moments_by_bucket.get(bucket_id, []),
+                selected_moment_ids=selected_moment_ids,
+                intent=intent,
+            )
+            if block.strip():
+                blocks.append(self._trim_text(block, per_bucket_budget))
+        detail = "\n\n".join(part for part in blocks if part.strip())
+        debug["detail_tokens"] = count_tokens_approx(detail)
+        if not detail.strip() or len(blocks) <= 2:
+            debug["skip_reason"] = "empty_detail_context"
+            return "", debug
+        return detail, debug
+
+    @staticmethod
+    def _current_direct_hit_needs_targeted_detail(recalled_memory: str, intent: dict[str, bool]) -> bool:
+        if intent.get("favorite_reason"):
+            return True
+        if intent.get("reflection"):
+            rendered = str(recalled_memory or "").lower()
+            if "bucket_window" in rendered or "bucket_capsule" in rendered:
+                return True
+            return "reflection" not in rendered and "由此确认" not in rendered and "明白" not in rendered
+        return False
+
+    def _recent_memory_reference_context(
+        self,
+        session_id: str,
+        *,
+        bucket_ids: list[str],
+        moment_ids: list[str],
+    ) -> str:
+        items = self.state_store.list_injection_debug(
+            session_id=session_id,
+            limit=1,
+            include_context=False,
+        )
+        if not items:
+            return ""
+        payload = items[0].get("payload") if isinstance(items[0], dict) else {}
+        if not isinstance(payload, dict):
+            return ""
+        return self._filter_reference_context_lines(
+            str(payload.get("diffused_memory") or ""),
+            bucket_ids=bucket_ids,
+            moment_ids=moment_ids,
+        )
+
+    @staticmethod
+    def _filter_reference_context_lines(
+        text: str,
+        *,
+        bucket_ids: list[str],
+        moment_ids: list[str],
+    ) -> str:
+        bucket_set = {str(item) for item in bucket_ids if str(item or "").strip()}
+        moment_set = {str(item) for item in moment_ids if str(item or "").strip()}
+        lines = []
+        for line in str(text or "").splitlines():
+            line_bucket_ids = set(re.findall(r"\[bucket_id:([^\]\s]+)\]", line))
+            line_moment_ids = set(re.findall(r"\[moment_id:([^\]\s]+)\]", line))
+            if (bucket_set and line_bucket_ids & bucket_set) or (moment_set and line_moment_ids & moment_set):
+                lines.append(line.strip())
+        return "\n".join(line for line in lines if line)
+
+    def _format_targeted_bucket_detail(
+        self,
+        bucket: dict,
+        moments: list[dict[str, Any]],
+        *,
+        selected_moment_ids: list[str],
+        intent: dict[str, bool],
+    ) -> str:
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        bucket_id = str(bucket.get("id") or "")
+        title = str(meta.get("name") or bucket_id)
+        header_parts = [f"[bucket_id:{bucket_id}]"]
+        header_parts.extend(self._bucket_date_meta_parts(bucket))
+        header = " ".join(header_parts + [title]).strip()
+        selected = [moment for moment in moments if str(moment.get("moment_id") or "") in set(selected_moment_ids)]
+        by_section: dict[str, list[dict[str, Any]]] = {}
+        for moment in moments:
+            by_section.setdefault(str(moment.get("section") or "body"), []).append(moment)
+
+        lines = [header]
+
+        def add_section(title: str, section_names: tuple[str, ...], limit: int) -> None:
+            items: list[dict[str, Any]] = []
+            for section in section_names:
+                items.extend(by_section.get(section, []))
+            if not items:
+                return
+            ordered: list[dict[str, Any]] = []
+            for moment in selected:
+                if moment in items and moment not in ordered:
+                    ordered.append(moment)
+            for moment in items:
+                if moment not in ordered:
+                    ordered.append(moment)
+            lines.append(title)
+            for moment in ordered[:limit]:
+                lines.append(f"- [moment_id:{moment.get('moment_id') or ''}] {self._moment_text(moment, 320)}")
+
+        if selected or intent.get("raw"):
+            add_section("### moment", ("body", "moment", "fact", "original", "evidence_context", "context"), 2)
+        if intent.get("reflection"):
+            add_section("### assistant_reflection", ("reflection",), 3)
+        if intent.get("favorite_reason"):
+            add_section("### favorite_reason", ("favorite_reason",), 3)
+        if intent.get("raw") or intent.get("reflection") or intent.get("favorite_reason"):
+            add_section("### followup", ("followup", "comment"), 2)
+        return "\n".join(lines).strip()
+
+    @staticmethod
     def _parse_memory_detail_request(text: str) -> tuple[list[str], str]:
         raw = str(text or "")
         match = MEMORY_DETAIL_REQUEST_RE.match(raw)
@@ -1626,7 +2191,9 @@ class GatewayService:
             meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
             title = str(meta.get("name") or bucket_id)
             original = self._rendered_bucket_content(bucket)
-            block = f"[bucket_id:{bucket_id}] {title}\nbucket_detail\n{original}".strip()
+            date_part = " ".join(self._bucket_date_meta_parts(bucket))
+            header = f"[bucket_id:{bucket_id}] {date_part} {title}".strip()
+            block = f"{header}\nbucket_detail\n{original}".strip()
             blocks.append(self._trim_text(block, per_bucket_budget))
         return "\n\n".join(part for part in blocks if part.strip()), missing_ids
 
@@ -3745,13 +4312,37 @@ class GatewayService:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         return {key: value for key, value in meta.items() if key not in {"tags", "comments"}}
 
+    @staticmethod
+    def _date_yyyy_mm_dd(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        match = re.match(r"^\d{4}-\d{2}-\d{2}", text)
+        return match.group(0) if match else text[:10]
+
+    def _bucket_date_meta_parts(self, bucket: dict | None = None, moment: dict | None = None) -> list[str]:
+        bucket = bucket or {}
+        moment = moment or {}
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        moment_meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+        created = self._date_yyyy_mm_dd(
+            meta.get("created")
+            or moment_meta.get("bucket_created")
+            or moment.get("created_at")
+        )
+        return [f"[created:{created}]"] if created else []
+
     def _direct_bucket_header(self, bucket: dict, moment: dict) -> str:
         bucket_id = str(bucket.get("id") or moment.get("bucket_id") or "")
         title = self._moment_bucket_title(moment) or str(
             (bucket.get("metadata", {}) or {}).get("name") or bucket_id
         )
         section = str(moment.get("section") or "body")
-        return f"[bucket_id:{bucket_id}] [moment_id:{moment.get('moment_id') or ''}] {section} {title}".strip()
+        date_part = " ".join(self._bucket_date_meta_parts(bucket, moment))
+        return (
+            f"[bucket_id:{bucket_id}] [moment_id:{moment.get('moment_id') or ''}] "
+            f"{date_part} {section} {title}"
+        ).strip()
 
     @staticmethod
     def _rendered_bucket_content(bucket: dict) -> str:
@@ -4349,8 +4940,10 @@ class GatewayService:
         title = self._moment_bucket_title(moment)
         title_part = f" {title}" if title else ""
         suffix = f" ({note})" if note else ""
+        date_part = " ".join(self._bucket_date_meta_parts(moment=moment))
+        date_part = f" {date_part}" if date_part else ""
         return (
-            f"- [bucket_id:{moment['bucket_id']}] [moment_id:{moment['moment_id']}] "
+            f"- [bucket_id:{moment['bucket_id']}] [moment_id:{moment['moment_id']}]{date_part} "
             f"{label}{title_part}: {self._moment_text(moment, max_chars)}{suffix}"
         )
 
@@ -5379,6 +5972,7 @@ class GatewayService:
         relationship_weather: str,
         favorite_memory: str,
         related_memory: str,
+        targeted_memory_detail: str,
         dream_context: str,
         memory_detail_recall_instruction: str = "",
         context_mode: str = "",
@@ -5406,6 +6000,7 @@ class GatewayService:
                 favorite_memory,
                 recent_context,
                 recalled_memory,
+                targeted_memory_detail,
                 related_memory,
                 memory_detail_recall_instruction,
                 dream_context,
@@ -5423,6 +6018,7 @@ class GatewayService:
             add_section("Recent Context", recent_context)
             add_section("Context Mode", f"context_mode: {context_mode}" if context_mode.strip() else "")
             add_section("Recalled Memory", recalled_memory)
+            add_section("Targeted Memory Detail", targeted_memory_detail)
             add_section("Diffused Memory", related_memory)
             add_section("Memory Detail Request", memory_detail_recall_instruction)
             if persona_block.strip():
@@ -5702,6 +6298,8 @@ class GatewayService:
         recalled_moments: list[dict],
         recalled_memory: str,
         related_memory: str,
+        targeted_memory_detail: str,
+        targeted_memory_detail_debug: dict[str, Any],
         dream_context: str,
         dream_context_status: dict[str, Any],
         recent_context: str,
@@ -5744,7 +6342,14 @@ class GatewayService:
                 ]
             )
         )
-        injected_bucket_ids = list(dict.fromkeys(recalled_bucket_ids + diffused_bucket_ids + favorite_ids))
+        targeted_bucket_ids = [
+            str(item)
+            for item in (targeted_memory_detail_debug or {}).get("accepted_ids", []) or []
+            if str(item or "").strip()
+        ]
+        injected_bucket_ids = list(
+            dict.fromkeys(recalled_bucket_ids + diffused_bucket_ids + favorite_ids + targeted_bucket_ids)
+        )
         explicit_lookup = self._query_explicitly_requests_caution_memory(query)
         bucket_map = {
             str(bucket.get("id") or ""): bucket
@@ -5764,6 +6369,8 @@ class GatewayService:
             "dream_context_status": dream_context_status,
             "query_planner_debug": query_planner_debug or self._query_planner_debug_base(query),
             "memory_detail_recall_debug": self._memory_detail_recall_debug_base(injected_bucket_ids),
+            "targeted_memory_detail_debug": targeted_memory_detail_debug
+            or self._targeted_memory_detail_debug_base(),
             "injected_bucket_ids": injected_bucket_ids,
             "recalled_bucket_ids": recalled_bucket_ids,
             "diffused_bucket_ids": diffused_bucket_ids,
@@ -5803,6 +6410,7 @@ class GatewayService:
             ],
             "context_mode": context_mode,
             "recalled_memory": recalled_memory,
+            "targeted_memory_detail": targeted_memory_detail,
             "diffused_memory": related_memory,
             "dream_context": dream_context,
             "stable_context": stable_context,

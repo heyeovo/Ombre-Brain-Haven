@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import re
 import shutil
@@ -82,23 +83,38 @@ class AnchorMigration:
     deduped_assistant_reflection: list[str]
     kept_affect_anchor: str
     new_content: str
+    original_content_sha256: str = ""
 
-    def as_dict(self, *, preview_chars: int = 0) -> dict[str, Any]:
+    def as_dict(self, *, preview_chars: int = 0, include_full_content: bool = True) -> dict[str, Any]:
         preview = self.new_content
         if preview_chars and len(preview) > preview_chars:
             preview = preview[:preview_chars].rstrip() + "\n...[truncated]"
-        return {
+        data = {
             "bucket_id": self.bucket_id,
             "title": self.title,
+            "bucket_title": self.title,
             "path": self.path,
             "original_affect_anchor": self.original_affect_anchor,
+            "original_content_sha256": self.original_content_sha256,
             "move_to_moment": self.move_to_moment,
+            "proposed_moment": self.move_to_moment,
             "move_to_assistant_reflection": self.move_to_assistant_reflection,
+            "proposed_assistant_reflection": self.move_to_assistant_reflection,
             "deduped_moment": self.deduped_moment,
             "deduped_assistant_reflection": self.deduped_assistant_reflection,
             "kept_affect_anchor": self.kept_affect_anchor,
+            "proposed_kept_affect_anchor": self.kept_affect_anchor,
             "new_structure_preview": preview,
+            "new_text_preview": preview,
+            "new_content_sha256": sha256_text(self.new_content),
         }
+        if include_full_content:
+            data["new_content_full"] = self.new_content
+        return data
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()
 
 
 def canonical_heading(heading: str) -> str:
@@ -219,6 +235,7 @@ def plan_bucket_migration(bucket: dict[str, Any]) -> AnchorMigration | None:
         deduped_assistant_reflection=deduped_reflection,
         kept_affect_anchor="\n\n".join(kept_anchor_blocks).strip(),
         new_content=new_content,
+        original_content_sha256=sha256_text(content),
     )
 
 
@@ -459,13 +476,74 @@ async def build_plan(mgr: BucketManager, *, include_archive: bool = False, bucke
     return plan
 
 
+def str_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def plan_item_from_dict(data: dict[str, Any], *, source: Path) -> AnchorMigration:
+    bucket_id = str(data.get("bucket_id") or "").strip()
+    path = str(data.get("path") or "").strip()
+    new_content = data.get("new_content_full")
+    original_hash = str(data.get("original_content_sha256") or "").strip()
+    new_hash = str(data.get("new_content_sha256") or "").strip()
+    if not bucket_id:
+        raise ValueError(f"{source}: plan item missing bucket_id")
+    if not path:
+        raise ValueError(f"{source}: plan item {bucket_id} missing path")
+    if not isinstance(new_content, str) or not new_content.strip():
+        raise ValueError(f"{source}: plan item {bucket_id} missing new_content_full")
+    if not original_hash:
+        raise ValueError(f"{source}: plan item {bucket_id} missing original_content_sha256")
+    if not new_hash:
+        raise ValueError(f"{source}: plan item {bucket_id} missing new_content_sha256")
+    actual_new_hash = sha256_text(new_content)
+    if actual_new_hash != new_hash:
+        raise ValueError(f"{source}: plan item {bucket_id} new_content_sha256 mismatch")
+    return AnchorMigration(
+        bucket_id=bucket_id,
+        title=str(data.get("bucket_title") or data.get("title") or bucket_id),
+        path=path,
+        original_affect_anchor=str(data.get("original_affect_anchor") or ""),
+        move_to_moment=str_list(data.get("proposed_moment", data.get("move_to_moment"))),
+        move_to_assistant_reflection=str_list(
+            data.get("proposed_assistant_reflection", data.get("move_to_assistant_reflection"))
+        ),
+        deduped_moment=str_list(data.get("deduped_moment")),
+        deduped_assistant_reflection=str_list(data.get("deduped_assistant_reflection")),
+        kept_affect_anchor=str(data.get("proposed_kept_affect_anchor", data.get("kept_affect_anchor") or "")),
+        new_content=new_content,
+        original_content_sha256=original_hash,
+    )
+
+
+def load_plan_file(path: Path) -> tuple[list[AnchorMigration], dict[str, Any]]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path}: plan file must contain a JSON object")
+    mode = str(payload.get("mode") or "dry_run")
+    if mode not in {"dry_run", "preview"}:
+        raise ValueError(f"{path}: --from-plan expects a dry_run plan, got {mode!r}")
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list):
+        raise ValueError(f"{path}: plan file missing items list")
+    return [plan_item_from_dict(item, source=path) for item in raw_items if isinstance(item, dict)], payload
+
+
 async def apply_plan(plan: list[AnchorMigration], mgr: BucketManager, config: dict[str, Any]) -> list[dict[str, Any]]:
     engine = EmbeddingEngine(config)
     moment_store = MemoryMomentStore(config)
     results = []
     for item in plan:
         result = {"bucket_id": item.bucket_id, "title": item.title, "path": item.path}
-        ok = write_bucket_content(item)
+        try:
+            ok = write_bucket_content(item)
+        except ValueError as exc:
+            result["written"] = False
+            result["error"] = str(exc)
+            results.append(result)
+            continue
         result["written"] = bool(ok)
         if not ok:
             results.append(result)
@@ -504,6 +582,9 @@ def write_bucket_content(item: AnchorMigration) -> bool:
     if not path.exists():
         return False
     post = frontmatter.load(path)
+    original_hash = str(getattr(item, "original_content_sha256", "") or "").strip()
+    if original_hash and sha256_text(post.content) != original_hash:
+        raise ValueError("original_content_sha256_mismatch")
     post.content = item.new_content
     post["updated_at"] = now_iso()
     path.write_text(frontmatter.dumps(post), encoding="utf-8")
@@ -548,14 +629,90 @@ def summarize(plan: list[AnchorMigration]) -> dict[str, int]:
     }
 
 
+def fenced_block(text: str) -> list[str]:
+    body = str(text or "").strip()
+    if not body:
+        body = "(empty)"
+    return ["```markdown", body, "```"]
+
+
+def bullet_lines(items: list[str]) -> list[str]:
+    if not items:
+        return ["- (none)"]
+    return [f"- {item}" for item in items]
+
+
+def format_markdown_review(
+    plan: list[AnchorMigration],
+    payload: dict[str, Any],
+    *,
+    preview_chars: int = 0,
+) -> str:
+    summary = payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}
+    lines = [
+        "# Affect Anchor Migration Dry Run",
+        "",
+        "This is a preview only. It does not write buckets, refresh embeddings, or rebuild the moment index.",
+        "",
+        f"- mode: `{payload.get('mode') or 'dry_run'}`",
+        f"- buckets_dir: `{payload.get('buckets_dir') or ''}`",
+        f"- state_dir: `{payload.get('state_dir') or ''}`",
+        f"- buckets_to_change: `{summary.get('buckets_to_change', 0)}`",
+        f"- moment_paragraphs: `{summary.get('moment_paragraphs', 0)}`",
+        f"- assistant_reflection_paragraphs: `{summary.get('assistant_reflection_paragraphs', 0)}`",
+        "",
+    ]
+    if not plan:
+        lines.append("No buckets need migration.")
+        return "\n".join(lines).rstrip() + "\n"
+
+    for index, item in enumerate(plan, start=1):
+        data = item.as_dict(preview_chars=preview_chars)
+        lines.extend(
+            [
+                f"## {index}. {item.title or item.bucket_id}",
+                "",
+                f"- bucket id: `{item.bucket_id}`",
+                f"- bucket 标题: {item.title}",
+                f"- path: `{item.path}`",
+                "",
+                "### 原 affect_anchor",
+                "",
+                *fenced_block(data["original_affect_anchor"]),
+                "",
+                "### 拟迁出的 moment",
+                "",
+                *bullet_lines(data["proposed_moment"]),
+                "",
+                "### 拟迁出的 assistant_reflection",
+                "",
+                *bullet_lines(data["proposed_assistant_reflection"]),
+                "",
+                "### 拟保留的 affect_anchor",
+                "",
+                *fenced_block(data["proposed_kept_affect_anchor"]),
+                "",
+                "### 新文本预览",
+                "",
+                *fenced_block(data["new_text_preview"]),
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Dry-run or apply migration of fact/reflection prose out of ### affect_anchor blocks."
     )
     parser.add_argument("--bucket-id", action="append", default=[], help="Only inspect this bucket id. Repeatable.")
+    parser.add_argument("--buckets-dir", default="", help="Override config buckets_dir for this run.")
+    parser.add_argument("--state-dir", default="", help="Override config state_dir. With --buckets-dir, defaults to sibling state/.")
     parser.add_argument("--include-archive", action="store_true", help="Also scan archived buckets.")
     parser.add_argument("--preview-chars", type=int, default=0, help="Truncate each new_structure_preview. 0 = full.")
     parser.add_argument("--output", default="", help="Write the JSON payload to this file.")
+    parser.add_argument("--output-md", default="", help="Write a human-readable Markdown review to this file.")
+    parser.add_argument("--from-plan", default="", help="Load a prior dry-run JSON plan instead of scanning buckets.")
     parser.add_argument("--apply", action="store_true", help="Write bucket content, refresh embeddings, and upsert moments.")
     parser.add_argument("--yes", action="store_true", help="Required with --apply.")
     parser.add_argument("--backup-dir", default="", help="Backup directory for --apply. Defaults under state_dir.")
@@ -566,22 +723,60 @@ async def amain(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.apply and not args.yes:
         raise SystemExit("--apply requires --yes")
+    from_plan = str(args.from_plan or "").strip()
+    if from_plan and (args.bucket_id or args.include_archive):
+        raise SystemExit("--from-plan cannot be combined with --bucket-id or --include-archive")
+
+    loaded_plan_payload: dict[str, Any] = {}
+    loaded_plan: list[AnchorMigration] | None = None
+    if from_plan:
+        loaded_plan, loaded_plan_payload = load_plan_file(Path(from_plan))
 
     config = load_config()
+    if from_plan:
+        plan_buckets_dir = str(loaded_plan_payload.get("buckets_dir") or "").strip()
+        plan_state_dir = str(loaded_plan_payload.get("state_dir") or "").strip()
+        if plan_buckets_dir and not str(args.buckets_dir or "").strip():
+            config["buckets_dir"] = plan_buckets_dir
+        if plan_state_dir and not str(args.state_dir or "").strip():
+            config["state_dir"] = plan_state_dir
+    buckets_dir = str(args.buckets_dir or "").strip()
+    if buckets_dir:
+        config["buckets_dir"] = buckets_dir
+        config["state_dir"] = str(Path(buckets_dir).resolve().parent / "state")
+    state_dir = str(args.state_dir or "").strip()
+    if state_dir:
+        config["state_dir"] = state_dir
     mgr = BucketManager(config)
-    bucket_ids = {str(item).strip() for item in args.bucket_id if str(item).strip()}
-    plan = await build_plan(mgr, include_archive=bool(args.include_archive), bucket_ids=bucket_ids or None)
+    if loaded_plan is not None:
+        plan = loaded_plan
+    else:
+        bucket_ids = {str(item).strip() for item in args.bucket_id if str(item).strip()}
+        plan = await build_plan(mgr, include_archive=bool(args.include_archive), bucket_ids=bucket_ids or None)
     payload: dict[str, Any] = {
         "mode": "apply" if args.apply else "dry_run",
         "buckets_dir": config.get("buckets_dir"),
+        "state_dir": config.get("state_dir"),
         "summary": summarize(plan),
         "items": [item.as_dict(preview_chars=max(0, int(args.preview_chars))) for item in plan],
     }
+    if from_plan:
+        payload["from_plan"] = from_plan
+        payload["loaded_plan_mode"] = loaded_plan_payload.get("mode", "dry_run")
     if args.apply:
         backup_dir = Path(args.backup_dir) if str(args.backup_dir or "").strip() else default_backup_dir(config)
         payload["backup_dir"] = str(backup_dir)
         payload["backup"] = backup_plan_files(plan, backup_dir)
         payload["results"] = await apply_plan(plan, mgr, config)
+    output_md = str(args.output_md or "").strip()
+    if output_md:
+        output_md_path = Path(output_md)
+        output_md_path.parent.mkdir(parents=True, exist_ok=True)
+        output_md_path.write_text(
+            format_markdown_review(plan, payload, preview_chars=max(0, int(args.preview_chars))),
+            encoding="utf-8",
+        )
+        payload["output_md"] = str(output_md_path)
     output = str(args.output or "").strip()
     if output:
         output_path = Path(output)

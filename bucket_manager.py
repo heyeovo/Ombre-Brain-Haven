@@ -462,6 +462,7 @@ class BucketManager:
         query_valence: float = None,
         query_arousal: float = None,
         include_archive: bool = False,
+        show_all: bool = False,   # 新增：为True时不过滤/惩罚resolved桶
     ) -> list[dict]:
         """
         Multi-dimensional indexed search for memory buckets.
@@ -554,10 +555,15 @@ class BucketManager:
                 # Threshold check uses raw (pre-penalty) score so resolved buckets
                 # 阈值用原始分数判定，确保 resolved 桶在关键词命中时仍可被搜出
                 # remain reachable by keyword (penalty applied only to ranking).
-                if normalized >= self.fuzzy_threshold:
+                is_resolved = meta.get("resolved", False)
+                # show_all模式下resolved桶跳过阈值
+                if not show_all and normalized < self.fuzzy_threshold:
+                    continue
+                threshold = 10 if show_all else self.fuzzy_threshold
+                if normalized >= self.fuzzy_threshold or show_all:
                     # Resolved buckets get ranking penalty (but still reachable by keyword)
                     # 已解决的桶仅在排序时降权
-                    if meta.get("resolved", False):
+                    if is_resolved and not show_all:
                         normalized *= 0.3
                     bucket["score"] = round(normalized, 2)
                     scored.append(bucket)

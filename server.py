@@ -1048,7 +1048,7 @@ async def trace(
     ripple: bool = False,     # 新增：完整激活+涟漪（仅 touch=True 时有效）
 ) -> str:
     """修改记忆元数据或内容。resolved=1沉底/0激活,pinned=1钉选/0取消,digested=1隐藏(保留但不浮现)/0取消隐藏,content=替换桶正文,delete=True删除。只传需改的,-1或空=不改。touch=True轻触激活，ripple=True完整激活+时间涟漪。"""
-    
+
 
     if not bucket_id or not bucket_id.strip():
         return "请提供有效的 bucket_id。"
@@ -1441,6 +1441,9 @@ async def api_search(request):
         limit = int(request.query_params.get("limit", 50))
         matches = await bucket_mgr.search(query, limit=limit, include_archive=include_archive)
         
+        show_all = request.query_params.get("show_all", "true").lower() in ("1", "true")
+        matches = await bucket_mgr.search(query, limit=limit, include_archive=include_archive, show_all=show_all)
+
         result = []
         for b in matches:
             meta = b.get("metadata", {})
@@ -1563,9 +1566,19 @@ async def api_breath_debug(request):
                     "raw_total": round(raw_total, 4),
                     "normalized": round(normalized, 2),
                     "passed_threshold": normalized >= bucket_mgr.fuzzy_threshold,
+                    "vector_score": vector_map.get(bid, 0.0),
                 })
             except Exception:
                 continue
+
+        # 在 for bucket in all_buckets 循环之前加
+        vector_map = {}
+        if query:
+            try:
+                vr = await embedding_engine.search_similar(query, top_k=200)
+                vector_map = {bid: round(score, 4) for bid, score in vr}
+            except Exception:
+                pass
 
         results.sort(key=lambda x: x["normalized"], reverse=True)
         passed = [r for r in results if r["passed_threshold"]]

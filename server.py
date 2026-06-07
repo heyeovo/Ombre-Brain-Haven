@@ -6945,6 +6945,7 @@ def _portrait_state_payload() -> dict:
         "updated_at": state.get("updated_at", ""),
         "last_run_date": state.get("last_run_date", ""),
         "portrait": state.get("portrait", {}),
+        "recent_activities": state.get("recent_activities", []),
         "stable_candidates": state.get("stable_candidates", []),
         "profile_fact_candidates": state.get("profile_fact_candidates", []),
     }

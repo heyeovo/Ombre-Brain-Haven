@@ -65,6 +65,13 @@ async def test_daily_portrait_maintainer_writes_evidence_bound_state_only(tmp_pa
                     "confidence": 0.82,
                 }
             ],
+            "add_recent_activity": [
+                {
+                    "text": "小雨最近在推进 Ombre-Brain 换窗 handoff 和 portrait maintainer。",
+                    "evidence": [{"bucket_id": evidence_id}],
+                    "confidence": 0.82,
+                }
+            ],
             "move_to_staging": [
                 {
                     "scope": "relationship",
@@ -112,11 +119,14 @@ async def test_daily_portrait_maintainer_writes_evidence_bound_state_only(tmp_pa
 
     assert result["status"] == "initialized"
     assert result["patch_counts"]["add_recent"] == 1
+    assert result["patch_counts"]["add_recent_activity"] == 1
     assert state_path.exists()
 
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["last_run_date"] == "2026-06-07"
     assert state["daily_summaries"] == {}
+    assert state["recent_activities"][0]["text"] == "小雨最近在推进 Ombre-Brain 换窗 handoff 和 portrait maintainer。"
+    assert state["recent_activities"][0]["evidence"] == [{"bucket_id": evidence_id}]
     assert state["portrait"]["user"]["recent_buffer"][0]["evidence"] == [{"bucket_id": evidence_id}]
     assert state["portrait"]["relationship"]["staging_pool"][0]["evidence"] == [{"bucket_id": evidence_id}]
     assert state["portrait"]["relationship"]["mid_term_evidence"] == [{"bucket_id": evidence_id}]
@@ -126,6 +136,10 @@ async def test_daily_portrait_maintainer_writes_evidence_bound_state_only(tmp_pa
 
     all_buckets = await bucket_mgr.list_all(include_archive=True)
     assert len(all_buckets) == 2
+
+    handoff_user = engine.build_handoff_sections(max_recent_items=4)["user"]
+    assert "最近在做什么:" in handoff_user
+    assert "小雨最近在推进 Ombre-Brain 换窗 handoff 和 portrait maintainer" in handoff_user
 
 
 @pytest.mark.asyncio
@@ -395,6 +409,81 @@ def test_portrait_mid_term_rewrite_requires_staging_evidence(tmp_path, test_conf
     assert normalized["rewrite_mid_term"][0]["evidence"] == [{"bucket_id": "fresh-bucket"}]
 
 
+def test_portrait_recent_activity_is_evidence_bound_user_context(tmp_path, test_config):
+    state_path = tmp_path / "state" / "portrait_state.json"
+    engine = DailyPortraitMaintainer(
+        {
+            **test_config,
+            "portrait": {
+                "enabled": True,
+                "state_path": str(state_path),
+            },
+        }
+    )
+    materials = {
+        "buckets": [{"bucket_id": "activity-bucket", "source_date": "2026-06-07"}],
+        "persona_events": [],
+        "previous_portrait": engine._portrait_snapshot(engine._empty_state()),
+    }
+
+    normalized, rejected = engine._normalize_patch(
+        {
+            "add_recent_activity": [
+                {
+                    "text": "小雨最近在给画像维护者补最近在做什么。",
+                    "evidence": [{"bucket_id": "activity-bucket"}],
+                    "confidence": 0.8,
+                },
+                {
+                    "text": "这条没有证据，不能进画像。",
+                    "evidence": [{"bucket_id": "missing-bucket"}],
+                    "confidence": 0.8,
+                },
+            ]
+        },
+        materials,
+    )
+
+    assert normalized["add_recent_activity"][0]["scope"] == "user"
+    assert normalized["add_recent_activity"][0]["evidence"] == [{"bucket_id": "activity-bucket"}]
+    assert rejected[0]["key"] == "add_recent_activity"
+    assert rejected[0]["reason"] == "missing_valid_evidence"
+
+
+def test_portrait_fallback_extracts_recent_activity_without_scope(tmp_path, test_config):
+    engine = DailyPortraitMaintainer(
+        {
+            **test_config,
+            "portrait": {
+                "enabled": True,
+                "state_path": str(tmp_path / "state" / "portrait_state.json"),
+            },
+        }
+    )
+
+    patch = engine._fallback_patch(
+        {
+            "date": "2026-06-07",
+            "buckets": [
+                {
+                    "bucket_id": "project-bucket",
+                    "name": "handoff project",
+                    "tags": ["project_event"],
+                    "domain": ["记忆系统"],
+                    "source_date": "2026-06-07",
+                    "source_excerpt": "小雨最近在给 portrait maintainer 加最近在做什么。",
+                    "confidence": 0.74,
+                }
+            ],
+        },
+        initial=True,
+    )
+
+    assert patch["add_recent"] == []
+    assert patch["add_recent_activity"][0]["text"] == "小雨最近在给 portrait maintainer 加最近在做什么"
+    assert patch["add_recent_activity"][0]["evidence"] == [{"bucket_id": "project-bucket"}]
+
+
 def test_handoff_recent_continuity_sorts_equal_timestamps_without_dict_compare(tmp_path, test_config):
     state_path = tmp_path / "state" / "portrait_state.json"
     engine = DailyPortraitMaintainer(
@@ -622,6 +711,18 @@ async def test_initial_portrait_keeps_recent_days_by_source_date_and_demotes_old
                     "confidence": 0.72,
                 },
             ],
+            "add_recent_activity": [
+                {
+                    "text": "小雨最近在确认当天材料能不能进入最近事项。",
+                    "evidence": [{"bucket_id": current_id}],
+                    "confidence": 0.72,
+                },
+                {
+                    "text": "五月旧材料不该变成最近在做什么。",
+                    "evidence": [{"bucket_id": old_id}],
+                    "confidence": 0.72,
+                },
+            ],
             "move_to_staging": [],
             "rewrite_mid_term": [],
             "stable_candidate": [],
@@ -640,6 +741,7 @@ async def test_initial_portrait_keeps_recent_days_by_source_date_and_demotes_old
     relationship = state["portrait"]["relationship"]
 
     assert state["daily_summaries"] == {}
+    assert [row["text"] for row in state["recent_activities"]] == ["小雨最近在确认当天材料能不能进入最近事项。"]
     recent_texts = {row["text"] for row in relationship["recent_buffer"]}
     assert recent_texts == {
         "当天凌晨材料可以进入 recent。",

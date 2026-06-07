@@ -18,6 +18,7 @@ logger = logging.getLogger("ombre_brain.portrait")
 PORTRAIT_SCOPES = ("user", "persona", "relationship")
 PATCH_KEYS = (
     "add_recent",
+    "add_recent_activity",
     "move_to_staging",
     "rewrite_mid_term",
     "stable_candidate",
@@ -40,6 +41,13 @@ PORTRAIT_PROMPT_TEMPLATE = """你是 {ai_name}，正在维护你和 {user_displa
       "confidence": 0.72
     }}
   ],
+  "add_recent_activity": [
+    {{
+      "text": "{user_display_name}最近在做/推进的具体事，最多60字",
+      "evidence": [{{"bucket_id": "证据桶id", "moment_id": ""}}],
+      "confidence": 0.72
+    }}
+  ],
   "move_to_staging": [],
   "rewrite_mid_term": [
     {{
@@ -55,13 +63,14 @@ PORTRAIT_PROMPT_TEMPLATE = """你是 {ai_name}，正在维护你和 {user_displa
 }}
 
 边界：
-- user 只写 {user_display_name} 的证据化状态、偏好、边界、最近在做的事。
+- user 只写 {user_display_name} 的证据化状态、偏好、边界；“最近在做什么”优先写 add_recent_activity。
 - persona 写 {ai_name} 的自我理解和回复姿态。
 - relationship 写这段关系的边界、里程碑和气候。
+- add_recent_activity 只回答“{user_display_name}最近在做什么/推进什么/忙什么”，偏项目、生活事项、正在处理的问题；不要写纯情绪、关系天气或长期偏好。
 - 不要滥用“{user_display_name}喜欢...”。只有证据明确表达稳定偏好、反复选择或清楚的喜欢时才写 user 偏好；关系天气、撒娇、确认、互动模式优先写 relationship。
-- initial_run=true 时，add_recent 只放真正短期/当天观察；高置信、能跨窗口携带的观察应放入 move_to_staging。每个 scope 尽量给 1-3 条 move_to_staging，除非证据不足。
+- initial_run=true 时，add_recent 和 add_recent_activity 只放真正短期/当天或最近几天观察；高置信、能跨窗口携带的观察应放入 move_to_staging。每个 scope 尽量给 1-3 条 move_to_staging，除非证据不足。
 - rewrite_mid_term 可综合 staging_pool 或本次 move_to_staging；初次初始化时，如果本次 move_to_staging 已足够支撑，可以写一条谨慎的 mid_term。
-- 输出要克制：daily_summary 最多60字，add_recent 最多4条，move_to_staging 最多8条，rewrite_mid_term 最多3条，每条 text 最多70字。
+- 输出要克制：daily_summary 最多60字，add_recent 最多4条，add_recent_activity 最多3条，move_to_staging 最多8条，rewrite_mid_term 最多3条，每条 text 最多70字。
 - profile_fact_candidate 只提候选，不确认、不写入长期 profile_fact。
 - stable_candidate 只提候选，不直接覆盖 stable portrait。
 - rewrite_mid_term 只能综合 staging_pool 里的观察，或本次明确 move_to_staging 的观察；不要直接把当天新材料写成 mid_term。
@@ -299,8 +308,19 @@ class DailyPortraitMaintainer:
     def build_handoff_sections(self, *, max_recent_items: int = 4) -> dict[str, str]:
         state = self.load_state()
         portrait = state.get("portrait", {}) if isinstance(state.get("portrait"), dict) else {}
+        user_portrait = self._format_scope_block(portrait.get("user", {}), max_recent_items=max_recent_items)
+        recent_activity = self._format_recent_activity_block(state, max_items=3)
+        if recent_activity:
+            user_portrait = "\n".join(
+                part
+                for part in [
+                    user_portrait,
+                    "最近在做什么:\n" + recent_activity,
+                ]
+                if part.strip()
+            )
         return {
-            "user": self._format_scope_block(portrait.get("user", {}), max_recent_items=max_recent_items),
+            "user": user_portrait,
             "persona": self._format_scope_block(portrait.get("persona", {}), max_recent_items=max_recent_items),
             "relationship": self._format_scope_block(portrait.get("relationship", {}), max_recent_items=max_recent_items),
             "recent_continuity": self._format_recent_continuity(state, max_items=max_recent_items),
@@ -388,11 +408,29 @@ class DailyPortraitMaintainer:
 
     def _fallback_patch(self, materials: dict, *, initial: bool) -> dict:
         add_recent = []
+        add_recent_activity = []
         move_to_staging = []
+        recent_dates = self._recent_date_keys(str(materials.get("date") or ""))
         for bucket in materials.get("buckets", [])[:8]:
             scope = self._fallback_scope(bucket)
             text = self._fallback_text(bucket, scope)
             bucket_id = str(bucket.get("bucket_id") or "")
+            if (
+                bucket_id
+                and len(add_recent_activity) < 3
+                and (not initial or str(bucket.get("source_date") or "") in recent_dates)
+            ):
+                activity_text = self._fallback_activity_text(bucket)
+                if activity_text and self._norm(activity_text) not in {
+                    self._norm(item.get("text", "")) for item in add_recent_activity
+                }:
+                    add_recent_activity.append(
+                        {
+                            "text": activity_text,
+                            "evidence": [{"bucket_id": bucket_id}],
+                            "confidence": float(bucket.get("confidence") or 0.55),
+                        }
+                    )
             if not scope or not text or not bucket_id:
                 continue
             row = {
@@ -409,6 +447,7 @@ class DailyPortraitMaintainer:
         return {
             "daily_summary": daily_summary,
             "add_recent": add_recent,
+            "add_recent_activity": add_recent_activity,
             "move_to_staging": move_to_staging,
             "rewrite_mid_term": [],
             "stable_candidate": [],
@@ -441,7 +480,7 @@ class DailyPortraitMaintainer:
         known_bucket_ids = current_bucket_ids | portrait_bucket_ids
         known_session_ids = current_session_ids | portrait_session_ids
 
-        for key in ("add_recent", "move_to_staging"):
+        for key in ("add_recent", "add_recent_activity", "move_to_staging"):
             raw_items = patch.get(key, [])
             if isinstance(raw_items, dict):
                 raw_items = [raw_items]
@@ -505,6 +544,8 @@ class DailyPortraitMaintainer:
         if not isinstance(item, dict):
             return None, "not_object"
         scope = str(item.get("scope") or item.get("portrait") or item.get("section") or "").strip().lower()
+        if key == "add_recent_activity":
+            scope = "user"
         if scope not in PORTRAIT_SCOPES and key != "skip":
             return None, "invalid_scope"
         text = str(
@@ -555,6 +596,14 @@ class DailyPortraitMaintainer:
             else:
                 patch.setdefault("move_to_staging", []).append(item)
         patch["add_recent"] = kept
+        kept_activities = []
+        for item in patch.get("add_recent_activity", []) or []:
+            evidence = item.get("evidence", []) if isinstance(item, dict) else []
+            if self._evidence_intersects(evidence, recent_bucket_ids, recent_session_ids):
+                kept_activities.append(item)
+            else:
+                patch.setdefault("skip", []).append({"text": item.get("text", ""), "scope": "user"})
+        patch["add_recent_activity"] = kept_activities
 
     def _annotate_patch_source_dates(self, patch: dict, materials: dict) -> None:
         bucket_dates = {
@@ -745,6 +794,13 @@ class DailyPortraitMaintainer:
                     summaries[summary_date] = summary_text
             state["handoff_recent_summaries"] = dict(sorted(summaries.items())[-90:])
 
+        for item in patch.get("add_recent_activity", []):
+            self._upsert_portrait_item(
+                state["recent_activities"],
+                item,
+                date_key,
+                max_items=self.recent_buffer_max,
+            )
         for item in patch.get("add_recent", []):
             self._upsert_portrait_item(
                 portrait[item["scope"]]["recent_buffer"],
@@ -867,6 +923,25 @@ class DailyPortraitMaintainer:
             evidence = self._format_evidence(row.get("evidence", []))
             lines.append(f"- recent: {self._clip(row.get('text', ''), 180)}" + (f" ({evidence})" if evidence else ""))
         return "\n".join(line for line in lines if line.strip())
+
+    def _format_recent_activity_block(self, state: dict, *, max_items: int) -> str:
+        rows = state.get("recent_activities", []) if isinstance(state.get("recent_activities"), list) else []
+        clean_rows = [row for row in rows if isinstance(row, dict) and str(row.get("text") or "").strip()]
+        clean_rows.sort(
+            key=lambda row: (
+                self._row_source_date(row),
+                str(row.get("updated_at") or row.get("created_at") or ""),
+            ),
+            reverse=True,
+        )
+        lines = []
+        for row in clean_rows[: max(0, max_items)]:
+            date_key = self._row_source_date(row)
+            evidence = self._format_evidence(row.get("evidence", []))
+            prefix = f"- {date_key}: " if date_key else "- "
+            suffix = f" ({evidence})" if evidence else ""
+            lines.append(f"{prefix}{self._clip(row.get('text', ''), 150)}{suffix}")
+        return "\n".join(dict.fromkeys(line for line in lines if line.strip()))
 
     def _format_recent_continuity(self, state: dict, *, max_items: int) -> str:
         by_date: dict[str, list[tuple[str, dict]]] = {}
@@ -1069,6 +1144,33 @@ class DailyPortraitMaintainer:
             text = str(bucket_payload.get("source_excerpt") or bucket_payload.get("text") or "")
         return self._clean_fallback_text(text)
 
+    def _fallback_activity_text(self, bucket_payload: dict) -> str:
+        tags = {str(tag).lower() for tag in bucket_payload.get("tags", []) or []}
+        domains = {str(item).lower() for item in bucket_payload.get("domain", []) or []}
+        text = self._clean_fallback_text(
+            str(bucket_payload.get("source_excerpt") or bucket_payload.get("text") or "")
+        )
+        if not text:
+            return ""
+        project_like = bool(
+            tags & {"project_event", "work_event", "task_event"}
+            or domains & {"记忆系统", "代码", "工作", "项目", "开发"}
+        )
+        activity_like = bool(
+            re.search(
+                r"(小雨|她|我).{0,12}(最近在|这几天在|这两天在|正在|继续|开始|准备|推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做)",
+                text,
+            )
+            or re.search(r"(最近在|这几天在|这两天在|正在).{0,16}(推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做)", text)
+        )
+        if project_like and not activity_like:
+            activity_like = bool(re.search(r"(推进|调整|修改|修|部署|测试|写|搭|研究|排查|调试|做|实现|开发|准备|加)", text))
+        if not activity_like:
+            return ""
+        if re.search(r"(关系天气|撒娇|亲密|喜欢被|确认我在)", text) and not project_like:
+            return ""
+        return self._clip(text, 120)
+
     def _clean_fallback_text(self, text: str) -> str:
         text = strip_wikilinks(str(text or ""))
         text = re.sub(r"^Title:\s*.*?\bContent:\s*", "", text, flags=re.DOTALL)
@@ -1079,7 +1181,7 @@ class DailyPortraitMaintainer:
 
     def _portrait_snapshot(self, state: dict) -> dict:
         portrait = state.get("portrait", {}) if isinstance(state.get("portrait"), dict) else {}
-        return {
+        snapshot = {
             scope: {
                 "recent_buffer": (portrait.get(scope, {}) or {}).get("recent_buffer", [])[:8],
                 "staging_pool": (portrait.get(scope, {}) or {}).get("staging_pool", [])[:8],
@@ -1090,6 +1192,10 @@ class DailyPortraitMaintainer:
             }
             for scope in PORTRAIT_SCOPES
         }
+        snapshot["recent_activities"] = (
+            state.get("recent_activities", []) if isinstance(state.get("recent_activities"), list) else []
+        )[:8]
+        return snapshot
 
     def _portrait_evidence_sets(self, portrait: Any, *, staging_only: bool = False) -> tuple[set[str], set[str]]:
         bucket_ids: set[str] = set()
@@ -1110,6 +1216,10 @@ class DailyPortraitMaintainer:
                 if not isinstance(row, dict):
                     continue
                 self._add_evidence_to_sets(row.get("evidence", []), bucket_ids, session_ids)
+        if not staging_only:
+            for row in portrait.get("recent_activities", []) or []:
+                if isinstance(row, dict):
+                    self._add_evidence_to_sets(row.get("evidence", []), bucket_ids, session_ids)
         return bucket_ids, session_ids
 
     def _add_evidence_to_sets(
@@ -1289,6 +1399,7 @@ class DailyPortraitMaintainer:
             },
             "daily_summaries": {},
             "handoff_recent_summaries": {},
+            "recent_activities": [],
             "stable_candidates": [],
             "profile_fact_candidates": [],
             "skipped": [],
@@ -1303,7 +1414,7 @@ class DailyPortraitMaintainer:
                         base["portrait"][scope].update(value[scope])
             elif key in {"daily_summaries", "handoff_recent_summaries"} and isinstance(value, dict):
                 base[key] = value
-            elif key in {"stable_candidates", "profile_fact_candidates", "skipped", "runs"} and isinstance(value, list):
+            elif key in {"recent_activities", "stable_candidates", "profile_fact_candidates", "skipped", "runs"} and isinstance(value, list):
                 base[key] = value
             elif key in {"version", "updated_at", "last_run_date"}:
                 base[key] = str(value or "")

@@ -2829,6 +2829,12 @@ async def test_api_portrait_state_reports_readonly_state(monkeypatch, tmp_path):
             "persona": {"recent_buffer": [], "staging_pool": [], "mid_term": "", "stable": ""},
             "relationship": {"recent_buffer": [], "staging_pool": [], "mid_term": "", "stable": ""},
         },
+        "recent_activities": [
+            {
+                "text": "小雨最近在看 portrait dashboard。",
+                "evidence": [{"bucket_id": "bucket-user"}],
+            }
+        ],
         "stable_candidates": [{"scope": "relationship", "text": "候选稳定画像", "status": "candidate"}],
         "profile_fact_candidates": [{"scope": "user", "text": "候选画像事实", "status": "candidate"}],
     }
@@ -2856,6 +2862,7 @@ async def test_api_portrait_state_reports_readonly_state(monkeypatch, tmp_path):
     assert payload["updated_at"] == "2026-06-07T12:00:00+00:00"
     assert payload["last_run_date"] == "2026-06-07"
     assert payload["portrait"]["user"]["recent_buffer"][0]["evidence"][0]["bucket_id"] == "bucket-user"
+    assert payload["recent_activities"][0]["text"] == "小雨最近在看 portrait dashboard。"
     assert payload["stable_candidates"][0]["text"] == "候选稳定画像"
     assert payload["profile_fact_candidates"][0]["text"] == "候选画像事实"
 

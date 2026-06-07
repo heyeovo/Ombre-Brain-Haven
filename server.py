@@ -1529,6 +1529,15 @@ async def api_breath_debug(request):
         }
         w_sum = sum(w.values())
 
+ # 在 for bucket in all_buckets 循环之前加
+        vector_map = {}
+        if query:
+            try:
+                vr = await embedding_engine.search_similar(query, top_k=200)
+                vector_map = {bid: round(score, 4) for bid, score in vr}
+            except Exception:
+                pass
+            
         for bucket in all_buckets:
             meta = bucket.get("metadata", {})
             bid = bucket["id"]
@@ -1570,15 +1579,6 @@ async def api_breath_debug(request):
                 })
             except Exception:
                 continue
-
-        # 在 for bucket in all_buckets 循环之前加
-        vector_map = {}
-        if query:
-            try:
-                vr = await embedding_engine.search_similar(query, top_k=200)
-                vector_map = {bid: round(score, 4) for bid, score in vr}
-            except Exception:
-                pass
 
         results.sort(key=lambda x: x["normalized"], reverse=True)
         passed = [r for r in results if r["passed_threshold"]]

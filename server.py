@@ -33,6 +33,7 @@
 # ============================================================
 
 import os
+import re
 import sys
 import random
 import logging
@@ -246,7 +247,8 @@ async def auth_login(request):
     if _verify_any_password(password):
         token = _create_session()
         resp = JSONResponse({"ok": True})
-        resp.set_cookie("ombre_session", token, httponly=True, samesite="none", secure=True, max_age=86400 * 7)
+        resp.set_cookie("ombre_session", token, httponly=True, 
+                        samesite="none", secure=True, max_age=86400 * 7)
         return resp
     return JSONResponse({"error": "密码错误"}, status_code=401)
 
@@ -725,54 +727,58 @@ async def breath(
 
     results = []
     token_used = 0
+
+    is_id_query = bool(re.fullmatch(r"[0-9a-f]{12}", query.strip()))
+
+    if not is_id_query:
         # --- Query模式：pinned桶强制置顶 ---
-    try:
-        all_buckets_temp = await bucket_mgr.list_all(include_archive=False)
-        pinned_buckets = [
-            b for b in all_buckets_temp
-            if b["metadata"].get("pinned") or b["metadata"].get("protected")
-        ]
-        pinned_parts = []
-        for b in pinned_buckets:
-            from rapidfuzz import fuzz
-            name_score = fuzz.partial_ratio(query, b["metadata"].get("name", ""))
-            content_score = fuzz.partial_ratio(query, b.get("content", "")[:500])
-            if max(name_score, content_score) < 40:
-                continue
-            clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
-            summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
-            summary_tokens = count_tokens_approx(summary)
-            token_used += summary_tokens
-            pinned_parts.append(f"📌 [核心准则] [bucket_id:{b['id']}] {summary}")
-        if pinned_parts:
-            results.append("=== 核心准则 ===\n" + "\n---\n".join(pinned_parts))
-    except Exception as e:
-        logger.warning(f"Pinned surfacing in search mode failed: {e}")
-    for bucket in matches:
-        if token_used >= max_tokens:
-            break
         try:
-            clean_meta = {k: v for k, v in bucket["metadata"].items() if k != "tags"}
-            # --- Memory reconstruction: shift displayed valence by current mood ---
-            # --- 记忆重构：根据当前情绪微调展示层 valence（±0.1）---
-            if q_valence is not None and "valence" in clean_meta:
-                original_v = float(clean_meta.get("valence", 0.5))
-                shift = (q_valence - 0.5) * 0.2  # ±0.1 max shift
-                clean_meta["valence"] = max(0.0, min(1.0, original_v + shift))
-            summary = await dehydrator.dehydrate(strip_wikilinks(bucket["content"]), clean_meta)
-            summary_tokens = count_tokens_approx(summary)
-            if token_used + summary_tokens > max_tokens:
-                break
-            await bucket_mgr.soft_touch(bucket["id"])
-            if bucket.get("vector_match"):
-                summary = f"[语义关联] [bucket_id:{bucket['id']}] {summary}"
-            else:
-                summary = f"[bucket_id:{bucket['id']}] {summary}"
-            results.append(summary)
-            token_used += summary_tokens
+            all_buckets_temp = await bucket_mgr.list_all(include_archive=False)
+            pinned_buckets = [
+                b for b in all_buckets_temp
+                if b["metadata"].get("pinned") or b["metadata"].get("protected")
+            ]
+            pinned_parts = []
+            for b in pinned_buckets:
+                from rapidfuzz import fuzz
+                name_score = fuzz.partial_ratio(query, b["metadata"].get("name", ""))
+                content_score = fuzz.partial_ratio(query, b.get("content", "")[:500])
+                if max(name_score, content_score) < 40:
+                    continue
+                clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
+                summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
+                summary_tokens = count_tokens_approx(summary)
+                token_used += summary_tokens
+                pinned_parts.append(f"📌 [核心准则] [bucket_id:{b['id']}] {summary}")
+            if pinned_parts:
+                results.append("=== 核心准则 ===\n" + "\n---\n".join(pinned_parts))
         except Exception as e:
-            logger.warning(f"Failed to dehydrate search result / 检索结果脱水失败: {e}")
-            continue
+            logger.warning(f"Pinned surfacing in search mode failed: {e}")
+        for bucket in matches:
+            if token_used >= max_tokens:
+                break
+            try:
+                clean_meta = {k: v for k, v in bucket["metadata"].items() if k != "tags"}
+                # --- Memory reconstruction: shift displayed valence by current mood ---
+                # --- 记忆重构：根据当前情绪微调展示层 valence（±0.1）---
+                if q_valence is not None and "valence" in clean_meta:
+                    original_v = float(clean_meta.get("valence", 0.5))
+                    shift = (q_valence - 0.5) * 0.2  # ±0.1 max shift
+                    clean_meta["valence"] = max(0.0, min(1.0, original_v + shift))
+                summary = await dehydrator.dehydrate(strip_wikilinks(bucket["content"]), clean_meta)
+                summary_tokens = count_tokens_approx(summary)
+                if token_used + summary_tokens > max_tokens:
+                    break
+                await bucket_mgr.soft_touch(bucket["id"])
+                if bucket.get("vector_match"):
+                    summary = f"[语义关联] [bucket_id:{bucket['id']}] {summary}"
+                else:
+                    summary = f"[bucket_id:{bucket['id']}] {summary}"
+                results.append(summary)
+                token_used += summary_tokens
+            except Exception as e:
+                logger.warning(f"Failed to dehydrate search result / 检索结果脱水失败: {e}")
+                continue
 
         # --- 时间涟漪：基于命中桶的时间，找±24h内的相邻桶 ---
     if len(matches) < 3 and matches:
@@ -1046,6 +1052,15 @@ async def trace(
     if not bucket_id or not bucket_id.strip():
         return "请提供有效的 bucket_id。"
 
+    # --- Touch / activate ---
+    if touch:
+        if ripple:
+            await bucket_mgr.touch(bucket_id)
+            return f"已完整激活记忆桶 {bucket_id}（含涟漪）"
+        else:
+            await bucket_mgr.soft_touch(bucket_id)
+            return f"已轻触激活记忆桶 {bucket_id}"
+        
     # --- Delete mode / 删除模式 ---
     if delete:
         success = await bucket_mgr.delete(bucket_id)

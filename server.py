@@ -1047,7 +1047,8 @@ async def trace(
     touch: bool = False,      # 新增：轻触激活
     ripple: bool = False,     # 新增：完整激活+涟漪（仅 touch=True 时有效）
 ) -> str:
-    """修改记忆元数据或内容。resolved=1沉底/0激活,pinned=1钉选/0取消,digested=1隐藏(保留但不浮现)/0取消隐藏,content=替换桶正文,delete=True删除。只传需改的,-1或空=不改。"""
+    """修改记忆元数据或内容。resolved=1沉底/0激活,pinned=1钉选/0取消,digested=1隐藏(保留但不浮现)/0取消隐藏,content=替换桶正文,delete=True删除。只传需改的,-1或空=不改。touch=True轻触激活，ripple=True完整激活+时间涟漪。"""
+    
 
     if not bucket_id or not bucket_id.strip():
         return "请提供有效的 bucket_id。"

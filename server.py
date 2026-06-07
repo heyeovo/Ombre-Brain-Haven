@@ -1395,6 +1395,17 @@ async def api_bucket_detail(request):
         "score": decay_engine.calculate_score(meta),
     })
 
+@mcp.custom_route("/api/archive/{bucket_id}", methods=["POST"])
+async def api_archive_bucket(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    bucket_id = request.path_params["bucket_id"]
+    success = await bucket_mgr.archive(bucket_id)
+    if not success:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
 @mcp.custom_route("/api/unarchive/{bucket_id}", methods=["POST"])
 async def api_unarchive_bucket(request):
     from starlette.responses import JSONResponse

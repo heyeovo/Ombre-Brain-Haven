@@ -1671,12 +1671,27 @@ async def api_test_prompt(request):
         body = await request.json()
         name = body.get("name")
         content = body.get("content", "")
+        prompt_override = body.get("prompt_override", "").strip()
+
         if name == "dehydrate":
-            result = await dehydrator.dehydrate(content)
+            original = dehydrator.dehydrate_prompt
+            if prompt_override:
+                dehydrator.dehydrate_prompt = prompt_override
+            try:
+                result = await dehydrator.dehydrate(content)
+            finally:
+                dehydrator.dehydrate_prompt = original
         elif name == "analyze":
-            result = await dehydrator.analyze(content)
+            original = dehydrator.analyze_prompt
+            if prompt_override:
+                dehydrator.analyze_prompt = prompt_override
+            try:
+                result = await dehydrator.analyze(content)
+            finally:
+                dehydrator.analyze_prompt = original
         else:
             return JSONResponse({"error": "unknown"}, status_code=400)
+
         return JSONResponse({"ok": True, "result": result})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)

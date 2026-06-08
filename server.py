@@ -1678,7 +1678,7 @@ async def api_test_prompt(request):
             if prompt_override:
                 dehydrator.dehydrate_prompt = prompt_override
             try:
-                result = await dehydrator.dehydrate(content)
+                result = await dehydrator._api_dehydrate(content)
             finally:
                 dehydrator.dehydrate_prompt = original
         elif name == "analyze":
@@ -1686,7 +1686,7 @@ async def api_test_prompt(request):
             if prompt_override:
                 dehydrator.analyze_prompt = prompt_override
             try:
-                result = await dehydrator.analyze(content)
+                result = await dehydrator._api_analyze(content)
             finally:
                 dehydrator.analyze_prompt = original
         else:

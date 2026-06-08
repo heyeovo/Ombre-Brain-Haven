@@ -1663,6 +1663,25 @@ async def api_update_prompts(request):
         return JSONResponse({"ok": True})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+    
+@mcp.custom_route("/api/prompts/test", methods=["POST"])
+async def api_test_prompt(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        body = await request.json()
+        name = body.get("name")
+        content = body.get("content", "")
+        if name == "dehydrate":
+            result = await dehydrator.dehydrate(content)
+        elif name == "analyze":
+            result = await dehydrator.analyze(content)
+        else:
+            return JSONResponse({"error": "unknown"}, status_code=400)
+        return JSONResponse({"ok": True, "result": result})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 @mcp.custom_route("/dashboard", methods=["GET"])
 async def dashboard(request):

@@ -570,6 +570,7 @@ class WordMapStore:
             conn.close()
 
         scores: dict[str, float] = {}
+        anchor_scores: dict[str, dict[str, float]] = {}
         evidence: dict[str, dict[str, Any]] = {}
         for row in rows:
             bucket_id = str(row["bucket_id"] or "").strip()
@@ -591,13 +592,19 @@ class WordMapStore:
                     "terms": [],
                     "direct_terms": [],
                     "neighbor_terms": [],
+                    "anchor_terms": [],
                 },
             )
+            source_terms = [
+                str(source or "").strip()
+                for source in (source_info.get("sources") or [])
+                if str(source or "").strip() in cleaned_terms
+            ]
             row_payload = {
                 "term": term,
                 "kind": source_info.get("kind", ""),
                 "score": round(contribution, 4),
-                "source_terms": list(source_info.get("sources") or []),
+                "source_terms": list(source_terms),
                 "card_source": str(row["source"] or ""),
                 "weak_hint": term in self.weak_hint_terms,
             }
@@ -605,8 +612,37 @@ class WordMapStore:
             target_key = "direct_terms" if source_info.get("kind") == "direct" else "neighbor_terms"
             if term not in bucket_evidence[target_key]:
                 bucket_evidence[target_key].append(term)
+            for source_term in source_terms:
+                per_anchor = anchor_scores.setdefault(source_term, {})
+                per_anchor[bucket_id] = min(1.0, per_anchor.get(bucket_id, 0.0) + contribution)
+                if source_term not in bucket_evidence["anchor_terms"]:
+                    bucket_evidence["anchor_terms"].append(source_term)
 
         ranked_ids = sorted(scores, key=lambda bucket_id: (-scores[bucket_id], bucket_id))[:bucket_limit]
+        anchor_bucket_scores: dict[str, dict[str, float]] = {}
+        reserve_ids: list[str] = []
+        for source_term in cleaned_terms:
+            per_anchor = anchor_scores.get(source_term) or {}
+            if not per_anchor:
+                continue
+            anchor_ranked_ids = sorted(
+                per_anchor,
+                key=lambda bucket_id: (
+                    -per_anchor[bucket_id],
+                    -scores.get(bucket_id, 0.0),
+                    bucket_id,
+                ),
+            )[:1]
+            if not anchor_ranked_ids:
+                continue
+            anchor_bucket_scores[source_term] = {
+                bucket_id: round(per_anchor[bucket_id], 4)
+                for bucket_id in anchor_ranked_ids
+            }
+            for bucket_id in anchor_ranked_ids:
+                if bucket_id not in ranked_ids and bucket_id not in reserve_ids:
+                    reserve_ids.append(bucket_id)
+        returned_ids = ranked_ids + reserve_ids
         return {
             "terms": cleaned_terms,
             "neighbors": [
@@ -617,8 +653,9 @@ class WordMapStore:
                 }
                 for term, info in neighbor_scores.items()
             ],
-            "bucket_scores": {bucket_id: round(scores[bucket_id], 4) for bucket_id in ranked_ids},
-            "evidence": {bucket_id: evidence[bucket_id] for bucket_id in ranked_ids},
+            "bucket_scores": {bucket_id: round(scores[bucket_id], 4) for bucket_id in returned_ids},
+            "anchor_bucket_scores": anchor_bucket_scores,
+            "evidence": {bucket_id: evidence[bucket_id] for bucket_id in returned_ids},
         }
 
     def _hint_neighbor_terms(
@@ -1063,6 +1100,7 @@ def _empty_hint_payload(terms: list[str] | None = None) -> dict[str, Any]:
         "terms": terms or [],
         "neighbors": [],
         "bucket_scores": {},
+        "anchor_bucket_scores": {},
         "evidence": {},
     }
 

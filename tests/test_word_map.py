@@ -94,6 +94,44 @@ def test_word_map_hint_buckets_include_direct_and_neighbor_evidence(tmp_path):
     assert "夏天" in hints["evidence"]["b"]["neighbor_terms"]
 
 
+def test_word_map_hint_reserves_one_candidate_per_query_anchor(tmp_path):
+    store = WordMapStore(_config(tmp_path))
+    store.rebuild(
+        [
+            _bucket(
+                "memory",
+                "记忆不是表演，答对不等于回来。",
+                name="记忆不是表演",
+                keywords=["记忆不是表演"],
+            ),
+            _bucket(
+                "penpal",
+                "忱孚和 recall_cues 连接到梦境机制。",
+                name="笔友忱孚社区相遇",
+                keywords=["忱孚", "recall_cues", "梦境机制"],
+            ),
+            _bucket(
+                "code",
+                "第一行代码是项目起点。",
+                name="第一行代码的浪漫",
+                keywords=["第一行代码"],
+            ),
+        ]
+    )
+
+    hints = store.hint_buckets_for_terms(
+        ["记忆不是表演", "忱孚", "第一行代码"],
+        neighbor_limit=0,
+        bucket_limit=1,
+    )
+
+    assert set(hints["bucket_scores"]) == {"memory", "penpal", "code"}
+    assert set(hints["anchor_bucket_scores"]["记忆不是表演"]) == {"memory"}
+    assert set(hints["anchor_bucket_scores"]["忱孚"]) == {"penpal"}
+    assert set(hints["anchor_bucket_scores"]["第一行代码"]) == {"code"}
+    assert hints["evidence"]["penpal"]["anchor_terms"] == ["忱孚"]
+
+
 def test_word_map_weak_hint_terms_do_not_expand_neighbors(tmp_path):
     store = WordMapStore(_config(tmp_path, weak_hint_weight=0.2))
     store.rebuild(

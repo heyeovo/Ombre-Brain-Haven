@@ -1449,10 +1449,8 @@ async def api_search(request):
     
     try:
         # 2. 将 include_archive 传入 search 方法
-        limit = int(request.query_params.get("limit", 50))
-        matches = await bucket_mgr.search(query, limit=limit, include_archive=include_archive)
-        
-        show_all = request.query_params.get("show_all", "true").lower() in ("1", "true")
+        limit = int(request.query_params.get("limit", bucket_mgr.max_results))
+        show_all = request.query_params.get("show_all", "false").lower() in ("1", "true")
         matches = await bucket_mgr.search(query, limit=limit, include_archive=include_archive, show_all=show_all)
 
         result = []

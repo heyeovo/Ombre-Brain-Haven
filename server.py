@@ -1528,6 +1528,8 @@ async def api_breath_debug(request):
     q_arousal = request.query_params.get("arousal")
     q_valence = float(q_valence) if q_valence else None
     q_arousal = float(q_arousal) if q_arousal else None
+    threshold_param = request.query_params.get("threshold")
+    threshold = int(threshold_param) if threshold_param else bucket_mgr.fuzzy_threshold
 
     try:
         all_buckets = await bucket_mgr.list_all(include_archive=False)
@@ -1585,7 +1587,7 @@ async def api_breath_debug(request):
                     "weights": w,
                     "raw_total": round(raw_total, 4),
                     "normalized": round(normalized, 2),
-                    "passed_threshold": normalized >= bucket_mgr.fuzzy_threshold,
+                    "passed_threshold": normalized >= threshold,
                     "vector_score": vector_map.get(bid, 0.0),
                 })
             except Exception:
@@ -1598,7 +1600,7 @@ async def api_breath_debug(request):
             "valence": q_valence,
             "arousal": q_arousal,
             "weights": w,
-            "threshold": bucket_mgr.fuzzy_threshold,
+            "threshold": threshold,     
             "total_candidates": len(results),
             "passed_count": len(passed),
             "results": results[:50],  # top 50 for debug

@@ -1633,6 +1633,36 @@ async def api_update_config(request):
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+@mcp.custom_route("/api/prompts", methods=["GET"])
+async def api_get_prompts(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    return JSONResponse({
+        "dehydrate": dehydrator.dehydrate_prompt,
+        "analyze": dehydrator.analyze_prompt,
+    })
+
+@mcp.custom_route("/api/prompts", methods=["POST"])
+async def api_update_prompts(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        body = await request.json()
+        name = body.get("name")
+        content = body.get("content", "").strip()
+        if not name or not content:
+            return JSONResponse({"error": "missing fields"}, status_code=400)
+        if name == "dehydrate":
+            dehydrator.dehydrate_prompt = content
+        elif name == "analyze":
+            dehydrator.analyze_prompt = content
+        else:
+            return JSONResponse({"error": "unknown prompt"}, status_code=400)
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 @mcp.custom_route("/dashboard", methods=["GET"])
 async def dashboard(request):

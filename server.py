@@ -1608,6 +1608,31 @@ async def api_breath_debug(request):
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+@mcp.custom_route("/api/config", methods=["GET"])
+async def api_get_config(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    return JSONResponse({
+        "fuzzy_threshold": bucket_mgr.fuzzy_threshold,
+        "max_results": bucket_mgr.max_results,
+    })
+
+@mcp.custom_route("/api/config", methods=["POST"])
+async def api_update_config(request):
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        body = await request.json()
+        if "fuzzy_threshold" in body:
+            val = int(body["fuzzy_threshold"])
+            if 0 <= val <= 100:
+                bucket_mgr.fuzzy_threshold = val
+        return JSONResponse({"ok": True, "fuzzy_threshold": bucket_mgr.fuzzy_threshold})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 
 @mcp.custom_route("/dashboard", methods=["GET"])
 async def dashboard(request):

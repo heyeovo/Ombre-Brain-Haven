@@ -5,6 +5,7 @@ from memory_relevance import (
     facets_for_text,
     memory_relevance_options_from_config,
     query_has_explicit_entity_marker,
+    recall_focus_query,
     recall_search_query,
     relevance_decision,
 )
@@ -129,6 +130,14 @@ def test_context_name_does_not_override_action_intent():
     assert "communication_action_missing_demoted" in missing_action.reasons
     assert email_action.multiplier > 1
     assert "facet_overlap" in email_action.reasons
+
+
+def test_associative_prompt_uses_quoted_focus_as_query_terms():
+    assert recall_focus_query("如果我说“小狗”，你会想到什么") == "小狗"
+    assert recall_focus_query("如果我说小狗，你会想到什么") == "小狗"
+    assert recall_focus_query("小狗会想到什么") == "小狗"
+    assert content_terms_for_query("如果我说“小狗”，你会想到什么") == ["小狗"]
+    assert recall_focus_query("你会想到什么") == "你会想到什么"
 
 
 def test_explicit_entity_marker_handles_titlecase_entities_without_sentence_starters():

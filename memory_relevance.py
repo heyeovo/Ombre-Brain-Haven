@@ -224,6 +224,27 @@ TECHNICAL_RECALL_EVIDENCE_TERMS = frozenset(
     }
 )
 
+ASSOCIATIVE_PROMPT_MARKERS = (
+    "想到",
+    "想起",
+    "联想",
+    "记得",
+    "说",
+    "提到",
+    "问到",
+    "讲到",
+)
+
+ASSOCIATIVE_PROMPT_VAGUE_FOCUS = {
+    "你",
+    "你会",
+    "我",
+    "我们",
+    "这个",
+    "那个",
+    "什么",
+}
+
 
 @dataclass(frozen=True)
 class MemoryRelevanceOptions:
@@ -388,13 +409,41 @@ def content_terms_for_query(
     options: MemoryRelevanceOptions | None = None,
 ) -> list[str]:
     options = options or memory_relevance_options_from_config()
-    terms = _query_terms(query)
+    terms = _query_terms(recall_focus_query(query))
     content_terms = [
         term
         for term in terms
         if not _is_context_term(term, options.context_terms)
     ]
     return content_terms or terms
+
+
+def recall_focus_query(query: str) -> str:
+    """Return the concrete anchor inside prompts like: 如果我说“X”，你会想到什么."""
+    text = str(query or "").strip()
+    if not text:
+        return ""
+    if not any(marker in text for marker in ASSOCIATIVE_PROMPT_MARKERS):
+        return text
+
+    quoted = re.search(r"[“\"'「『]([^”\"'」』]{1,32})[”\"'」』]", text)
+    if quoted:
+        focus = _clean_recall_focus(quoted.group(1))
+        if focus:
+            return focus
+
+    patterns = (
+        r"^(?:如果|假如|要是)?\s*(?:我|用户|小雨)?\s*(?:说|提到|问到|讲到)\s*(?P<focus>.+?)(?:[，,。？?\s]*(?:你)?(?:会)?(?:想到|想起|联想到|联想|记得).*)?$",
+        r"^(?P<focus>.+?)(?:[，,。？?\s]*(?:你)?(?:会)?(?:想到|想起|联想到|联想).*)$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, text)
+        if not match:
+            continue
+        focus = _clean_recall_focus(match.group("focus"))
+        if focus:
+            return focus
+    return text
 
 
 def recall_search_query(
@@ -820,6 +869,24 @@ def _node_text(node: dict) -> str:
 def _is_context_term(term: str, context_terms: tuple[str, ...]) -> bool:
     normalized = _normalize_alias(term)
     return bool(normalized and normalized in set(context_terms or ()))
+
+
+def _clean_recall_focus(value: Any) -> str:
+    focus = re.sub(r"\s+", "", str(value or "").strip())
+    focus = re.sub(r"^[，。！？、,.!?:：;；~～（）()\[\]【】「」『』“”\"'`]+", "", focus)
+    focus = re.sub(r"[，。！？、,.!?:：;；~～（）()\[\]【】「」『』“”\"'`]+$", "", focus)
+    if not focus:
+        return ""
+    if len(focus) > 32:
+        return ""
+    normalized = _normalize_alias(focus)
+    if normalized in ASSOCIATIVE_PROMPT_VAGUE_FOCUS:
+        return ""
+    if normalized.endswith("会") and len(normalized) <= 3:
+        return ""
+    if any(marker in normalized for marker in ("想到什么", "想起什么", "联想到什么", "联想什么")):
+        return ""
+    return focus
 
 
 def _safe_float(value: Any) -> float:

@@ -40,7 +40,7 @@ import frontmatter
 import jieba
 
 from identity import identity_names
-from memory_relevance import memory_relevance_options_from_config
+from memory_relevance import memory_relevance_options_from_config, recall_focus_query
 from utils import generate_bucket_id, sanitize_name, safe_path, now_iso, strip_affect_anchor, strip_wikilinks
 
 logger = logging.getLogger("ombre_brain.bucket")
@@ -841,7 +841,7 @@ class BucketManager:
     # 文本相关性子分：对加权字段做 BM25，常见词降权，身份词停用。
     # ---------------------------------------------------------
     def calc_topic_scores(self, query: str, buckets: list[dict]) -> dict[str, float]:
-        query = str(query or "").strip()
+        query = recall_focus_query(str(query or "").strip())
         if not query or not buckets:
             return {}
 

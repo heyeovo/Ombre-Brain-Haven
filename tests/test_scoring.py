@@ -307,6 +307,31 @@ class TestSearchScoring:
         assert bucket_mgr._calc_topic_score("小雨", bucket) == 0
         assert bucket_mgr._calc_topic_score("Haven", bucket) == 0
 
+    def test_associative_prompt_scores_only_focus_anchor(self, bucket_mgr):
+        noise = {
+            "id": "noise",
+            "content": "如果很多年后你问我会想到什么，我会说另一个项目。",
+            "metadata": {
+                "name": "五十年后才落地的具身项目",
+                "domain": ["编程"],
+                "tags": [],
+            },
+        }
+        dog = {
+            "id": "dog",
+            "content": "这里记录了小狗成结设定。",
+            "metadata": {
+                "name": "小机数据库v2.0",
+                "domain": ["恋爱"],
+                "tags": [],
+            },
+        }
+
+        scores = bucket_mgr.calc_topic_scores("如果我说“小狗”，你会想到什么", [noise, dog])
+
+        assert scores["dog"] >= 0.36
+        assert scores.get("noise", 0) == 0
+
     def test_short_cjk_body_exact_match_keeps_single_character_recall(self, bucket_mgr):
         bucket = {
             "content": "这里记录了忠犬设定和角色称呼。",

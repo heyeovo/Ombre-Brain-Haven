@@ -465,14 +465,18 @@ def recall_search_query(
     options: MemoryRelevanceOptions | None = None,
 ) -> str:
     options = options or memory_relevance_options_from_config()
+    raw_query = str(query or "")
+    focus_query = recall_focus_query(raw_query)
+    if focus_query != raw_query.strip():
+        return focus_query
     query_active = active_facets(facets_for_text(query, options))
     if "communication_action" not in query_active:
-        return str(query or "")
+        return raw_query
     terms = content_terms_for_query(query, options)
     original_terms = _query_terms(query)
     if terms and terms != original_terms:
         return " ".join(terms)
-    return str(query or "")
+    return raw_query
 
 
 def query_has_explicit_entity_marker(query: str) -> bool:

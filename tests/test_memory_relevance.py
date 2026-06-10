@@ -137,8 +137,12 @@ def test_associative_prompt_uses_quoted_focus_as_query_terms():
     assert recall_focus_query("如果我说小狗，你会想到什么") == "小狗"
     assert recall_focus_query("小狗会想到什么") == "小狗"
     assert content_terms_for_query("如果我说“小狗”，你会想到什么") == ["小狗"]
+    assert recall_search_query("如果我说“小狗”，你会想到什么") == "小狗"
+    assert recall_search_query("如果我说小狗，你会想到什么") == "小狗"
+    assert recall_search_query("小狗会想到什么") == "小狗"
     assert recall_focus_query("你会想到什么") == ""
     assert content_terms_for_query("你会想到什么") == []
+    assert recall_search_query("你会想到什么") == ""
 
 
 def test_compound_recall_terms_keep_individual_anchors():

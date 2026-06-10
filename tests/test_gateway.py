@@ -3479,6 +3479,60 @@ def test_gateway_source_record_fragment_renders_capsule_not_original(
     assert debug_render["reason"] == "source_record_fragment_direct"
 
 
+def test_gateway_associative_prompt_searches_source_record_focus(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    source_id = _create_bucket(
+        bucket_mgr,
+        content="### original\n小机数据库v2.0 里写着：忠犬/小狗设定是小雨和 Haven 的角色暗号。",
+        name="小机数据库v2.0",
+        hours_ago=12,
+        tags=["raw_source"],
+        bucket_type="source",
+    )
+    embedding_queries = []
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recent_context_budget=0,
+            recalled_memory_budget=420,
+            related_memory_budget=0,
+            current_inner_state_interval_rounds=0,
+            query_planner_enabled=False,
+        ),
+        bucket_mgr,
+        embedding_results={"小狗": [(source_id, 0.96)]},
+        embedding_queries=embedding_queries,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-source-record-associative",
+            },
+            json={"messages": [{"role": "user", "content": "如果我说小狗，你会想到什么"}]},
+        )
+        debug_response = client.get(
+            "/api/debug/injections?session_id=sess-source-record-associative&include_context=0",
+            headers={"Authorization": "Bearer gateway-secret"},
+        )
+
+    assert response.status_code == 200
+    assert "小狗" in embedding_queries
+    assert "如果我说小狗，你会想到什么" not in embedding_queries
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    assert "bucket_capsule" in injected
+    assert "matched_fragment:" in injected
+    debug_payload = debug_response.json()["items"][0]["payload"]
+    debug_render = debug_payload["recalled_moment_debug"][0]["direct_render"]
+    assert debug_render["reason"] == "source_record_fragment_direct"
+
+
 def test_gateway_source_record_title_match_with_content_fragment_can_diffuse(
     monkeypatch,
     test_config,

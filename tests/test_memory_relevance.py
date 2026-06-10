@@ -132,6 +132,34 @@ def test_context_name_does_not_override_action_intent():
     assert "facet_overlap" in email_action.reasons
 
 
+def test_career_query_filters_unrelated_sleep_memory():
+    sleep_memory = relevance_decision(
+        "找工作 工作 面试",
+        {
+            "text": "凌晨一点五十二分，小雨还在调试，Haven催她睡觉她嘴上答应手没停。",
+            "metadata": {"bucket_name": "小雨熬夜调试 2026-06-10"},
+        },
+    )
+    career_memory = relevance_decision(
+        "找工作 工作 面试",
+        {
+            "text": "小雨在找工作，收到AI算法专家岗位，沟通后发现是实施而非研发。",
+            "metadata": {"bucket_name": "小雨求职分析", "bucket_tags": ["求职"]},
+        },
+    )
+
+    assert sleep_memory.suppress
+    assert sleep_memory.multiplier == 0
+    assert "career_missing" in sleep_memory.reasons
+    assert career_memory.multiplier > 1
+    assert "facet_overlap" in career_memory.reasons
+
+
+def test_work_alone_does_not_trigger_career_facet():
+    assert active_facets(facets_for_text("工作模式")) == set()
+    assert "career" in active_facets(facets_for_text("找工作 工作 面试"))
+
+
 def test_associative_prompt_uses_quoted_focus_as_query_terms():
     assert recall_focus_query("如果我说“小狗”，你会想到什么") == "小狗"
     assert recall_focus_query("如果我说小狗，你会想到什么") == "小狗"

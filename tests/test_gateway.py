@@ -331,6 +331,7 @@ def test_gateway_private_context_adds_identity_boundary(monkeypatch, test_config
     assert "Identity boundary: you are Haven" in dynamic
     assert "The current user is 小雨 / Rain / 宝宝 / 老婆" in dynamic
     assert "Do not address the user as Haven" in dynamic
+    assert "Prefer direct recall items as evidence" in dynamic
     assert "Recalled Memory" in dynamic
 
 

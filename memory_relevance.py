@@ -123,6 +123,38 @@ DEFAULT_FACET_ALIASES = {
         "通知",
         "联系",
     ),
+    "career": (
+        "career",
+        "job search",
+        "job hunting",
+        "interview",
+        "resume",
+        "cv",
+        "offer",
+        "recruiter",
+        "hr",
+        "internship",
+        "layoff",
+        "resign",
+        "resignation",
+        "求职",
+        "找工作",
+        "找实习",
+        "面试",
+        "简历",
+        "投递",
+        "岗位",
+        "招聘",
+        "实习",
+        "入职",
+        "离职",
+        "被裁",
+        "裁员",
+        "薪资",
+        "工资",
+        "offer",
+        "hr",
+    ),
     "old_or_resolved": (
         "old version",
         "legacy",
@@ -739,6 +771,15 @@ def relevance_decision(
         multiplier = min(multiplier, 0.45)
         reasons.append("communication_action_missing_demoted")
 
+    if "career" in query_active and "career" not in node_active and not direct_query_evidence:
+        return RelevanceDecision(
+            0.0,
+            query_facets,
+            node_facets,
+            ("career_missing",),
+            hard_block=True,
+        )
+
     return RelevanceDecision(multiplier, query_facets, node_facets, tuple(reasons))
 
 
@@ -786,6 +827,10 @@ def recall_rank(
         if "communication_action" in node_active:
             return 0, -score
         return 15, -score
+    if "career" in query_active:
+        if "career" in node_active:
+            return 0, -score
+        return 18, -score
     if "relationship_identity" in query_active and "relationship_identity" in node_active:
         return 0, -score
     if "intimacy" in query_active and "intimacy" in node_active:

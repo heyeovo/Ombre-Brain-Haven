@@ -7638,7 +7638,8 @@ class GatewayService:
         dynamic_sections = []
         if has_dynamic_context:
             dynamic_sections = [
-                "Live private context for the current turn. Use it quietly when relevant.",
+                "Live private context for the current turn. Use it quietly when relevant. "
+                "Prefer direct recall items as evidence for this query; use background associations only as background.",
                 self._identity_boundary_context(),
             ]
 

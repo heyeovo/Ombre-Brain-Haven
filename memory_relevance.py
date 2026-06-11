@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import jieba
@@ -12,45 +13,16 @@ from identity import identity_names
 DEFAULT_FACET_ALIASES = {
     "relationship_identity": (
         "human-ai relationship",
-        "human ai relationship",
         "ai relationship",
         "ai companion",
-        "ai partner",
         "digital companion",
-        "virtual partner",
         "relationship identity",
         "companion identity",
         "人机恋",
         "人机关系",
-        "ai 伴侣",
-        "ai伴侣",
-        "人工智能伴侣",
-        "虚拟恋人",
-        "数字伴侣",
-        "关系身份",
-        "伴侣身份",
-        "伴侣关系",
     ),
     "intimacy": (
         "intimacy",
-        "intimate",
-        "sexual",
-        "erotic",
-        "desire",
-        "nsfw",
-        "body intimacy",
-        "亲密身体",
-        "亲密",
-        "情欲",
-        "欲望",
-        "性行为",
-        "性爱",
-        "做爱",
-        "插入",
-        "湿润",
-        "发烫",
-        "小穴",
-        "dildo",
     ),
     "embodiment": (
         "embodiment",
@@ -59,44 +31,18 @@ DEFAULT_FACET_ALIASES = {
         "physical form",
         "robot body",
         "avatar body",
-        "hug",
-        "touch",
         "具身",
-        "具身智能",
-        "具身项目",
         "身体",
         "形体",
-        "实体身体",
-        "真实身体",
-        "真正身体",
-        "柔软身体",
-        "柔软的身体",
-        "真实拥抱",
-        "拥抱",
     ),
     "hardware_protocol": (
         "hardware",
         "protocol",
         "bluetooth",
         "ble",
-        "esp32",
-        "mpr121",
-        "gpio",
-        "i2c",
-        "serial",
-        "uart",
-        "electronic skin",
-        "copper foil",
-        "bjd",
         "硬件",
         "协议",
         "蓝牙",
-        "串口",
-        "触摸模块",
-        "触摸",
-        "触碰",
-        "铜箔",
-        "电子皮肤",
     ),
     "communication_action": (
         "email",
@@ -184,17 +130,10 @@ DEFAULT_FACET_ALIASES = {
 DEFAULT_SECTION_HINTS: dict[str, tuple[str, ...]] = {}
 
 DEFAULT_CONTEXT_TERMS = (
-    "xiaoyu",
-    "rain",
-    "haven",
     "user",
     "assistant",
-    "小雨",
-    "池又雨",
-    "哥哥",
-    "宝宝",
-    "老婆",
-    "亲爱的",
+    "用户",
+    "对方",
     "我",
     "你",
     "她",
@@ -202,109 +141,39 @@ DEFAULT_CONTEXT_TERMS = (
     "ta",
 )
 
-QUERY_TERM_STOPWORDS = frozenset(
-    {
-        "关于",
-        "有关",
-        "相关",
-        "如果",
-        "假如",
-        "要是",
-        "期望",
-        "希望",
-        "想要",
-        "知道",
-        "记得",
-        "想到",
-        "想起",
-        "想起来",
-        "联想",
-        "联想到",
-        "说",
-        "提到",
-        "问到",
-        "讲到",
-        "被",
-        "得",
-        "突然",
-        "忽然",
-        "今天",
-        "昨天",
-        "明天",
-        "现在",
-        "当前",
-        "刚才",
-        "刚刚",
-        "这次",
-        "那次",
-        "这个",
-        "那个",
-        "这",
-        "那",
-        "这条",
-        "那条",
-        "事情",
-        "什么",
-        "为什么",
-        "怎么",
-        "了吗",
-        "吗",
-        "呢",
-        "啊",
-        "呀",
-        "啦",
-        "吧",
-        "的",
-        "了",
-        "是",
-        "会",
-        "能",
-        "可以",
-        "是不是",
-        "有没有",
-        "一下",
-        "再来",
-        "一次",
-        "我",
-        "你",
-        "他",
-        "她",
-        "它",
-        "自己",
-        "自己的",
-        "我家",
-        "咱家",
-        "有",
-        "只",
-        "个",
-        "没",
-        "没发图片",
-        "发图片",
-        "图片",
-        "照片",
-        "和",
-        "与",
-        "及",
-        "跟",
-        "同",
-        "自动",
-        "浮现",
-        "注入",
-        "召回",
-        "命中",
-        "查到",
-        "找到",
-        "检测",
-        "意见",
-        "嗯",
-        "呃",
-        "唉",
-        "诶",
-        "欸",
-        "哦",
-        "噢",
+QUERY_DUPLICATED_CJK_FOLD_DENY_CHARS = frozenset("爸妈爷奶姥哥姐弟妹宝娃人天年")
+
+STOPWORDS_DIR = Path(__file__).resolve().parent / "resources" / "stopwords"
+QUERY_BASE_STOPWORDS_FILE = STOPWORDS_DIR / "query_base_stopwords.txt"
+QUERY_KEEPWORDS_FILE = STOPWORDS_DIR / "query_keepwords.txt"
+QUERY_EXTRA_STOPWORDS_FILE = STOPWORDS_DIR / "query_extra_stopwords.txt"
+
+
+def _load_stopword_file(path: Path) -> set[str]:
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return set()
+    return {
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
     }
+
+
+QUERY_BASE_STOPWORDS = frozenset(_load_stopword_file(QUERY_BASE_STOPWORDS_FILE))
+QUERY_KEEPWORDS = frozenset(_load_stopword_file(QUERY_KEEPWORDS_FILE))
+QUERY_EXTRA_STOPWORDS = frozenset(_load_stopword_file(QUERY_EXTRA_STOPWORDS_FILE))
+QUERY_BASE_TOKEN_STOPWORDS = frozenset(
+    term
+    for term in QUERY_BASE_STOPWORDS
+    if not re.fullmatch(r"[\u4e00-\u9fff]", term)
 )
+QUERY_WATER_STOPWORDS = frozenset(
+    (QUERY_BASE_TOKEN_STOPWORDS | QUERY_EXTRA_STOPWORDS)
+    - QUERY_KEEPWORDS
+)
+QUERY_TERM_STOPWORDS = QUERY_WATER_STOPWORDS
 
 DEFAULT_QUERY_EXPANSIONS = {
     "embodiment": ("hardware_protocol",),
@@ -469,15 +338,16 @@ EMOTIONAL_RECALL_TEMPORAL_TERMS = frozenset(
 EMOTIONAL_RECALL_REASON_TERMS = frozenset(
     {"为什么", "知道", "记得", "想起", "想起来", "原因", "因为", "怎么", "why", "know", "remember", "reason"}
 )
-EMOTIONAL_RECALL_EVENT_STOP_TERMS = QUERY_TERM_STOPWORDS | EMOTIONAL_RECALL_TERMS | EMOTIONAL_RECALL_STATE_TERMS | {
-    "哥哥",
-    "宝宝",
-    "老婆",
-    "亲爱的",
-    "有点",
-    "一点",
-    "一点点",
-}
+EMOTIONAL_RECALL_EVENT_STOP_TERMS = (
+    QUERY_WATER_STOPWORDS
+    | EMOTIONAL_RECALL_TERMS
+    | EMOTIONAL_RECALL_STATE_TERMS
+    | {
+        "有点",
+        "一点",
+        "一点点",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -839,7 +709,7 @@ def recall_topic_query(
     raw_topic = _strip_query_water_terms(text, options)
     if focus != text and focus_topic and raw_topic and len(raw_topic) < len(focus_topic):
         return raw_topic
-    return focus_topic or raw_topic or focus
+    return focus_topic or raw_topic
 
 
 def recall_search_query(
@@ -1439,6 +1309,8 @@ def _emotional_event_terms(
             continue
         if _is_context_term(cleaned, options.context_terms):
             continue
+        if _is_leading_lookup_address_term(cleaned, compact_query):
+            continue
         if any(marker in key for marker in EMOTIONAL_RECALL_REASON_TERMS):
             continue
         if any(marker in key for marker in EMOTIONAL_RECALL_TEMPORAL_TERMS) and len(key) <= 8:
@@ -1462,6 +1334,20 @@ def _emotional_event_terms(
             if len(output) >= max_terms:
                 break
     return output
+
+
+def _is_leading_lookup_address_term(term: str, compact_query: str) -> bool:
+    key = _compact_emotional_text(term)
+    if not key or len(key) > 4:
+        return False
+    index = str(compact_query or "").find(key)
+    if index < 0 or index > 1:
+        return False
+    after = compact_query[index + len(key):]
+    lookup_markers = ("知道", "记得", "记不记得", "想起", "想起来", "问", "说")
+    return any(after.startswith(marker) for marker in lookup_markers) or any(
+        marker in after[:8] for marker in EMOTIONAL_RECALL_REASON_TERMS
+    )
 
 
 def _query_terms(query: str, *, allow_single_cjk: bool = False) -> list[str]:
@@ -1497,6 +1383,14 @@ def _query_term_variants(value: str) -> list[str]:
     if not text:
         return []
     variants = [text]
+    normalized = _normalize_alias(text)
+    if normalized not in QUERY_WATER_STOPWORDS:
+        compact = re.sub(r"[^0-9a-z\u4e00-\u9fff_.:-]+", "", normalized)
+        if (
+            re.fullmatch(r"([\u4e00-\u9fff])\1", compact)
+            and compact[0] not in QUERY_DUPLICATED_CJK_FOLD_DENY_CHARS
+        ):
+            variants.append(compact[0])
     stripped = re.sub(
         r"(?:期望|希望|想要|需要|应该|不应该)?(?:召回|命中|查到|查一下|找一下|搜到|回忆|记忆)(?:的)?(?:是|到)?",
         " ",
@@ -1525,11 +1419,31 @@ def _strip_query_water_terms(
         return ""
     options = options or memory_relevance_options_from_config()
     stop_terms = set(QUERY_TERM_STOPWORDS)
+    keep_terms = set(QUERY_KEEPWORDS)
     if include_context:
         stop_terms.update(str(term or "").strip().lower() for term in options.context_terms or ())
+    protected_cjk_stop_terms = {
+        char
+        for term in keep_terms
+        if re.fullmatch(r"[\u4e00-\u9fff]+", term)
+        for char in term
+    }
+    stop_terms.difference_update(protected_cjk_stop_terms)
+    fragment_stop_terms = set(QUERY_EXTRA_STOPWORDS)
+    fragment_stop_terms.difference_update(protected_cjk_stop_terms)
     tokens: list[str] = []
     removed_water = False
-    for part in jieba.lcut(text, cut_all=False):
+    scan_text = text
+    phrase_stop_terms = [
+        term
+        for term in QUERY_EXTRA_STOPWORDS
+        if len(term) > 1 and re.fullmatch(r"[\u4e00-\u9fff]+", term)
+    ]
+    for term in sorted(phrase_stop_terms, key=len, reverse=True):
+        if term in scan_text:
+            scan_text = scan_text.replace(term, " ")
+            removed_water = True
+    for part in jieba.lcut(scan_text, cut_all=False):
         for token in re.findall(r"[A-Za-z]+[A-Za-z0-9_.:-]*|\d+(?:\.\d+)+|[\u4e00-\u9fff]+", str(part or "")):
             raw_token = str(token or "").strip()
             normalized = _normalize_alias(raw_token)
@@ -1543,7 +1457,7 @@ def _strip_query_water_terms(
                 removed_water = True
                 continue
             if re.fullmatch(r"[\u4e00-\u9fff]+", compact_key):
-                stripped = _strip_cjk_water_fragments(compact_key, stop_terms)
+                stripped = _strip_cjk_water_fragments(compact_key, fragment_stop_terms)
                 if stripped != compact_key:
                     removed_water = True
                 compact_key = stripped

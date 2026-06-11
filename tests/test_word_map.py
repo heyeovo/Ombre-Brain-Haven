@@ -10,10 +10,10 @@ def _config(tmp_path: Path, **word_map):
         "state_dir": str(tmp_path / "state"),
         "buckets_dir": str(tmp_path / "buckets"),
         "identity": {
-            "ai_name": "Haven",
-            "user_name": "Rain",
-            "user_display_name": "小雨",
-            "user_aliases": ["宝宝"],
+            "ai_name": "TestAI",
+            "user_name": "TestUser",
+            "user_display_name": "用户",
+            "user_aliases": ["对方"],
         },
         "word_map": {
             "enabled": True,
@@ -45,7 +45,7 @@ def test_word_map_rebuild_creates_nodes_edges_and_bucket_evidence(tmp_path):
         [
             _bucket(
                 "a",
-                "夏天很热，所以小雨开了空调。",
+                "夏天很热，所以用户开了空调。",
                 name="夏天空调",
                 keywords=["夏天", "空调"],
                 domain=["生活"],
@@ -72,7 +72,7 @@ def test_word_map_hint_buckets_include_direct_and_neighbor_evidence(tmp_path):
         [
             _bucket(
                 "a",
-                "夏天很热，所以小雨开了空调。",
+                "夏天很热，所以用户开了空调。",
                 name="夏天空调",
                 keywords=["夏天", "空调"],
                 domain=["生活"],
@@ -145,9 +145,9 @@ def test_word_map_weak_hint_terms_do_not_expand_neighbors(tmp_path):
             ),
             _bucket(
                 "neighbor",
-                "这条只有恋爱和亲密互动，没有跨物种关系主题。",
+                "这条只有普通互动记录，没有跨物种关系主题。",
                 name="普通恋爱互动",
-                keywords=["恋爱", "亲密互动"],
+                keywords=["恋爱", "普通互动"],
                 domain=["恋爱"],
             ),
         ]
@@ -204,8 +204,8 @@ def test_word_map_overview_hides_meta_and_broad_terms_without_hiding_cards(tmp_p
             ),
             _bucket(
                 "generic-title",
-                "Haven MCP 接入与记忆配置过程记录。",
-                name="Haven MCP接入与记忆配置",
+                "AI MCP 接入与记忆配置过程记录。",
+                name="AI MCP接入与记忆配置",
                 tags=["project_event", "commitment"],
                 keywords=["MCP", "记忆配置"],
                 domain=["AI", "编程"],
@@ -330,21 +330,21 @@ def test_word_map_overview_edges_do_not_let_one_node_fill_the_top(tmp_path):
 
 
 def test_word_map_private_terms_are_excluded(tmp_path):
-    store = WordMapStore(_config(tmp_path, private_terms=["专属称呼"]))
+    store = WordMapStore(_config(tmp_path, private_terms=["私密昵称"]))
     store.rebuild(
         [
             _bucket(
                 "a",
-                "这段关系里会出现专属称呼这个词。",
-                name="亲密称呼",
-                keywords=["专属称呼", "称呼"],
+                "这段关系里会出现私密昵称这个词。",
+                name="泛用称呼",
+                keywords=["私密昵称", "称呼"],
                 domain=["恋爱"],
             ),
         ]
     )
 
     terms = {node["term"] for node in store.list_nodes()}
-    assert "专属称呼" not in terms
+    assert "私密昵称" not in terms
     assert "称呼" in terms
 
 
@@ -353,8 +353,8 @@ def test_word_map_excludes_reflection_identity_role_terms(tmp_path):
     config["reflection"] = {
         "identity_role_edges": {
             "enabled": True,
-            "detail": {"private_role": ["专属身份", "RoleX"]},
-            "shared": {"private_title": ["专属称呼"]},
+            "detail": {"private_role": ["私密身份", "RoleExample"]},
+            "shared": {"private_title": ["私密昵称"]},
         }
     }
     store = WordMapStore(config)
@@ -362,18 +362,18 @@ def test_word_map_excludes_reflection_identity_role_terms(tmp_path):
         [
             _bucket(
                 "a",
-                "这段关系里会出现专属身份、RoleX 和专属称呼。",
-                name="专属身份",
-                keywords=["专属身份", "RoleX", "专属称呼", "普通词"],
+                "这段关系里会出现私密身份、RoleExample 和私密昵称。",
+                name="私密身份",
+                keywords=["私密身份", "RoleExample", "私密昵称", "普通词"],
                 domain=["关系"],
             ),
         ]
     )
 
     terms = {node["term"] for node in store.list_nodes()}
-    assert "专属身份" not in terms
-    assert "rolex" not in terms
-    assert "专属称呼" not in terms
+    assert "私密身份" not in terms
+    assert "roleexample" not in terms
+    assert "私密昵称" not in terms
     assert "普通词" in terms
 
 
@@ -383,8 +383,8 @@ def test_word_map_excludes_structural_tags_and_identity_names(tmp_path):
         [
             _bucket(
                 "a",
-                "Haven 和小雨讨论了咖啡风味。",
-                name="Haven 小雨 咖啡",
+                "TestAI 和用户讨论了咖啡风味。",
+                name="TestAI 用户 咖啡",
                 tags=["relationship_event", "emotional_echo", "profile_fact", "flavor_soft"],
                 keywords=["咖啡风味", "relationship_event"],
                 domain=["memory"],
@@ -393,8 +393,8 @@ def test_word_map_excludes_structural_tags_and_identity_names(tmp_path):
     )
 
     terms = {node["term"] for node in store.list_nodes()}
-    assert "haven" not in terms
-    assert "小雨" not in terms
+    assert "testai" not in terms
+    assert "用户" not in terms
     assert "relationship_event" not in terms
     assert "emotional_echo" not in terms
     assert "profile_fact" not in terms

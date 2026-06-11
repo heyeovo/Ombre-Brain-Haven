@@ -40,7 +40,7 @@ import frontmatter
 import jieba
 
 from identity import identity_names
-from memory_relevance import memory_relevance_options_from_config, recall_topic_query
+from memory_relevance import content_terms_for_query, memory_relevance_options_from_config, recall_topic_query
 from utils import generate_bucket_id, sanitize_name, safe_path, now_iso, strip_affect_anchor, strip_wikilinks
 
 logger = logging.getLogger("ombre_brain.bucket")
@@ -854,13 +854,17 @@ class BucketManager:
 
         short_cjk_query = self._short_cjk_topic_query(query)
         if short_cjk_query:
-            if self._is_lexical_stop_term(short_cjk_query):
+            short_cjk_terms = self._short_cjk_topic_terms(short_cjk_query)
+            if not short_cjk_terms:
                 return {}
             return {
-                str(bucket.get("id") or ""): self._calc_short_cjk_topic_score(
-                    short_cjk_query,
-                    bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {},
-                    self._bucket_searchable_content(bucket),
+                str(bucket.get("id") or ""): max(
+                    self._calc_short_cjk_topic_score(
+                        term,
+                        bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {},
+                        self._bucket_searchable_content(bucket),
+                    )
+                    for term in short_cjk_terms
                 )
                 for bucket in buckets
                 if bucket.get("id")
@@ -1162,6 +1166,18 @@ class BucketManager:
         if re.fullmatch(r"[\u4e00-\u9fff]{1,3}", compact):
             return compact
         return ""
+
+    def _short_cjk_topic_terms(self, query: str) -> list[str]:
+        terms = []
+        for term in [query, *content_terms_for_query(query)]:
+            cleaned = str(term or "").strip()
+            if not re.fullmatch(r"[\u4e00-\u9fff]{1,3}", cleaned):
+                continue
+            if self._is_lexical_stop_term(cleaned):
+                continue
+            if cleaned not in terms:
+                terms.append(cleaned)
+        return terms
 
     def _calc_short_cjk_topic_score(self, query: str, meta: dict, searchable_content: str) -> float:
         def evidence(value: object) -> int:

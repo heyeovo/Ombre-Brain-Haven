@@ -600,12 +600,36 @@ def _emotional_must_groups(emotional_plan: Any) -> tuple[tuple[str, ...], ...]:
                 pieces.append(_canonical_anchor_state(term))
         groups.append(_dedupe_group(pieces or [strong_text]))
 
-    if event_terms and weak_terms:
-        groups.append(_dedupe_group([*event_terms, weak_terms[0]]))
+    event_anchor = _primary_emotional_event_term(event_terms)
+    if event_anchor and weak_terms:
+        groups.append(_dedupe_group([event_anchor, weak_terms[0]]))
     elif not groups and weak_terms:
         groups.append(_dedupe_group([weak_terms[0]]))
 
     return tuple(dict.fromkeys(group for group in groups if group))
+
+
+def _primary_emotional_event_term(event_terms: tuple[str, ...]) -> str:
+    terms = [
+        str(term or "").strip()
+        for term in event_terms
+        if str(term or "").strip()
+    ]
+    if not terms:
+        return ""
+    keyed = [
+        (term, _compact_anchor_term(term))
+        for term in terms
+        if _compact_anchor_term(term)
+    ]
+    compact_terms = [key for _term, key in keyed]
+    candidates = [
+        term
+        for term, key in keyed
+        if not any(other != key and other in key for other in compact_terms)
+    ]
+    candidates = candidates or [term for term, _key in keyed]
+    return sorted(candidates, key=lambda item: (len(_compact_anchor_term(item)), len(item)))[0]
 
 
 def _candidate_anchor_text(node: dict) -> str:

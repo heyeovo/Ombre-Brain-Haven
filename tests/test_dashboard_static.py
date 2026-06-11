@@ -181,7 +181,7 @@ def test_dashboard_exposes_portrait_state_panel():
     assert "resetPortraitState" in html
     assert "Recent Timeline" in html
     assert "renderPortraitSelfAnchor" in html
-    assert "自我 Anchor" in html
+    assert "自我总入口" in html
     assert "loadBuckets({ skipProfileRefresh: true });" in html
     assert "var deleteSpec = item._delete ? escAttr(jsString(JSON.stringify(item._delete))) : '';" in html
     assert "renderPortraitState" in html
@@ -291,6 +291,7 @@ def test_dashboard_exposes_gateway_memory_cooldown_settings():
     assert 'id="cfg-retrieval-mode"' in html
     assert 'id="cfg-word-map-hint-enabled"' in html
     assert 'id="cfg-query-planner-enabled"' in html
+    assert 'id="cfg-query-planner-model"' not in html
     assert 'id="cfg-memory-detail-recall-enabled"' in html
     assert 'id="cfg-memory-detail-recall-max-ids"' in html
     assert 'id="cfg-memory-detail-recall-budget"' in html
@@ -311,6 +312,7 @@ def test_dashboard_exposes_gateway_memory_cooldown_settings():
     assert "cfg.gateway.retrieval_mode" in html
     assert "cfg.gateway.word_map_hint_enabled" in html
     assert "cfg.gateway.query_planner_enabled" in html
+    assert "cfg.gateway.query_planner_model" not in html
     assert "cfg.gateway.memory_detail_recall_enabled" in html
     assert "cfg.gateway.memory_detail_recall_max_ids" in html
     assert "cfg.gateway.memory_detail_recall_budget" in html
@@ -328,6 +330,7 @@ def test_dashboard_exposes_gateway_memory_cooldown_settings():
     assert "retrieval_mode: document.getElementById('cfg-retrieval-mode').value," in html
     assert "word_map_hint_enabled: document.getElementById('cfg-word-map-hint-enabled').value === 'true'," in html
     assert "query_planner_enabled: document.getElementById('cfg-query-planner-enabled').value === 'true'," in html
+    assert "query_planner_model: document.getElementById('cfg-query-planner-model').value," not in html
     assert "memory_detail_recall_enabled: document.getElementById('cfg-memory-detail-recall-enabled').value === 'true'," in html
     assert "memory_detail_recall_max_ids: numberValue('cfg-memory-detail-recall-max-ids', 3)," in html
     assert "memory_detail_recall_budget: numberValue('cfg-memory-detail-recall-budget', 1200)," in html
@@ -372,8 +375,8 @@ def test_dashboard_exposes_reflection_affect_anchor_switches():
     assert "cfg.reflection.relationship_weather_affect_anchor_enabled" in load_block
     reflection_block = save_block.split("candidate.reflection = {", 1)[1].split("};", 1)[0]
     assert "base_url: document.getElementById('cfg-reflection-url').value," in reflection_block
-    assert "cfg-reflection-enabled" not in reflection_block
-    assert "cfg-reflection-model" not in reflection_block
+    assert "enabled: document.getElementById('cfg-reflection-enabled').value === 'true'," in reflection_block
+    assert "model: document.getElementById('cfg-reflection-model').value," in reflection_block
     assert "if (!body.reflection) body.reflection = {};" in html
     assert "body.reflection.api_key = reflectionKeyVal;" in html
 
@@ -432,7 +435,7 @@ def test_dashboard_exposes_persona_config_and_env_persist_button():
     assert "body.persona.api_key = personaKeyVal;" in html
 
 
-def test_dashboard_dream_controls_load_but_config_save_only_writes_url_and_key():
+def test_dashboard_dream_controls_load_and_save_runtime_fields():
     html = Path("dashboard.html").read_text(encoding="utf-8")
     load_block = html.split("async function loadConfig()", 1)[1].split("async function saveConfig", 1)[0]
     save_block = html.split("async function saveConfig", 1)[1].split("var keyVal =", 1)[0]
@@ -448,9 +451,10 @@ def test_dashboard_dream_controls_load_but_config_save_only_writes_url_and_key()
     assert "document.getElementById('cfg-dream-retain').value = cfg.dream.retain_after_inject ? 'true' : 'false';" in load_block
     assert "document.getElementById('cfg-dream-enabled').value = cfg.dream.enabled" not in load_block
     assert "base_url: document.getElementById('cfg-dream-url').value," in dream_lines
-    assert not any("cfg-dream-engine-enabled" in line for line in dream_lines)
-    assert not any("cfg-dream-model" in line for line in dream_lines)
-    assert not any("cfg-dream-inject" in line for line in dream_lines)
+    assert "enabled: document.getElementById('cfg-dream-engine-enabled').value === 'true'," in dream_lines
+    assert "model: document.getElementById('cfg-dream-model').value," in dream_lines
+    assert "inject_enabled: document.getElementById('cfg-dream-inject').value === 'true'," in dream_lines
+    assert "retain_after_inject: document.getElementById('cfg-dream-retain').value === 'true'," in dream_lines
 
 
 def test_dashboard_config_number_zero_values_are_preserved():

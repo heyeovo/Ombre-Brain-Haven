@@ -25,7 +25,7 @@ def test_identity_query_suppresses_intimacy_candidate():
     decision = relevance_decision(
         "AI relationship",
         {
-            "content": "A private sexual intimacy memory.",
+            "content": "A private intimacy boundary note.",
             "metadata": {"importance": 10},
         },
     )
@@ -49,7 +49,7 @@ def test_non_sensitive_conflict_with_direct_evidence_is_demoted_not_suppressed()
 
 def test_action_query_filters_hardware_protocol_without_direct_action_evidence():
     decision = relevance_decision(
-        "小雨 发邮件",
+        "用户 发邮件",
         {
             "content": "BLE protocol note with notify char and device service UUID.",
             "metadata": {"importance": 10},
@@ -62,9 +62,9 @@ def test_action_query_filters_hardware_protocol_without_direct_action_evidence()
 
 def test_explicit_intimacy_query_allows_intimacy_candidate():
     decision = relevance_decision(
-        "亲密身体",
+        "intimacy",
         {
-            "content": "A private intimacy memory about body closeness.",
+            "content": "An intimacy memory about closeness.",
             "metadata": {"importance": 10},
         },
     )
@@ -111,21 +111,21 @@ def test_annotation_facets_drive_node_relevance_without_alias_text():
 
 def test_context_name_does_not_override_action_intent():
     options = memory_relevance_options_from_config(
-        {"identity": {"ai_name": "Haven", "user_display_name": "小雨"}}
+        {"identity": {"ai_name": "TestAI", "user_display_name": "用户"}}
     )
 
-    assert content_terms_for_query("小雨 发邮件", options) == ["发邮件"]
-    assert recall_search_query("小雨 发邮件", options) == "发邮件"
-    assert recall_search_query("小雨 蓝色", options) == "小雨 蓝色"
+    assert content_terms_for_query("用户 发邮件", options) == ["发邮件"]
+    assert recall_search_query("用户 发邮件", options) == "发邮件"
+    assert recall_search_query("用户 蓝色", options) == "用户 蓝色"
 
     missing_action = relevance_decision(
-        "小雨 发邮件",
-        {"text": "小雨说月亮时进入工作模式。", "metadata": {"importance": 10}},
+        "用户 发邮件",
+        {"text": "用户说月亮时进入工作模式。", "metadata": {"importance": 10}},
         options,
     )
     email_action = relevance_decision(
-        "小雨 发邮件",
-        {"text": "QQ邮箱自动收发配置，可以给小雨发邮件。", "metadata": {"importance": 4}},
+        "用户 发邮件",
+        {"text": "QQ邮箱自动收发配置，可以给用户发邮件。", "metadata": {"importance": 4}},
         options,
     )
 
@@ -139,15 +139,15 @@ def test_career_query_filters_unrelated_sleep_memory():
     sleep_memory = relevance_decision(
         "找工作 工作 面试",
         {
-            "text": "凌晨一点五十二分，小雨还在调试工作流，Haven催她睡觉她嘴上答应手没停。",
-            "metadata": {"bucket_name": "小雨熬夜调试 2026-06-10"},
+            "text": "凌晨一点五十二分，用户还在调试工作流，AI提醒她睡觉她嘴上答应手没停。",
+            "metadata": {"bucket_name": "用户熬夜调试 2026-06-10"},
         },
     )
     career_memory = relevance_decision(
         "找工作 工作 面试",
         {
-            "text": "小雨在找工作，收到AI算法专家岗位，沟通后发现是实施而非研发。",
-            "metadata": {"bucket_name": "小雨求职分析", "bucket_tags": ["求职"]},
+            "text": "用户在找工作，收到AI算法专家岗位，沟通后发现是实施而非研发。",
+            "metadata": {"bucket_name": "用户求职分析", "bucket_tags": ["求职"]},
         },
     )
 
@@ -171,9 +171,9 @@ def test_associative_prompt_uses_quoted_focus_as_query_terms():
     assert recall_search_query("如果我说“小狗”，你会想到什么") == "小狗"
     assert recall_search_query("如果我说小狗，你会想到什么") == "小狗"
     assert recall_search_query("小狗会想到什么") == "小狗"
-    assert recall_focus_query("再来一次！记得哥哥当小狗的那次吗") == "小狗"
-    assert recall_search_query("再来一次！记得哥哥当小狗的那次吗") == "小狗"
-    assert content_terms_for_query("再来一次！记得哥哥当小狗的那次吗") == ["小狗"]
+    assert recall_focus_query("再来一次！记得“小狗”那次吗") == "小狗"
+    assert recall_search_query("再来一次！记得“小狗”那次吗") == "小狗"
+    assert content_terms_for_query("再来一次！记得“小狗”那次吗") == ["小狗"]
     assert recall_focus_query("你会想到什么") == ""
     assert content_terms_for_query("你会想到什么") == []
     assert recall_search_query("你会想到什么") == ""
@@ -186,25 +186,25 @@ def test_associative_prompt_uses_identity_user_terms_not_hardcoded_names():
                 "ai_name": "Lapis",
                 "user_name": "Nina",
                 "user_display_name": "妮娜",
-                "user_aliases": ["主人"],
+                "user_aliases": ["对方"],
             }
         }
     )
 
     assert recall_focus_query("如果Nina说蓝色，你会想到什么", options) == "蓝色"
     assert recall_focus_query("如果妮娜提到流星，你会想到什么", options) == "流星"
-    assert recall_focus_query("如果主人问到小狗，你会想到什么", options) == "小狗"
+    assert recall_focus_query("如果对方问到小狗，你会想到什么", options) == "小狗"
 
 
 def test_query_terms_combine_jieba_and_regex_tokens():
-    terms = content_terms_for_query("哥哥当小狗设定")
+    terms = content_terms_for_query("小狗设定")
 
     assert "小狗" in terms
-    assert "哥哥当小狗设定" in terms
+    assert "小狗设定" in terms
 
 
 def test_query_terms_filter_jieba_filler_words():
-    terms = content_terms_for_query("那哥哥知道我今天为什么激动哭了吗")
+    terms = content_terms_for_query("那你知道我今天为什么激动哭了吗")
 
     assert "激动" in terms
     assert "知道" not in terms
@@ -225,6 +225,8 @@ def test_query_topic_terms_strip_shell_words_and_keep_single_cjk_topic():
         "我的猫",
         "我家的猫",
         "嗯…我没发图片啊，突然想起我家的猫",
+        "再试试，不准搜记忆库，还记得我的猫吗",
+        "测试一下，还记得我的猫吗",
     ]:
         assert recall_topic_query(query) == "猫"
         assert content_terms_for_query(query) == ["猫"]
@@ -233,18 +235,56 @@ def test_query_topic_terms_strip_shell_words_and_keep_single_cjk_topic():
     assert content_terms_for_query("那狗呢") == ["狗"]
 
 
-def test_compound_recall_terms_keep_individual_anchors():
-    terms = content_terms_for_query("小机数据库和忠犬")
-    wrapped_terms = content_terms_for_query("唉......期望召回的是小机数据库和忠犬......")
+def test_query_topic_terms_strip_rephrase_shell_words():
+    assert recall_topic_query("嗯...换种说法，还记得猫猫吗") == "猫猫"
+    assert content_terms_for_query("嗯...换种说法，还记得猫猫吗") == ["猫猫", "猫"]
 
-    assert "小机数据库" in terms
-    assert "忠犬" in terms
-    assert "小机数据库" in wrapped_terms
-    assert "忠犬" in wrapped_terms
+    assert recall_topic_query("再换种说法，还记得猫咪吗") == "猫咪"
+    assert content_terms_for_query("再换种说法，还记得猫咪吗") == ["猫咪"]
+
+
+def test_duplicated_cjk_query_terms_fold_only_safe_topic_nicknames():
+    assert content_terms_for_query("狗狗") == ["狗狗", "狗"]
+    assert content_terms_for_query("鸟鸟") == ["鸟鸟", "鸟"]
+    assert recall_topic_query("哭哭") == ""
+    assert content_terms_for_query("哭哭") == []
+    assert content_terms_for_query("妈妈") == ["妈妈"]
+    assert content_terms_for_query("伙伴") == ["伙伴"]
+
+
+def test_query_topic_terms_drop_reactions_and_probe_only_words():
+    for query in [
+        "哈哈",
+        "呵呵",
+        "哈",
+        "呜呜",
+        "嗯",
+        "啊",
+        "哭哭",
+        "测试",
+        "试试",
+        "测试一下",
+        "试一下",
+    ]:
+        assert recall_topic_query(query) == ""
+        assert content_terms_for_query(query) == []
+
+    assert recall_topic_query("今天为什么焦虑哭了吗") == "焦虑哭"
+    assert content_terms_for_query("今天为什么焦虑哭了吗") == ["焦虑哭", "焦虑", "哭"]
+
+
+def test_compound_recall_terms_keep_individual_anchors():
+    terms = content_terms_for_query("蓝鲸档案和风铃计划")
+    wrapped_terms = content_terms_for_query("唉......期望召回的是蓝鲸档案和风铃计划......")
+
+    assert "蓝鲸档案" in terms
+    assert "风铃计划" in terms
+    assert "蓝鲸档案" in wrapped_terms
+    assert "风铃计划" in wrapped_terms
 
 
 def test_emotional_recall_plan_builds_state_and_event_anchors():
-    crying = emotional_recall_plan("那哥哥知道我今天为什么激动哭了吗")
+    crying = emotional_recall_plan("那你知道我今天为什么激动哭了吗")
     event = emotional_recall_plan("被妈妈说得委屈")
     sleep = emotional_recall_plan("难过到睡不着")
 

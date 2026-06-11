@@ -295,17 +295,17 @@ class TestSearchScoring:
 
     def test_short_cjk_topic_score_requires_exact_substring(self, bucket_mgr):
         bucket = {
-            "content": "小雨和 Haven 的日常记忆。",
+            "content": "用户和 AI 的日常记忆。",
             "metadata": {
-                "name": "小雨与Haven的爱",
+                "name": "用户与AI的记录",
                 "domain": ["恋爱"],
                 "tags": [],
             },
         }
 
         assert bucket_mgr._calc_topic_score("小狗", bucket) == 0
-        assert bucket_mgr._calc_topic_score("小雨", bucket) == 0
-        assert bucket_mgr._calc_topic_score("Haven", bucket) == 0
+        assert bucket_mgr._calc_topic_score("用户", bucket) == 0
+        assert bucket_mgr._calc_topic_score("AI", bucket) == 0
 
     def test_topic_score_strips_query_shell_before_short_cjk_scoring(self, bucket_mgr):
         cat_bucket = {
@@ -332,10 +332,36 @@ class TestSearchScoring:
         assert scores["cat"] > 0
         assert scores.get("about", 0) == 0
 
+    def test_reduplicated_topic_query_scores_folded_short_anchor(self, bucket_mgr):
+        cat_bucket = {
+            "id": "cat",
+            "content": "这是一条关于猫咪、猫粮和小猫的记录。",
+            "metadata": {
+                "name": "养猫经历与情感",
+                "domain": ["日常"],
+                "tags": ["宠物"],
+            },
+        }
+        unrelated_bucket = {
+            "id": "unrelated",
+            "content": "用户与 AI 的演化史，关于互动风格和窗口策略。",
+            "metadata": {
+                "name": "互动风格记录",
+                "domain": ["技术"],
+                "tags": [],
+            },
+        }
+
+        scores = bucket_mgr.calc_topic_scores("嗯...换种说法，还记得猫猫吗", [cat_bucket, unrelated_bucket])
+
+        assert scores["cat"] > 0
+        assert scores.get("unrelated", 0) == 0
+        assert bucket_mgr.calc_topic_scores("哭哭", [cat_bucket]) == {}
+
     def test_qq_reaction_forms_do_not_create_topic_scores(self, bucket_mgr):
         bucket = {
             "id": "mail",
-            "content": "Haven 配置了 QQ邮箱自动收发，可以检查收件箱。",
+            "content": "AI 配置了 QQ邮箱自动收发，可以检查收件箱。",
             "metadata": {
                 "name": "QQ邮箱自动收发配置",
                 "domain": ["communication"],
@@ -349,7 +375,7 @@ class TestSearchScoring:
     def test_qq_mail_phrase_boost_beats_generic_mail_hit(self, bucket_mgr):
         exact = {
             "id": "exact",
-            "content": "Haven 可以给小雨发邮件，也可以检查收件箱。",
+            "content": "AI 可以给用户发邮件，也可以检查收件箱。",
             "metadata": {
                 "name": "QQ邮箱自动收发配置",
                 "domain": ["communication"],
@@ -399,10 +425,10 @@ class TestSearchScoring:
         }
         dog = {
             "id": "dog",
-            "content": "这里记录了小狗成结设定。",
+            "content": "这里记录了小狗训练设定。",
             "metadata": {
-                "name": "小机数据库v2.0",
-                "domain": ["恋爱"],
+                "name": "小狗训练索引",
+                "domain": ["宠物"],
                 "tags": [],
             },
         }
@@ -415,10 +441,10 @@ class TestSearchScoring:
 
     def test_short_cjk_body_exact_match_keeps_single_character_recall(self, bucket_mgr):
         bucket = {
-            "content": "这里记录了忠犬设定和角色称呼。",
+            "content": "这里记录了犬类训练设定和角色称呼。",
             "metadata": {
-                "name": "少女暴君与成男艳后",
-                "domain": ["恋爱"],
+                "name": "犬类训练设定",
+                "domain": ["宠物"],
                 "tags": [],
             },
         }

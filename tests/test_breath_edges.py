@@ -408,6 +408,50 @@ async def test_inspect_diffusion_exposes_scores_facets_and_paths(patch_breath):
 
 
 @pytest.mark.asyncio
+async def test_inspect_diffusion_filters_career_seeds_with_only_broad_work_word(patch_breath):
+    import server
+
+    patch_breath(
+        [
+            _bucket(
+                "S",
+                "凌晨一点五十二分，小雨还在调试工作流，Haven催她睡觉她嘴上答应手没停。",
+                name="小雨熬夜调试",
+                score=10,
+                importance=10,
+            ),
+            _bucket(
+                "L",
+                "Lumos 项目改回原型版本，准备写进简历里，计划明天投递。",
+                name="Lumos项目简历投递",
+                score=10,
+                importance=10,
+            ),
+            _bucket(
+                "C",
+                "小雨在找工作，收到AI算法专家岗位，也准备面试和简历投递。",
+                name="小雨求职分析",
+                score=3,
+                importance=4,
+            ),
+        ],
+        search_ids=["S", "L", "C"],
+    )
+
+    result = await server.inspect_diffusion(
+        query="找工作 工作 面试",
+        max_seeds=3,
+        max_hits=0,
+        edge_min_confidence=0.0,
+    )
+    seed_names = [item["name"] for item in result["seeds"]]
+
+    assert seed_names[0] == "小雨求职分析"
+    assert "Lumos项目简历投递" in seed_names
+    assert "小雨熬夜调试" not in seed_names
+
+
+@pytest.mark.asyncio
 async def test_inspect_diffusion_marks_layer_blocked_hits(patch_breath):
     import server
 

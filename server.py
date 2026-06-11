@@ -5301,18 +5301,38 @@ async def _collect_diffusion_seed_buckets(query: str, max_seeds: int) -> tuple[l
     matches: list[dict] = []
     matched_ids: set[str] = set()
     search_limit = max(max_seeds, 20)
+    options = _recall_relevance_options()
+
+    def add_candidate(bucket: dict, source: str, score: float | None = None) -> None:
+        bucket_id = bucket.get("id")
+        if not bucket_id or bucket_id in matched_ids:
+            return
+        decision = relevance_decision(query, bucket, options)
+        if decision.suppress:
+            return
+        candidate = dict(bucket)
+        if score is not None:
+            candidate["score"] = score
+        meta = candidate.get("metadata", {}) if isinstance(candidate.get("metadata"), dict) else {}
+        base_score = _safe_float(candidate.get("score"))
+        if base_score is None:
+            base_score = _safe_float(meta.get("score"))
+        if base_score is None:
+            base_score = _safe_float(meta.get("importance"))
+        if base_score is None:
+            base_score = 0.0
+        candidate["score"] = round(base_score * float(decision.multiplier), 4)
+        candidate["_inspect_source"] = source
+        candidate["_inspect_relevance_reasons"] = list(decision.reasons)
+        candidate["_inspect_relevance_multiplier"] = round(float(decision.multiplier), 4)
+        matches.append(candidate)
+        matched_ids.add(bucket_id)
 
     try:
         for bucket in await bucket_mgr.search(query, limit=search_limit):
             if not bucket or bucket.get("metadata", {}).get("type") == "feel":
                 continue
-            bucket_id = bucket.get("id")
-            if not bucket_id or bucket_id in matched_ids:
-                continue
-            candidate = dict(bucket)
-            candidate["_inspect_source"] = "keyword"
-            matches.append(candidate)
-            matched_ids.add(bucket_id)
+            add_candidate(bucket, "keyword")
     except Exception as e:
         logger.warning(f"Inspect diffusion keyword search failed / 扩散诊断关键词检索失败: {e}")
         warnings.append(f"keyword_search_failed: {e}")
@@ -5327,16 +5347,19 @@ async def _collect_diffusion_seed_buckets(query: str, max_seeds: int) -> tuple[l
             bucket = await bucket_mgr.get(bucket_id)
             if not bucket or bucket.get("metadata", {}).get("type") == "feel":
                 continue
-            candidate = dict(bucket)
-            candidate["score"] = round(sim_score * 100, 2)
-            candidate["vector_match"] = True
-            candidate["_inspect_source"] = "vector"
-            matches.append(candidate)
-            matched_ids.add(bucket_id)
+            add_candidate(bucket, "vector", round(sim_score * 100, 2))
+            if matches and str(matches[-1].get("id") or "") == str(bucket_id):
+                matches[-1]["vector_match"] = True
     except Exception as e:
         logger.warning(f"Inspect diffusion vector search failed / 扩散诊断向量检索失败: {e}")
         warnings.append(f"vector_search_failed: {e}")
 
+    matches.sort(
+        key=lambda bucket: (
+            recall_rank(query, bucket, options)[0],
+            -(_safe_float(bucket.get("score")) or 0.0),
+        )
+    )
     return matches[:max_seeds], warnings
 
 

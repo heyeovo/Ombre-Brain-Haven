@@ -60,6 +60,16 @@ def test_dashboard_bucket_list_has_bulk_delete_controls():
     assert "受保护记忆不能批量删除" in html
 
 
+def test_dashboard_feel_filter_excludes_daily_impressions():
+    html = Path("dashboard.html").read_text(encoding="utf-8")
+
+    assert "{ key: 'daily_impression', label: '日印象' }" in html
+    assert "currentFilter === 'feel'" in html
+    assert "b.type === 'feel' && !isDailyImpressionBucket(b)" in html
+    assert "currentFilter === 'daily_impression'" in html
+    assert "buckets.filter(isDailyImpressionBucket)" in html
+
+
 def test_dashboard_exposes_darkroom_door_without_release_or_body_fields():
     html = Path("dashboard.html").read_text(encoding="utf-8")
     door_block = html.split('id="darkroom-door"', 1)[1].split('<div class="search-bar">', 1)[0]

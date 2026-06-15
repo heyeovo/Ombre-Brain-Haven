@@ -3446,6 +3446,53 @@ def test_gateway_direct_short_bucket_renders_original(
     assert "第二句细节也应该保留" in injected
 
 
+def test_gateway_direct_event_date_tag_suppresses_created_tag(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="蓝雨档案记录的是三月一日那次真实事件。",
+        name="蓝雨档案",
+        hours_ago=1,
+        importance=8,
+        domain=["日常"],
+        date="2026-03-01",
+        created="2026-06-15T09:00:00+08:00",
+        last_active="2026-06-15T09:10:00+08:00",
+    )
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recent_context_budget=0,
+            recalled_memory_budget=500,
+            related_memory_budget=0,
+            current_inner_state_interval_rounds=0,
+        ),
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.96)],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-direct-event-date",
+            },
+            json={"messages": [{"role": "user", "content": "蓝雨档案"}]},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    direct_line = next(line for line in injected.splitlines() if f"[bucket_id:{bucket_id}]" in line)
+    assert "[date:2026-03-01]" in direct_line
+    assert "[created:" not in direct_line
+    assert "[created:2026-06-15]" not in injected
+
+
 def test_gateway_direct_long_bucket_renders_window_in_auto_mode(
     monkeypatch,
     test_config,
@@ -4765,6 +4812,64 @@ def test_gateway_date_recall_uses_date_turns_and_topic_filters_before_embedding(
     assert debug["date_recall_bucket_ids"] == [job_bucket]
     assert "找工作" in debug["date_recall_debug"]["topic_terms"]
     assert debug["query_planner_debug"]["skip_reason"] == "date_recall"
+
+
+def test_gateway_date_recall_treats_event_date_as_authoritative(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        recalled_memory_budget=500,
+        related_memory_budget=0,
+        inject_total_budget=1800,
+        current_inner_state_interval_rounds=0,
+        relationship_weather_interval_rounds=0,
+        favorite_memory_interval_rounds=0,
+        date_recall_enabled=True,
+        date_recall_budget=500,
+        date_recall_max_turns=2,
+        date_recall_max_buckets=2,
+    )
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="蓝雨档案记录的是三月一日那次真实事件。",
+        name="蓝雨档案",
+        hours_ago=1,
+        importance=8,
+        domain=["日常"],
+        date="2026-03-01",
+        created="2026-06-15T09:00:00+08:00",
+        last_active="2026-06-15T09:10:00+08:00",
+    )
+    _, service, state_store, _ = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.99)],
+    )
+    state_store.record_success(
+        "sess-event-date-authoritative",
+        [],
+        completed_at=datetime.now() - timedelta(minutes=5),
+    )
+
+    payload, recalled_ids, debug = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": "2026-06-15聊蓝雨档案吗"}]},
+            "sess-event-date-authoritative",
+            include_debug=True,
+        )
+    )
+    injected = _joined_message_content(payload["messages"])
+
+    assert recalled_ids == []
+    assert bucket_id not in debug["date_recall_bucket_ids"]
+    assert debug["date_recall_debug"]["selected_bucket_ids"] == []
+    assert debug["date_recall_debug"]["skip_reason"] == "no_material"
+    assert "蓝雨档案记录的是三月一日" not in injected
 
 
 def test_gateway_date_recall_handles_plain_yesterday_chat_question(

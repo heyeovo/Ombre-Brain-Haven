@@ -839,6 +839,7 @@ def _bucket_metadata(meta: dict, bucket: dict) -> dict:
             "bucket_favorite": bool(favorite_tags),
             "bucket_favorite_tags": favorite_tags,
             "bucket_has_affect_anchor": "### affect_anchor" in content,
+            "bucket_date": meta.get("date"),
             "bucket_created": meta.get("created"),
             "bucket_updated_at": meta.get("updated_at"),
             "bucket_path": bucket.get("path"),

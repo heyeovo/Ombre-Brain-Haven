@@ -410,6 +410,7 @@ async def test_create_memory_api_writes_chatgpt_source(monkeypatch, bucket_mgr):
             "tags": ["chatgpt"],
             "resolved": True,
             "digested": True,
+            "date": "2026-03-12",
         },
         headers={"authorization": "Bearer secret"},
     )
@@ -424,6 +425,7 @@ async def test_create_memory_api_writes_chatgpt_source(monkeypatch, bucket_mgr):
     assert bucket["metadata"]["source"] == "chatgpt"
     assert bucket["metadata"]["resolved"] is True
     assert bucket["metadata"]["digested"] is True
+    assert bucket["metadata"]["date"] == "2026-03-12"
     assert bucket["metadata"]["created"].endswith("+08:00")
     assert bucket["metadata"]["updated_at"].endswith("+08:00")
 
@@ -1030,6 +1032,26 @@ async def test_trace_content_returns_before_slow_embedding_refresh(monkeypatch, 
 
 
 @pytest.mark.asyncio
+async def test_trace_can_set_event_date(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    bucket_id = await bucket_mgr.create(
+        content="旧正文。",
+        name="旧标题",
+        domain=["恋爱"],
+        created="2026-06-15T19:57:15+08:00",
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+
+    result = await server.trace(bucket_id=bucket_id, date="2026-03-08")
+    bucket = await bucket_mgr.get(bucket_id)
+
+    assert "date=2026-03-08" in result
+    assert bucket["metadata"]["date"] == "2026-03-08"
+
+
+@pytest.mark.asyncio
 async def test_hold_returns_before_slow_embedding_refresh(monkeypatch, bucket_mgr, decay_eng):
     import server
 
@@ -1054,6 +1076,36 @@ async def test_hold_returns_before_slow_embedding_refresh(monkeypatch, bucket_mg
     assert len(buckets) == 1
     await finish_blocking_embedding(embedding_engine)
     assert embedding_engine.calls[0][0] == buckets[0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_hold_preserves_explicit_affect_and_event_date(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    async def no_related_bucket(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "dehydrator", DummyDehydrator())
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+    monkeypatch.setattr(server, "_find_readonly_related_bucket", no_related_bucket)
+    monkeypatch.setattr(server, "_queue_memory_enrichment", lambda bucket_id: None)
+
+    result = await server.hold(
+        content="三月那天，小雨把一个重要节点留给 Haven。",
+        tags="milestone",
+        valence=0.85,
+        arousal=0.6,
+        date="2026-03-08",
+    )
+    buckets = await bucket_mgr.list_all(include_archive=True)
+    meta = buckets[0]["metadata"]
+
+    assert result.startswith("新建→")
+    assert meta["valence"] == 0.85
+    assert meta["arousal"] == 0.6
+    assert meta["date"] == "2026-03-08"
 
 
 @pytest.mark.asyncio
@@ -2706,13 +2758,17 @@ async def test_breath_whisper_reads_only_whisper_feels(monkeypatch, bucket_mgr, 
     monkeypatch.setattr(server, "decay_engine", decay_eng)
 
     result = await server.breath(domain="whisper")
-    all_feels = await server.breath(domain="feel")
+    non_daily_feels = await server.breath(domain="feel")
+    daily_impressions = await server.breath(domain="daily_impression")
 
     assert "=== 你留下的 whisper ===" in result
     assert f"[bucket_id:{whisper_id}]" in result
     assert f"[bucket_id:{daily_id}]" not in result
-    assert f"[bucket_id:{whisper_id}]" in all_feels
-    assert f"[bucket_id:{daily_id}]" in all_feels
+    assert f"[bucket_id:{whisper_id}]" in non_daily_feels
+    assert f"[bucket_id:{daily_id}]" not in non_daily_feels
+    assert "=== 你留下的 daily_impression ===" in daily_impressions
+    assert f"[bucket_id:{daily_id}]" in daily_impressions
+    assert f"[bucket_id:{whisper_id}]" not in daily_impressions
 
 
 @pytest.mark.asyncio

@@ -4168,6 +4168,7 @@ function buildFilters() {
     { key: 'pinned', label: '📌 钉选' },
     { key: 'anchor', label: '⚓ Anchor' },
     { key: 'feel', label: '🫧 Feel' },
+    { key: 'daily_impression', label: '日印象' },
     { key: 'unresolved', label: '⚡ 未解决' },
     { key: 'digested', label: '🌿 已消化' },
     { key: 'archived', label: '📦 归档' },
@@ -4200,7 +4201,8 @@ function filterBuckets(buckets) {
   if (currentFilter === 'all') return buckets;
   if (currentFilter === 'pinned') return buckets.filter(function(b) { return b.pinned; });
   if (currentFilter === 'anchor') return buckets.filter(function(b) { return b.anchor; });
-  if (currentFilter === 'feel') return buckets.filter(function(b) { return b.type === 'feel'; });
+  if (currentFilter === 'feel') return buckets.filter(function(b) { return b.type === 'feel' && !isDailyImpressionBucket(b); });
+  if (currentFilter === 'daily_impression') return buckets.filter(isDailyImpressionBucket);
   if (currentFilter === 'unresolved') return buckets.filter(function(b) { return !b.resolved && b.type !== 'permanent' && !b.pinned; });
   if (currentFilter === 'digested') return buckets.filter(function(b) { return b.digested; });
   if (currentFilter === 'archived') return buckets.filter(function(b) { return b.type === 'archived' || b.score < 0.3; });

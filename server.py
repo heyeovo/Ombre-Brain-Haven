@@ -3024,6 +3024,7 @@ async def _merge_or_create(
     memory_subject: str = "",
     memory_layer: str = "",
     memory_classification_source: str = "",
+    date: str = "",
 ) -> tuple[str, str, bool, dict | None]:
     """
     Check if a similar bucket exists for merging; merge if so, create if not.
@@ -3084,6 +3085,7 @@ async def _merge_or_create(
         valence=valence,
         arousal=arousal,
         name=name or None,
+        date=date or None,
         extra_metadata=_memory_classification_metadata(
             memory_subject,
             memory_layer,
@@ -3335,6 +3337,20 @@ def _is_breath_recall_seed_bucket(bucket: dict | None) -> bool:
 
 def _breath_recall_seed_buckets(buckets: list[dict]) -> list[dict]:
     return [bucket for bucket in buckets if _is_breath_recall_seed_bucket(bucket)]
+
+
+def _is_daily_impression_feel_bucket(bucket: dict | None) -> bool:
+    if not isinstance(bucket, dict):
+        return False
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    if meta.get("type") != "feel":
+        return False
+    tags = {str(tag).lower() for tag in meta.get("tags", []) or []}
+    return (
+        "daily_impression" in tags
+        or str(meta.get("period") or "").lower() == "daily"
+        or str(bucket.get("id") or "").startswith("reflection_daily_")
+    )
 
 
 def _moment_from_feel_bucket(moment: dict | None) -> bool:
@@ -4106,6 +4122,13 @@ def _bucket_date_meta_parts(bucket: dict | None = None, moment: dict | None = No
     moment = moment or {}
     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
     moment_meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+    event_date = _date_yyyy_mm_dd(
+        meta.get("date")
+        or moment_meta.get("bucket_date")
+        or moment_meta.get("date")
+    )
+    if event_date:
+        return [f"[date:{event_date}]"]
     created = _date_yyyy_mm_dd(
         meta.get("created")
         or moment_meta.get("bucket_created")
@@ -5789,7 +5812,7 @@ async def breath(
     mode: str = "",
     session_id: str = "",
 ) -> str:
-    """只读检索记忆。查主题用 query；新窗口轻交接用 mode="handoff"；domain="feel"/"whisper" 读取对应私密通道。"""
+    """只读检索记忆。查主题用 query；新窗口轻交接用 mode="handoff"；domain="feel"/"whisper" 读私密通道，domain="daily_impression" 才读日印象。"""
     await decay_engine.ensure_started()
     max_results = _int_between(max_results, 20, 1, 50)
     max_tokens = _int_between(max_tokens, 10000, 0, 20000)
@@ -5826,10 +5849,14 @@ async def breath(
 
     # --- Feel/whisper retrieval: independent read-only channels ---
     # --- Feel/whisper 检索：独立只读入口 ---
-    if domain_key in {"feel", "whisper"}:
+    if domain_key in {"feel", "whisper", "daily_impression"}:
         try:
             all_buckets = await bucket_mgr.list_all(include_archive=False)
             feels = [b for b in all_buckets if b["metadata"].get("type") == "feel"]
+            if domain_key == "daily_impression":
+                feels = [b for b in feels if _is_daily_impression_feel_bucket(b)]
+            else:
+                feels = [b for b in feels if not _is_daily_impression_feel_bucket(b)]
             if domain_key == "whisper":
                 feels = [
                     b for b in feels
@@ -5837,19 +5864,28 @@ async def breath(
                 ]
             feels.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
             if not feels:
-                return "没有留下过 whisper。" if domain_key == "whisper" else "没有留下过 feel。"
+                if domain_key == "whisper":
+                    return "没有留下过 whisper。"
+                if domain_key == "daily_impression":
+                    return "没有留下过 daily_impression。"
+                return "没有留下过 feel。"
             results = []
             for f in feels:
-                created = f["metadata"].get("created", "")
+                meta = f["metadata"]
+                created = meta.get("date") or meta.get("created", "")
                 entry = f"[{created}] [bucket_id:{f['id']}]\n{strip_wikilinks(f['content'])}"
                 results.append(entry)
                 if count_tokens_approx("\n---\n".join(results)) > max_tokens:
                     break
-            title = "whisper" if domain_key == "whisper" else "feel"
+            title = "whisper" if domain_key == "whisper" else ("daily_impression" if domain_key == "daily_impression" else "feel")
             return f"=== 你留下的 {title} ===\n" + "\n---\n".join(results)
         except Exception as e:
             logger.error(f"Feel retrieval failed: {e}")
-            return "读取 whisper 失败。" if domain_key == "whisper" else "读取 feel 失败。"
+            if domain_key == "whisper":
+                return "读取 whisper 失败。"
+            if domain_key == "daily_impression":
+                return "读取 daily_impression 失败。"
+            return "读取 feel 失败。"
 
     if _is_self_anchor_tag_read_request(query):
         return await _read_self_anchor_tag_breath(max_tokens=max_tokens, limit=max_results)
@@ -6799,6 +6835,7 @@ async def hold(
     valence: float = -1,
     arousal: float = -1,
     title: str = "",
+    date: str = "",
 ) -> str:
     """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。title 可选，传了就用你给的标题，不传则自动生成。content 按需分段：正文 + ### moment + ### original + ### reflection + ### followup + ### affect_anchor（只放和弦温度线），没有的部分不写。"""
     await decay_engine.ensure_started()
@@ -6809,10 +6846,13 @@ async def hold(
 
     importance = max(1, min(10, importance))
     extra_tags = [t.strip() for t in tags.split(",") if t.strip()]
+    event_date = str(date or "").strip()
+    requested_valence = valence if 0 <= valence <= 1 else None
+    requested_arousal = arousal if 0 <= arousal <= 1 else None
 
     async def create_whisper_bucket() -> str:
-        whisper_valence = valence if 0 <= valence <= 1 else 0.5
-        whisper_arousal = arousal if 0 <= arousal <= 1 else 0.3
+        whisper_valence = requested_valence if requested_valence is not None else 0.5
+        whisper_arousal = requested_arousal if requested_arousal is not None else 0.3
         whisper_tags = list(dict.fromkeys(extra_tags + ["whisper"]))
         bucket_id = await bucket_mgr.create(
             content=content,
@@ -6823,6 +6863,7 @@ async def hold(
             arousal=whisper_arousal,
             name=None,
             bucket_type="feel",
+            date=event_date or None,
         )
         _queue_embedding_refresh(bucket_id)
         return f"🫧whisper→{bucket_id}"
@@ -6836,8 +6877,8 @@ async def hold(
         # --- Feel 模式：有源记忆时挂成年轮 ---
     if feel:
         # Feel valence/arousal = model's own perspective
-        feel_valence = valence if 0 <= valence <= 1 else 0.5
-        feel_arousal = arousal if 0 <= arousal <= 1 else 0.3
+        feel_valence = requested_valence if requested_valence is not None else 0.5
+        feel_arousal = requested_arousal if requested_arousal is not None else 0.3
         source_id = (source_bucket or "").strip()
         if source_id:
             if not MEMORY_ID_RE.fullmatch(source_id):
@@ -6877,8 +6918,8 @@ async def hold(
         }
 
     domain = analysis["domain"]
-    valence = analysis["valence"]
-    arousal = analysis["arousal"]
+    valence = requested_valence if requested_valence is not None else analysis["valence"]
+    arousal = requested_arousal if requested_arousal is not None else analysis["arousal"]
     auto_tags = analysis["tags"]
     suggested_name = title.strip() or analysis.get("suggested_name", "")
 
@@ -6907,6 +6948,7 @@ async def hold(
             name=suggested_name or None,
             bucket_type="permanent",
             pinned=True,
+            date=event_date or None,
             extra_metadata=_memory_classification_metadata(
                 classification["memory_subject"],
                 classification["memory_layer"],
@@ -6931,6 +6973,7 @@ async def hold(
         memory_subject=classification["memory_subject"],
         memory_layer=classification["memory_layer"],
         memory_classification_source=classification["memory_classification_source"],
+        date=event_date,
     )
     _queue_memory_enrichment(bucket_id)
 
@@ -7348,6 +7391,7 @@ async def trace(
     anchor: int = -1,
     digested: int = -1,
     content: str = "",
+    date: str = "",
     delete: bool = False,
 ) -> str:
     """修改已有记忆，不创建新桶。tags/domain/content 是替换；改前先 read_bucket。resolved/digested 让旧事沉底。"""
@@ -7398,6 +7442,9 @@ async def trace(
         updates["digested"] = bool(digested)
     if content:
         updates["content"] = content
+    event_date = str(date or "").strip()
+    if event_date:
+        updates["date"] = event_date
 
     if not updates:
         return "没有任何字段需要修改。"
@@ -7932,26 +7979,32 @@ async def api_create_memory(request):
     anchor = _bool_value(body.get("anchor"), False)
     resolved = _bool_value(body.get("resolved"), False)
     digested = _bool_value(body.get("digested"), False)
+    event_date = str(body.get("date") or body.get("event_date") or "").strip()
 
     existing = await bucket_mgr.get(bucket_id) if bucket_id else None
     if existing:
+        update_kwargs = {
+            "content": content,
+            "tags": tags,
+            "importance": importance,
+            "domain": domain,
+            "valence": valence,
+            "arousal": arousal,
+            "name": title,
+            "resolved": resolved,
+            "pinned": pinned,
+            "anchor": anchor,
+            "digested": digested,
+            "confidence": confidence,
+            "source": "chatgpt",
+            "last_active": str(body.get("last_active") or now),
+            "updated_at": str(body.get("updated_at") or now),
+        }
+        if event_date:
+            update_kwargs["date"] = event_date
         ok = await bucket_mgr.update(
             bucket_id,
-            content=content,
-            tags=tags,
-            importance=importance,
-            domain=domain,
-            valence=valence,
-            arousal=arousal,
-            name=title,
-            resolved=resolved,
-            pinned=pinned,
-            anchor=anchor,
-            digested=digested,
-            confidence=confidence,
-            source="chatgpt",
-            last_active=str(body.get("last_active") or now),
-            updated_at=str(body.get("updated_at") or now),
+            **update_kwargs,
         )
         if not ok:
             return JSONResponse({"error": "update failed"}, status_code=500)
@@ -7977,6 +8030,7 @@ async def api_create_memory(request):
             created=str(body.get("created") or now),
             last_active=str(body.get("last_active") or now),
             updated_at=str(body.get("updated_at") or now),
+            date=event_date or None,
         )
         status = "created"
 

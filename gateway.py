@@ -4593,6 +4593,8 @@ class GatewayService:
 
     def _bucket_matches_date_recall(self, bucket: dict, date_key: str) -> bool:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        if meta.get("date"):
+            return self._local_date_key(meta.get("date")) == date_key
         for key in ("date", "created", "updated_at", "last_active"):
             if self._local_date_key(meta.get(key)) == date_key:
                 return True
@@ -5190,6 +5192,7 @@ class GatewayService:
             "bucket_tags": list(meta.get("tags") or []),
             "bucket_domain": list(meta.get("domain") or []),
             "bucket_importance": meta.get("importance"),
+            "bucket_date": meta.get("date"),
             "bucket_created": meta.get("created"),
             "bucket_updated_at": meta.get("updated_at") or meta.get("last_active"),
             "source_record_direct": True,
@@ -6084,6 +6087,13 @@ class GatewayService:
         moment = moment or {}
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         moment_meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+        event_date = self._date_yyyy_mm_dd(
+            meta.get("date")
+            or moment_meta.get("bucket_date")
+            or moment_meta.get("date")
+        )
+        if event_date:
+            return [f"[date:{event_date}]"]
         created = self._date_yyyy_mm_dd(
             meta.get("created")
             or moment_meta.get("bucket_created")

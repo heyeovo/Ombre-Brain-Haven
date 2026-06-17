@@ -257,6 +257,8 @@ class Dehydrator:
         """
         if not content or not content.strip():
             return "（空记忆 / empty memory）"
+        
+        return self._format_output(content, metadata)
 
         # --- Content is short enough, no compression needed ---
         # --- 内容已经很短，不需要压缩 ---

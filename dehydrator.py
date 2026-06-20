@@ -248,36 +248,20 @@ class Dehydrator:
     # ---------------------------------------------------------
     async def dehydrate(self, content: str, metadata: dict = None) -> str:
         """
-        Dehydrate/compress memory content.
-        Returns formatted summary string ready for Claude context injection.
-        Uses SQLite cache to avoid redundant API calls.
-        对记忆内容做脱水压缩。
-        返回格式化的摘要字符串，可直接注入 Claude 上下文。
-        使用 SQLite 缓存避免重复调用 API。
+        Format memory content for context injection — returns the original
+        text wrapped with a metadata header. No longer routes through the
+        LLM for JSON-compressed summarization: that pipeline doubled token
+        cost on short buckets (200字桶压缩成JSON反而变400字) and flattened
+        the emotional texture of the original wording.
+        格式化记忆内容用于注入上下文——返回原文，包一层 metadata header。
+        不再走 LLM 做 JSON 压缩摘要：那条链路在短桶上反而让 token 翻倍
+        （200字桶压缩后 JSON 格式变成 400字），而且把原文的温度压扁了。
+        summary/keywords 字段随之消失（打标已有专属字段，不需要重复）；
+        todo 走专属 metadata 字段，不再嵌进这里的正文（见 server.py hold/trace）。
         """
         if not content or not content.strip():
             return "（空记忆 / empty memory）"
-
-        # --- Content is short enough, no compression needed ---
-        # --- 内容已经很短，不需要压缩 ---
-        if count_tokens_approx(content) < 100:
-            return self._format_output(content, metadata)
-
-        # --- Check cache first ---
-        # --- 先查缓存 ---
-        cached = self._get_cached_summary(content)
-        if cached:
-            return self._format_output(cached, metadata)
-
-        # --- API dehydration (no local fallback) ---
-        # --- API 脱水（无本地降级）---
-        if not self.api_available:
-            raise RuntimeError("脱水 API 不可用，请配置 OMBRE_API_KEY")
-
-        result = await self._api_dehydrate(content)
-        # --- Cache the result ---
-        self._set_cached_summary(content, result)
-        return self._format_output(result, metadata)
+        return self._format_output(content, metadata)
 
     # ---------------------------------------------------------
     # Merge: blend new content into existing bucket

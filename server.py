@@ -1498,6 +1498,10 @@ async def api_buckets(request):
                 "activation_count": meta.get("activation_count", 1),
                 "score": decay_engine.calculate_score(meta),
                 "content_preview": strip_wikilinks(b.get("content", ""))[:200],
+                "wish": meta.get("wish", False),
+                "todo": meta.get("todo", ""),
+                "todo_done": meta.get("todo_done", False),
+                "related": meta.get("related", []),
             })
         result.sort(key=lambda x: x["score"], reverse=True)
         return JSONResponse(result)
@@ -1560,6 +1564,120 @@ async def api_touch_bucket(request):
     else:
         await bucket_mgr.soft_touch(bucket_id)
     return JSONResponse({"ok": True, "ripple": ripple})
+
+@mcp.custom_route("/api/bucket/{bucket_id}", methods=["PATCH", "POST"])
+async def api_update_bucket(request):
+    """
+    通用桶元数据更新端点——前端编辑面板(wish开关/todo/related连线/日记锁)
+    都走这个接口。只更新body里实际传的字段，其余不动。
+    Generic metadata update endpoint for the dashboard. Accepts any subset
+    of: name, domain(list), valence, arousal, importance, tags(list),
+    resolved, pinned, digested, content, wish, todo, todo_done, author,
+    locked, unlock_hint, related(list of bucket ids).
+    """
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    bucket_id = request.path_params["bucket_id"]
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+
+    allowed_fields = {
+        "name", "domain", "valence", "arousal", "importance", "tags",
+        "resolved", "pinned", "digested", "content",
+        "wish", "todo", "todo_done", "author", "locked", "unlock_hint", "related",
+        "model_valence",
+    }
+    updates = {k: v for k, v in body.items() if k in allowed_fields}
+    if not updates:
+        return JSONResponse({"error": "no recognized fields in body"}, status_code=400)
+
+    success = await bucket_mgr.update(bucket_id, **updates)
+    if not success:
+        return JSONResponse({"error": "update failed"}, status_code=500)
+
+    if "content" in updates:
+        try:
+            await embedding_engine.generate_and_store(bucket_id, updates["content"])
+        except Exception:
+            pass
+
+    return JSONResponse({"ok": True, "updated": list(updates.keys())})
+
+@mcp.custom_route("/api/journal", methods=["GET"])
+async def api_list_journal(request):
+    """
+    日记列表(前端日记页用)。锁着的条目只返回标题+hint,不返回正文——
+    跟 breath(domain="journal") 同一套规则,日期hint到点自动解锁，
+    其他hint(密码)保持锁定，哪怕是从你自己的dashboard看也一样。
+    """
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        entries = await bucket_mgr.list_journal()
+        entries.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+        result = []
+        for j in entries:
+            meta = j["metadata"]
+            item = {
+                "id": j["id"],
+                "name": meta.get("name", j["id"]),
+                "author": meta.get("author", "共同"),
+                "created": meta.get("created", ""),
+                "locked": bool(meta.get("locked", False)),
+            }
+            if meta.get("locked"):
+                hint = meta.get("unlock_hint", "")
+                auto_unlocked = False
+                try:
+                    unlock_date = datetime.fromisoformat(str(hint))
+                    auto_unlocked = datetime.now() >= unlock_date
+                except (ValueError, TypeError):
+                    auto_unlocked = False
+                if not auto_unlocked:
+                    item["unlock_hint"] = hint
+                    item["content"] = None
+                    result.append(item)
+                    continue
+            item["content"] = strip_wikilinks(j.get("content", ""))
+            result.append(item)
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@mcp.custom_route("/api/journal", methods=["POST"])
+async def api_create_journal(request):
+    """新建日记条目(前端日记页的写入按钮用)。"""
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    content = body.get("content", "")
+    if not content or not content.strip():
+        return JSONResponse({"error": "content required"}, status_code=400)
+    bucket_id = await bucket_mgr.create(
+        content=content,
+        tags=body.get("tags", []),
+        importance=int(body.get("importance", 5)),
+        domain=[],
+        valence=float(body.get("valence", 0.5)),
+        arousal=float(body.get("arousal", 0.3)),
+        name=body.get("name") or None,
+        bucket_type="journal",
+        author=body.get("author", "共同"),
+        locked=bool(body.get("locked", False)),
+        unlock_hint=body.get("unlock_hint", ""),
+    )
+    return JSONResponse({"ok": True, "id": bucket_id})
 
 @mcp.custom_route("/api/search", methods=["GET"])
 async def api_search(request):

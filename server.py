@@ -42,6 +42,7 @@ import hashlib
 import hmac
 import secrets
 import time
+from datetime import datetime
 import json as _json_lib
 import httpx
 
@@ -428,6 +429,9 @@ async def _merge_or_create(
     valence: float,
     arousal: float,
     name: str = "",
+    wish: bool = False,
+    todo: str = "",
+    todo_done: bool = False,
 ) -> tuple[str, bool]:
     """
     Check if a similar bucket exists for merging; merge if so, create if not.
@@ -452,8 +456,7 @@ async def _merge_or_create(
                 old_a = bucket["metadata"].get("arousal", 0.3)
                 merged_valence = round((old_v + valence) / 2, 2)
                 merged_arousal = round((old_a + arousal) / 2, 2)
-                await bucket_mgr.update(
-                    bucket["id"],
+                update_kwargs = dict(
                     content=merged,
                     tags=list(set(bucket["metadata"].get("tags", []) + tags)),
                     importance=max(bucket["metadata"].get("importance", 5), importance),
@@ -461,6 +464,12 @@ async def _merge_or_create(
                     valence=merged_valence,
                     arousal=merged_arousal,
                 )
+                if wish:
+                    update_kwargs["wish"] = True
+                if todo:
+                    update_kwargs["todo"] = todo
+                    update_kwargs["todo_done"] = todo_done
+                await bucket_mgr.update(bucket["id"], **update_kwargs)
                 # --- Update embedding after merge ---
                 try:
                     await embedding_engine.generate_and_store(bucket["id"], merged)
@@ -478,6 +487,9 @@ async def _merge_or_create(
         valence=valence,
         arousal=arousal,
         name=name or None,
+        wish=wish,
+        todo=todo,
+        todo_done=todo_done,
     )
     # --- Generate embedding for new bucket ---
     try:
@@ -506,7 +518,7 @@ async def breath(
     max_results: int = 20,
     importance_min: int = -1,
 ) -> str:
-    """检索/浮现记忆。不传query或传空=自动浮现,有query=关键词检索。max_tokens控制返回总token上限(默认10000)。domain逗号分隔,valence/arousal 0~1(-1忽略)。max_results控制返回数量上限(默认20,最大50)。importance_min>=1时按重要度批量拉取(不走语义搜索,按importance降序返回最多20条)。"""
+    """检索/浮现记忆。不传query或传空=自动浮现,有query=关键词检索。max_tokens控制返回总token上限(默认10000)。domain逗号分隔,valence/arousal 0~1(-1忽略)。max_results控制返回数量上限(默认20,最大50)。importance_min>=1时按重要度批量拉取(不走语义搜索,按importance降序返回最多20条)。domain="journal"读取独立日记通道(上锁的桶只显示标题和提示)。"""
     await decay_engine.ensure_started()
     max_results = min(max_results, 50)
     max_tokens = min(max_tokens, 20000)
@@ -643,6 +655,8 @@ async def breath(
                 score = decay_engine.calculate_score(b["metadata"])
                 dynamic_results.append(f"[权重:{score:.2f}] [bucket_id:{b['id']}] {summary}")
                 token_budget -= summary_tokens
+                # dream() 去重用：标记"刚被 breath 浮现过"，不影响衰减打分
+                await bucket_mgr.mark_surfaced(b["id"])
             except Exception as e:
                 logger.warning(f"Failed to dehydrate surfaced bucket / 浮现脱水失败: {e}")
                 continue
@@ -650,11 +664,35 @@ async def breath(
         if not pinned_results and not dynamic_results:
             return "权重池平静，没有需要处理的记忆。"
 
+        # --- wish 低概率随机浮现：长期悬念，不受 max_results 常规限制 ---
+        # --- 不是每次都出，约15%概率从已浮现内容之外随机挑一个 wish 桶 ---
+        wish_result = None
+        WISH_SURFACE_PROBABILITY = 0.15
+        if random.random() < WISH_SURFACE_PROBABILITY:
+            surfaced_ids = {b["id"] for b in candidates} | {b["id"] for b in pinned_buckets}
+            wish_candidates = [
+                b for b in all_buckets
+                if b["metadata"].get("wish")
+                and b["id"] not in surfaced_ids
+                and not b["metadata"].get("resolved", False)
+                and not b["metadata"].get("digested", False)
+            ]
+            if wish_candidates:
+                b = random.choice(wish_candidates)
+                try:
+                    clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
+                    summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
+                    wish_result = f"🌙 [bucket_id:{b['id']}] {summary}"
+                except Exception as e:
+                    logger.warning(f"Failed to dehydrate wish bucket / wish桶脱水失败: {e}")
+
         parts = []
         if pinned_results:
             parts.append("=== 核心准则 ===\n" + "\n---\n".join(pinned_results))
         if dynamic_results:
             parts.append("=== 浮现记忆 ===\n" + "\n---\n".join(dynamic_results))
+        if wish_result:
+            parts.append("=== 还记得这个吗 ===\n" + wish_result)
         return "\n\n".join(parts)
 
     # --- Feel retrieval: domain="feel" is a special channel ---
@@ -679,6 +717,51 @@ async def breath(
             logger.error(f"Feel retrieval failed: {e}")
             return "读取 feel 失败。"
 
+    # --- Journal retrieval: domain="journal" is a fully independent channel ---
+    # --- 日记检索：domain="journal" 完全独立通道，不与普通breath/search混 ---
+    if domain.strip().lower() == "journal":
+        try:
+            journal_entries = await bucket_mgr.list_journal()
+            journal_entries.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+            journal_entries = journal_entries[:20]
+            if not journal_entries:
+                return "日记本是空的。"
+            results = []
+            for j in journal_entries:
+                meta = j["metadata"]
+                name = meta.get("name", j["id"])
+                author = meta.get("author", "共同")
+                created = meta.get("created", "")
+                if meta.get("locked"):
+                    hint = meta.get("unlock_hint", "")
+                    # --- 日期形式的 hint：到点自动解锁；非日期形式视为密码，保持锁定 ---
+                    auto_unlocked = False
+                    try:
+                        unlock_date = datetime.fromisoformat(str(hint))
+                        auto_unlocked = datetime.now() >= unlock_date
+                    except (ValueError, TypeError):
+                        auto_unlocked = False
+                    if not auto_unlocked:
+                        entry = (
+                            f"🔒 [{name}] [作者:{author}] [bucket_id:{j['id']}]\n"
+                            f"（已上锁，提示：{hint or '无'}）"
+                        )
+                        results.append(entry)
+                        if count_tokens_approx("\n---\n".join(results)) > max_tokens:
+                            break
+                        continue
+                entry = (
+                    f"[{created}] [{name}] [作者:{author}] [bucket_id:{j['id']}]\n"
+                    f"{strip_wikilinks(j['content'])}"
+                )
+                results.append(entry)
+                if count_tokens_approx("\n---\n".join(results)) > max_tokens:
+                    break
+            return "=== 日记本 ===\n" + "\n---\n".join(results)
+        except Exception as e:
+            logger.error(f"Journal retrieval failed: {e}")
+            return "读取日记失败。"
+
     # --- With args: search mode (keyword + vector dual channel) ---
     # --- 有参数：检索模式（关键词 + 向量双通道）---
     domain_filter = [d.strip() for d in domain.split(",") if d.strip()] or None
@@ -697,14 +780,12 @@ async def breath(
         logger.error(f"Search failed / 检索失败: {e}")
         return "检索过程出错，请稍后重试。"
 
-    # --- Exclude pinned/protected from search results (they surface in surfacing mode) ---
-    # --- 搜索模式排除钉选桶（它们在浮现模式中始终可见）---
-    # matches = [b for b in matches if not (b["metadata"].get("pinned") or b["metadata"].get("protected"))]
-
-    # --- Vector similarity channel: find semantically related buckets ---
-    # --- 向量相似度通道：找到语义相关的桶 ---
-    # 关键词有结果就跳过语义
-    if len(matches) == 0:
+    # --- Vector similarity channel: hybrid retrieval, threshold-triggered ---
+    # --- 向量相似度通道：混合检索，按关键词最高分置信度决定是否启用向量 ---
+    # --- (而非 len(matches)==0 一刀切) ---
+    top_score = max((b.get("score", 0) for b in matches), default=0)
+    VECTOR_TRIGGER_THRESHOLD = 50  # 阈值可调
+    if top_score < VECTOR_TRIGGER_THRESHOLD:
         matched_ids = {b["id"] for b in matches}
         try:
             vector_results = await embedding_engine.search_similar(
@@ -718,106 +799,80 @@ async def breath(
                         if (meta.get("type") == "archived" 
                                 or meta.get("digested", False)):
                             continue
-                        bucket["score"] = round(sim_score * 100, 2)
+                        # 向量结果降权，不允许排到高质量关键词结果前面
+                        bucket["score"] = round(sim_score * 100 * 0.4, 2)
                         bucket["vector_match"] = True
                         matches.append(bucket)
                         matched_ids.add(bucket_id)
         except Exception as e:
             logger.warning(f"Vector search failed / 向量搜索失败: {e}")
 
+        # 关键词+向量合并后重新排序，统一受 max_results 管控
+        matches.sort(key=lambda b: b.get("score", 0), reverse=True)
+        matches = matches[:max_results]
+
     results = []
     token_used = 0
 
-    is_id_query = bool(re.fullmatch(r"[0-9a-f]{12}", query.strip()))
-
-    if not is_id_query:
-        # --- Query模式：pinned桶强制置顶 ---
+    # --- Pinned/protected buckets participate in normal scoring (importance=10
+    # --- gives them enough boost); no forced top-insertion here anymore —
+    # --- that was the source of the duplicate-bucket bug (forced-top once +
+    # --- matches loop once). 钉选桶现在走正常评分(importance=10已经能让
+    # --- 相关的排前面)，不再强制置顶——那是重复桶问题的根源。
+    for bucket in matches:
+        if token_used >= max_tokens:
+            break
         try:
-            all_buckets_temp = await bucket_mgr.list_all(include_archive=False)
-            pinned_buckets = [
-                b for b in all_buckets_temp
-                if b["metadata"].get("pinned") or b["metadata"].get("protected")
-            ]
-            pinned_parts = []
-            for b in pinned_buckets:
-                from rapidfuzz import fuzz
-                name_score = fuzz.partial_ratio(query, b["metadata"].get("name", ""))
-                content_score = fuzz.partial_ratio(query, b.get("content", "")[:500])
-                if max(name_score, content_score) < 40:
-                    continue
-                clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
-                summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
-                summary_tokens = count_tokens_approx(summary)
-                token_used += summary_tokens
-                pinned_parts.append(f"📌 [核心准则] [bucket_id:{b['id']}] {summary}")
-            if pinned_parts:
-                results.append("=== 核心准则 ===\n" + "\n---\n".join(pinned_parts))
-        except Exception as e:
-            logger.warning(f"Pinned surfacing in search mode failed: {e}")
-        for bucket in matches:
-            if token_used >= max_tokens:
+            clean_meta = {k: v for k, v in bucket["metadata"].items() if k != "tags"}
+            # --- Memory reconstruction: shift displayed valence by current mood ---
+            # --- 记忆重构：根据当前情绪微调展示层 valence（±0.1）---
+            if q_valence is not None and "valence" in clean_meta:
+                original_v = float(clean_meta.get("valence", 0.5))
+                shift = (q_valence - 0.5) * 0.2  # ±0.1 max shift
+                clean_meta["valence"] = max(0.0, min(1.0, original_v + shift))
+            summary = await dehydrator.dehydrate(strip_wikilinks(bucket["content"]), clean_meta)
+            summary_tokens = count_tokens_approx(summary)
+            if token_used + summary_tokens > max_tokens:
                 break
-            try:
-                clean_meta = {k: v for k, v in bucket["metadata"].items() if k != "tags"}
-                # --- Memory reconstruction: shift displayed valence by current mood ---
-                # --- 记忆重构：根据当前情绪微调展示层 valence（±0.1）---
-                if q_valence is not None and "valence" in clean_meta:
-                    original_v = float(clean_meta.get("valence", 0.5))
-                    shift = (q_valence - 0.5) * 0.2  # ±0.1 max shift
-                    clean_meta["valence"] = max(0.0, min(1.0, original_v + shift))
-                summary = await dehydrator.dehydrate(strip_wikilinks(bucket["content"]), clean_meta)
-                summary_tokens = count_tokens_approx(summary)
-                if token_used + summary_tokens > max_tokens:
+            await bucket_mgr.soft_touch(bucket["id"])
+            if bucket.get("vector_match"):
+                summary = f"[语义关联] [bucket_id:{bucket['id']}] {summary}"
+            else:
+                summary = f"[bucket_id:{bucket['id']}] {summary}"
+            results.append(summary)
+            token_used += summary_tokens
+
+            # --- 关系边：命中桶若有 related 字段，附带关联桶摘要 ---
+            # --- 不占主结果名额(max_results只数主结果)，但仍受 max_tokens 约束 ---
+            related_ids = clean_meta.get("related") or []
+            for rel_id in related_ids[:2]:  # 每条最多带2个关联，避免一条带出一长串
+                if token_used >= max_tokens:
                     break
-                await bucket_mgr.soft_touch(bucket["id"])
-                if bucket.get("vector_match"):
-                    summary = f"[语义关联] [bucket_id:{bucket['id']}] {summary}"
-                else:
-                    summary = f"[bucket_id:{bucket['id']}] {summary}"
-                results.append(summary)
-                token_used += summary_tokens
-            except Exception as e:
-                logger.warning(f"Failed to dehydrate search result / 检索结果脱水失败: {e}")
-                continue
-
-        # --- 时间涟漪：基于命中桶的时间，找±24h内的相邻桶 ---
-    if len(matches) < 3 and matches:
-        try:
-            all_buckets = await bucket_mgr.list_all(include_archive=False)
-            matched_ids = {b["id"] for b in matches}
-            ref_time = datetime.fromisoformat(str(matches[0]["metadata"].get("created", "")))
-
-            nearby = []
-            for b in all_buckets:
-                if b["id"] in matched_ids:
-                    continue
-                if b["metadata"].get("pinned") or b["metadata"].get("protected"):
-                    continue
-                if b["metadata"].get("type") in ("permanent", "feel"):
-                    continue
-                if b["metadata"].get("digested", False):
-                    continue
                 try:
-                    created = datetime.fromisoformat(str(b["metadata"].get("created", "")))
-                    delta_hours = abs((ref_time - created).total_seconds()) / 3600
-                    if delta_hours <= 24:
-                        nearby.append((delta_hours, b))
-                except (ValueError, TypeError):
+                    rel_bucket = await bucket_mgr.get(rel_id)
+                    if not rel_bucket:
+                        continue
+                    rel_meta = {k: v for k, v in rel_bucket["metadata"].items() if k != "tags"}
+                    rel_summary = await dehydrator.dehydrate(strip_wikilinks(rel_bucket["content"]), rel_meta)
+                    rel_tokens = count_tokens_approx(rel_summary)
+                    if token_used + rel_tokens > max_tokens:
+                        break
+                    results.append(f"  ↳ [关联] [bucket_id:{rel_id}] {rel_summary}")
+                    token_used += rel_tokens
+                except Exception as e:
+                    logger.warning(f"Failed to attach related bucket {rel_id}: {e}")
                     continue
-
-            nearby.sort(key=lambda x: x[0])
-            ripple_buckets = [b for _, b in nearby[:2]]
-
-            if ripple_buckets:
-                ripple_results = []
-                for b in ripple_buckets:
-                    clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
-                    summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
-                    ripple_results.append(f"[surface_type: time_ripple]\n{summary}")
-                results.append("--- 那段时间还有 ---\n" + "\n---\n".join(ripple_results))
         except Exception as e:
-            logger.warning(f"Time ripple surfacing failed: {e}")
-            
+            logger.error(
+                f"Failed to dehydrate search result / 检索结果脱水失败 "
+                f"(bucket_id={bucket.get('id', '?')}): {e}",
+                exc_info=True,
+            )
+            continue
+
+    # --- 时间涟漪已移除：它在 max_results 之外额外补充桶，是返回数量
+    # --- 失控的来源之一。有意义的前后关联改用关系边（related 字段）替代。
+
     if not results:
         await _fire_webhook("breath", {"mode": "empty", "matches": 0})
         return "未找到相关记忆。"
@@ -840,8 +895,15 @@ async def hold(
     feel: bool = False,
     source_bucket: str = "",    valence: float = -1,
     arousal: float = -1,
+    wish: bool = False,
+    todo: str = "",
+    todo_done: bool = False,
+    journal: bool = False,
+    author: str = "",
+    locked: bool = False,
+    unlock_hint: str = "",
 ) -> str:
-    """存储单条记忆,自动打标+合并。tags逗号分隔,importance 1-10。pinned=True创建永久钉选桶。feel=True存储你的第一人称感受(不参与普通浮现)。source_bucket=被消化的记忆桶ID(feel模式下,标记源记忆为已消化)。"""
+    """存储单条记忆,自动打标+合并。tags逗号分隔,importance 1-10。pinned=True创建永久钉选桶。feel=True存储你的第一人称感受(不参与普通浮现)。source_bucket=被消化的记忆桶ID(feel模式下,标记源记忆为已消化)。wish=True打上长期悬念标签。todo=附着待办内容,todo_done=是否已完成。journal=True存进独立日记通道(只能breath(domain="journal")读取),author=言之/小羊/共同,locked=True上锁(配合unlock_hint:日期或密码)。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -850,6 +912,24 @@ async def hold(
 
     importance = max(1, min(10, importance))
     extra_tags = [t.strip() for t in tags.split(",") if t.strip()]
+
+    # --- Journal mode: independent channel, bypasses merge entirely ---
+    # --- 日记模式：独立通道，完全不走合并 ---
+    if journal:
+        bucket_id = await bucket_mgr.create(
+            content=content,
+            tags=extra_tags,
+            importance=importance,
+            domain=[],
+            valence=valence if 0 <= valence <= 1 else 0.5,
+            arousal=arousal if 0 <= arousal <= 1 else 0.3,
+            name=None,
+            bucket_type="journal",
+            author=author or "共同",
+            locked=locked,
+            unlock_hint=unlock_hint,
+        )
+        return f"📔日记→{bucket_id} [作者:{author or '共同'}]" + ("[已上锁]" if locked else "")
 
     # --- Feel mode: store as feel type, minimal metadata ---
     # --- Feel 模式：存为 feel 类型，最少元数据 ---
@@ -919,6 +999,9 @@ async def hold(
             name=suggested_name or None,
             bucket_type="permanent",
             pinned=True,
+            wish=wish,
+            todo=todo,
+            todo_done=todo_done,
         )
         try:
             await embedding_engine.generate_and_store(bucket_id, content)
@@ -935,6 +1018,9 @@ async def hold(
         valence=final_valence,
         arousal=final_arousal,
         name=suggested_name,
+        wish=wish,
+        todo=todo,
+        todo_done=todo_done,
     )
 
     action = "合并→" if is_merged else "新建→"
@@ -1046,8 +1132,15 @@ async def trace(
     delete: bool = False,
     touch: bool = False,      # 新增：轻触激活
     ripple: bool = False,     # 新增：完整激活+涟漪（仅 touch=True 时有效）
+    wish: int = -1,           # 1=打上wish标签(长期悬念),0=取消
+    todo: str = "",           # 附着在桶上的待办内容
+    todo_done: int = -1,      # 1=待办已完成,0=未完成
+    author: str = "",         # 日记作者:言之/小羊/共同
+    locked: int = -1,         # 日记上锁:1=锁,0=解锁
+    unlock_hint: str = "",    # 解锁提示(日期或密码)
+    related: str = "",        # 关联桶id,逗号分隔
 ) -> str:
-    """修改记忆元数据或内容。resolved=1沉底/0激活,pinned=1钉选/0取消,digested=1隐藏(保留但不浮现)/0取消隐藏,content=替换桶正文,delete=True删除。只传需改的,-1或空=不改。touch=True轻触激活，ripple=True完整激活+时间涟漪。"""
+    """修改记忆元数据或内容。resolved=1沉底/0激活,pinned=1钉选/0取消,digested=1隐藏(保留但不浮现)/0取消隐藏,content=替换桶正文,delete=True删除。只传需改的,-1或空=不改。touch=True轻触激活，ripple=True完整激活+时间涟漪。wish=1/0打标/取消长期悬念；todo/todo_done附着待办；author/locked/unlock_hint用于日记桶；related=逗号分隔的关联桶id列表。"""
 
 
     if not bucket_id or not bucket_id.strip():
@@ -1097,6 +1190,20 @@ async def trace(
         updates["digested"] = bool(digested)
     if content:
         updates["content"] = content
+    if wish in (0, 1):
+        updates["wish"] = bool(wish)
+    if todo:
+        updates["todo"] = todo
+    if todo_done in (0, 1):
+        updates["todo_done"] = bool(todo_done)
+    if author:
+        updates["author"] = author
+    if locked in (0, 1):
+        updates["locked"] = bool(locked)
+    if unlock_hint:
+        updates["unlock_hint"] = unlock_hint
+    if related:
+        updates["related"] = [r.strip() for r in related.split(",") if r.strip()]
 
     # --- Touch / activate ---
     if touch:
@@ -1226,6 +1333,21 @@ async def dream() -> str:
         return "记忆系统暂时无法访问。"
 
     # --- Filter: recent surface-level dynamic buckets (not permanent/pinned/feel) ---
+    # --- dream 去重：breath() 浮现窗口刚出现过的桶跳过，不重复返回全文 ---
+    # --- (10分钟窗口，覆盖"开窗三件套" breath→dream→breath(feel) 连续调用场景) ---
+    DREAM_DEDUPE_WINDOW_MINUTES = 10
+    now = datetime.now()
+
+    def _recently_surfaced(meta: dict) -> bool:
+        ts = meta.get("last_breath_surfaced")
+        if not ts:
+            return False
+        try:
+            surfaced_at = datetime.fromisoformat(str(ts))
+        except (ValueError, TypeError):
+            return False
+        return (now - surfaced_at).total_seconds() / 60 < DREAM_DEDUPE_WINDOW_MINUTES
+
     candidates = [
         b for b in all_buckets
         if b["metadata"].get("type") not in ("permanent", "feel")
@@ -1233,6 +1355,7 @@ async def dream() -> str:
         and not b["metadata"].get("digested", False)   
         and not b["metadata"].get("pinned", False)
         and not b["metadata"].get("protected", False)
+        and not _recently_surfaced(b["metadata"])
     ]
 
     # --- Sort by creation time desc, take top 10 ---
@@ -1250,11 +1373,16 @@ async def dream() -> str:
         val = meta.get("valence", 0.5)
         aro = meta.get("arousal", 0.3)
         created = meta.get("created", "")
+        todo_line = ""
+        if meta.get("todo"):
+            done_tag = "✅" if meta.get("todo_done") else "⬜"
+            todo_line = f"{done_tag} 待办: {meta['todo']}\n"
         parts.append(
             f"[{meta.get('name', b['id'])}]{resolved_tag} "
             f"主题:{domains} V{val:.1f}/A{aro:.1f} "
             f"创建:{created}\n"
             f"ID: {b['id']}\n"
+            f"{todo_line}"
             f"{strip_wikilinks(b['content'][:2000])}"
         )
 
@@ -1370,6 +1498,10 @@ async def api_buckets(request):
                 "activation_count": meta.get("activation_count", 1),
                 "score": decay_engine.calculate_score(meta),
                 "content_preview": strip_wikilinks(b.get("content", ""))[:200],
+                "wish": meta.get("wish", False),
+                "todo": meta.get("todo", ""),
+                "todo_done": meta.get("todo_done", False),
+                "related": meta.get("related", []),
             })
         result.sort(key=lambda x: x["score"], reverse=True)
         return JSONResponse(result)
@@ -1432,6 +1564,120 @@ async def api_touch_bucket(request):
     else:
         await bucket_mgr.soft_touch(bucket_id)
     return JSONResponse({"ok": True, "ripple": ripple})
+
+@mcp.custom_route("/api/bucket/{bucket_id}", methods=["PATCH", "POST"])
+async def api_update_bucket(request):
+    """
+    通用桶元数据更新端点——前端编辑面板(wish开关/todo/related连线/日记锁)
+    都走这个接口。只更新body里实际传的字段，其余不动。
+    Generic metadata update endpoint for the dashboard. Accepts any subset
+    of: name, domain(list), valence, arousal, importance, tags(list),
+    resolved, pinned, digested, content, wish, todo, todo_done, author,
+    locked, unlock_hint, related(list of bucket ids).
+    """
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    bucket_id = request.path_params["bucket_id"]
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+
+    allowed_fields = {
+        "name", "domain", "valence", "arousal", "importance", "tags",
+        "resolved", "pinned", "digested", "content",
+        "wish", "todo", "todo_done", "author", "locked", "unlock_hint", "related",
+        "model_valence",
+    }
+    updates = {k: v for k, v in body.items() if k in allowed_fields}
+    if not updates:
+        return JSONResponse({"error": "no recognized fields in body"}, status_code=400)
+
+    success = await bucket_mgr.update(bucket_id, **updates)
+    if not success:
+        return JSONResponse({"error": "update failed"}, status_code=500)
+
+    if "content" in updates:
+        try:
+            await embedding_engine.generate_and_store(bucket_id, updates["content"])
+        except Exception:
+            pass
+
+    return JSONResponse({"ok": True, "updated": list(updates.keys())})
+
+@mcp.custom_route("/api/journal", methods=["GET"])
+async def api_list_journal(request):
+    """
+    日记列表(前端日记页用)。锁着的条目只返回标题+hint,不返回正文——
+    跟 breath(domain="journal") 同一套规则,日期hint到点自动解锁，
+    其他hint(密码)保持锁定，哪怕是从你自己的dashboard看也一样。
+    """
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        entries = await bucket_mgr.list_journal()
+        entries.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+        result = []
+        for j in entries:
+            meta = j["metadata"]
+            item = {
+                "id": j["id"],
+                "name": meta.get("name", j["id"]),
+                "author": meta.get("author", "共同"),
+                "created": meta.get("created", ""),
+                "locked": bool(meta.get("locked", False)),
+            }
+            if meta.get("locked"):
+                hint = meta.get("unlock_hint", "")
+                auto_unlocked = False
+                try:
+                    unlock_date = datetime.fromisoformat(str(hint))
+                    auto_unlocked = datetime.now() >= unlock_date
+                except (ValueError, TypeError):
+                    auto_unlocked = False
+                if not auto_unlocked:
+                    item["unlock_hint"] = hint
+                    item["content"] = None
+                    result.append(item)
+                    continue
+            item["content"] = strip_wikilinks(j.get("content", ""))
+            result.append(item)
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@mcp.custom_route("/api/journal", methods=["POST"])
+async def api_create_journal(request):
+    """新建日记条目(前端日记页的写入按钮用)。"""
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    content = body.get("content", "")
+    if not content or not content.strip():
+        return JSONResponse({"error": "content required"}, status_code=400)
+    bucket_id = await bucket_mgr.create(
+        content=content,
+        tags=body.get("tags", []),
+        importance=int(body.get("importance", 5)),
+        domain=[],
+        valence=float(body.get("valence", 0.5)),
+        arousal=float(body.get("arousal", 0.3)),
+        name=body.get("name") or None,
+        bucket_type="journal",
+        author=body.get("author", "共同"),
+        locked=bool(body.get("locked", False)),
+        unlock_hint=body.get("unlock_hint", ""),
+    )
+    return JSONResponse({"ok": True, "id": bucket_id})
 
 @mcp.custom_route("/api/search", methods=["GET"])
 async def api_search(request):

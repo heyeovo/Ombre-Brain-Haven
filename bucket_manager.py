@@ -59,6 +59,7 @@ class BucketManager:
         self.dynamic_dir = os.path.join(self.base_dir, "dynamic")
         self.archive_dir = os.path.join(self.base_dir, "archive")
         self.feel_dir = os.path.join(self.base_dir, "feel")
+        self.journal_dir = os.path.join(self.base_dir, "journal")
         self.fuzzy_threshold = config.get("matching", {}).get("fuzzy_threshold", 50)
         self.content_weight = config.get("matching", {}).get("content_weight", 1)
         self.max_results = config.get("matching", {}).get("max_results", 5)
@@ -112,6 +113,12 @@ class BucketManager:
         name: str = None,
         pinned: bool = False,
         protected: bool = False,
+        wish: bool = False,
+        todo: str = "",
+        todo_done: bool = False,
+        author: str = "",
+        locked: bool = False,
+        unlock_hint: str = "",
     ) -> str:
         """
         Create a new memory bucket, return bucket ID.
@@ -120,11 +127,17 @@ class BucketManager:
         pinned/protected=True: bucket won't be merged, decayed, or have importance changed.
         Importance is locked to 10 for pinned/protected buckets.
         pinned/protected 桶不参与合并与衰减，importance 强制锁定为 10。
+
+        bucket_type="journal": 完全独立通道，不进入 list_all()/breath()/search()，
+        只能通过 list_journal() 读取。author 区分作者(言之/小羊/共同)，
+        locked+unlock_hint 支持上锁(日期或密码)。
+        wish=True: 长期悬念标签，不受 max_results 常规限制，低概率随机浮现。
+        todo/todo_done: 附着在桶上的待办，不单独成桶。
         """
         bucket_id = generate_bucket_id()
         bucket_name = sanitize_name(name) if name else bucket_id
-        # feel buckets are allowed to have empty domain; others default to ["未分类"]
-        if bucket_type == "feel":
+        # feel/journal buckets are allowed to have empty domain; others default to ["未分类"]
+        if bucket_type in ("feel", "journal"):
             domain = domain if domain is not None else []
         else:
             domain = domain or ["未分类"]
@@ -154,6 +167,17 @@ class BucketManager:
             metadata["pinned"] = True
         if protected:
             metadata["protected"] = True
+        if wish:
+            metadata["wish"] = True
+        if todo:
+            metadata["todo"] = todo
+            metadata["todo_done"] = bool(todo_done)
+        if bucket_type == "journal":
+            if author:
+                metadata["author"] = author
+            if locked:
+                metadata["locked"] = True
+                metadata["unlock_hint"] = unlock_hint
 
         # --- Assemble Markdown file (frontmatter + body) ---
         # --- 组装 Markdown 文件 ---
@@ -167,10 +191,14 @@ class BucketManager:
                 metadata["type"] = "permanent"
         elif bucket_type == "feel":
             type_dir = self.feel_dir
+        elif bucket_type == "journal":
+            type_dir = self.journal_dir
         else:
             type_dir = self.dynamic_dir
         if bucket_type == "feel":
             primary_domain = "沉淀物"  # feel subfolder name
+        elif bucket_type == "journal":
+            primary_domain = author or "共同"  # journal subfolder: 按作者分
         else:
             primary_domain = sanitize_name(domain[0]) if domain else "未分类"
         target_dir = os.path.join(type_dir, primary_domain)
@@ -284,6 +312,20 @@ class BucketManager:
             post["digested"] = bool(kwargs["digested"])
         if "model_valence" in kwargs:
             post["model_valence"] = max(0.0, min(1.0, float(kwargs["model_valence"])))
+        if "wish" in kwargs:
+            post["wish"] = bool(kwargs["wish"])
+        if "todo" in kwargs:
+            post["todo"] = kwargs["todo"]
+        if "todo_done" in kwargs:
+            post["todo_done"] = bool(kwargs["todo_done"])
+        if "author" in kwargs:
+            post["author"] = kwargs["author"]
+        if "locked" in kwargs:
+            post["locked"] = bool(kwargs["locked"])
+        if "unlock_hint" in kwargs:
+            post["unlock_hint"] = kwargs["unlock_hint"]
+        if "related" in kwargs:
+            post["related"] = kwargs["related"]
 
         # --- Auto-refresh activation time / 自动刷新激活时间 ---
         # 修改：内容变更也不会刷新激活时间
@@ -391,6 +433,27 @@ class BucketManager:
                 f.write(frontmatter.dumps(post))
         except Exception as e:
             logger.warning(f"soft_touch failed: {bucket_id}: {e}")
+
+    async def mark_surfaced(self, bucket_id: str) -> None:
+        """
+        Stamp a bucket as just surfaced via breath() weight-pool surfacing.
+        Used by dream() to skip buckets already shown in the same open-window
+        sequence, without touching last_active/activation_count (so decay
+        scoring is unaffected — breath surfacing is deliberately not a "touch").
+        标记一个桶刚被 breath() 浮现过。用于 dream() 去重——同一次开窗序列里
+        breath 已经浮现的桶，dream 不再重复返回全文。不动 last_active/
+        activation_count，不影响衰减打分（浮现本身不算"触碰"）。
+        """
+        file_path = self._find_bucket_file(bucket_id)
+        if not file_path:
+            return
+        try:
+            post = frontmatter.load(file_path)
+            post["last_breath_surfaced"] = now_iso()
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(frontmatter.dumps(post))
+        except Exception as e:
+            logger.warning(f"mark_surfaced failed: {bucket_id}: {e}")
     
     async def _time_ripple(self, source_id: str, reference_time: datetime, hours: float = 48.0) -> None:
         """
@@ -553,19 +616,15 @@ class BucketManager:
                 weight_sum = self.w_topic + self.w_emotion + self.w_time + self.w_importance
                 normalized = (total / weight_sum) * 100 if weight_sum > 0 else 0
 
-                # Threshold check uses raw (pre-penalty) score so resolved buckets
-                # 阈值用原始分数判定，确保 resolved 桶在关键词命中时仍可被搜出
-                # remain reachable by keyword (penalty applied only to ranking).
-                is_resolved = meta.get("resolved", False)
-                # show_all模式下resolved桶跳过阈值
+                # search() only serves query-based retrieval paths (breath with
+                # query, dedup check, debug endpoint) — per spec, resolved state
+                # should be fully ignored here. The surfacing-mode (no query)
+                # path in server.py handles resolved-based weight decay separately.
+                # search() 只服务于有 query 的检索路径，resolved 状态在这里完全
+                # 忽略；无 query 的浮现模式在 server.py 里单独走权重衰减逻辑。
                 if not show_all and normalized < self.fuzzy_threshold:
                     continue
-                threshold = 10 if show_all else self.fuzzy_threshold
                 if normalized >= self.fuzzy_threshold or show_all:
-                    # Resolved buckets get ranking penalty (but still reachable by keyword)
-                    # 已解决的桶仅在排序时降权
-                    if is_resolved and not show_all:
-                        normalized *= 0.3
                     bucket["score"] = round(normalized, 2)
                     scored.append(bucket)
             except Exception as e:
@@ -583,29 +642,41 @@ class BucketManager:
     # name(×3) + domain(×2.5) + tags(×2) + body(×1)
     # 文本相关性子分：桶名(×3) + 主题域(×2.5) + 标签(×2) + 正文(×1)
     # ---------------------------------------------------------
+    def _multi_word_ratio(self, words: list[str], text: str) -> float:
+        """
+        Multi-keyword fuzzy match: split query into words, score each word
+        against text independently, return the equal-weighted average.
+        多关键词拆词匹配：query 按空格拆词，每词单独算 partial_ratio，
+        取加权平均（等权）合并，避免要求关键词连续出现才能得高分。
+        """
+        if not text:
+            return 0.0
+        return sum(fuzz.partial_ratio(w, text) for w in words) / len(words)
+
     def _calc_topic_score(self, query: str, bucket: dict) -> float:
         """
         Calculate text dimension relevance score (0~1).
         计算文本维度的相关性得分。
         """
         meta = bucket.get("metadata", {})
+        words = [w for w in query.split() if w] or [query]
 
-        name_score = fuzz.partial_ratio(query, meta.get("name", "")) * 3
+        name_score = self._multi_word_ratio(words, meta.get("name", "")) * 3
         domain_score = (
             max(
-                (fuzz.partial_ratio(query, d) for d in meta.get("domain", [])),
+                (self._multi_word_ratio(words, d) for d in meta.get("domain", [])),
                 default=0,
             )
             * 2.5
         )
         tag_score = (
             max(
-                (fuzz.partial_ratio(query, tag) for tag in meta.get("tags", [])),
+                (self._multi_word_ratio(words, tag) for tag in meta.get("tags", [])),
                 default=0,
             )
             * 2
         )
-        content_score = fuzz.partial_ratio(query, bucket.get("content", "")[:3000]) * self.content_weight
+        content_score = self._multi_word_ratio(words, bucket.get("content", "")[:3000]) * self.content_weight
 
         return (name_score + domain_score + tag_score + content_score) / (100 * (3 + 2.5 + 2 + self.content_weight))
 
@@ -680,6 +751,25 @@ class BucketManager:
                     if bucket:
                         buckets.append(bucket)
 
+        return buckets
+
+    async def list_journal(self) -> list[dict]:
+        """
+        Read journal entries only. 完全独立通道——journal_dir 不在 list_all()
+        的扫描目录里，所以日记不会泄漏进普通 breath/search/dream。
+        只有 breath(domain="journal") 走这个方法。
+        """
+        buckets = []
+        if not os.path.exists(self.journal_dir):
+            return buckets
+        for root, _, files in os.walk(self.journal_dir):
+            for filename in files:
+                if not filename.endswith(".md"):
+                    continue
+                file_path = os.path.join(root, filename)
+                bucket = self._load_bucket(file_path)
+                if bucket:
+                    buckets.append(bucket)
         return buckets
 
     # ---------------------------------------------------------

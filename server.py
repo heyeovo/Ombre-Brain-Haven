@@ -1621,6 +1621,31 @@ async def api_delete_bucket(request):
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse({"ok": True})
 
+@mcp.custom_route("/api/bucket/{bucket_id}/to-journal", methods=["POST"])
+async def api_convert_to_journal(request):
+    """
+    把一个已有桶(动态/永久/feel)转为日记桶——前端编辑面板"设为日记"按钮用。
+    物理移动文件到journal目录，转换后脱离常规update/delete查找范围，
+    只能通过 /api/journal 系列接口编辑。不可逆，前端应有二次确认。
+    """
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    bucket_id = request.path_params["bucket_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    success = await bucket_mgr.convert_to_journal(
+        bucket_id,
+        author=body.get("author", "共同"),
+        locked=bool(body.get("locked", False)),
+        unlock_hint=body.get("unlock_hint", ""),
+    )
+    if not success:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
 @mcp.custom_route("/api/bucket", methods=["POST"])
 async def api_create_bucket(request):
     """

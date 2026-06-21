@@ -388,6 +388,41 @@ class BucketManager:
         return True
 
     # ---------------------------------------------------------
+    # Convert an existing bucket into a journal entry
+    # 把已有桶(dynamic/permanent/feel/archive)转成日记桶
+    # journal 是独立通道，不进 list_all()/search()，转换后这个桶就脱离
+    # update()/delete() 等常规接口的查找范围(_find_bucket_file 不搜 journal_dir)，
+    # 只能通过 journal 专属接口编辑——这是有意为之，跟 create() 里 journal 的隔离设计一致。
+    # ---------------------------------------------------------
+    async def convert_to_journal(self, bucket_id: str, author: str = "共同", locked: bool = False, unlock_hint: str = "") -> bool:
+        """把一个已有桶转为日记桶：物理移动文件到 journal_dir/<author>/ 下。"""
+        file_path = self._find_bucket_file(bucket_id)
+        if not file_path:
+            return False
+        try:
+            post = frontmatter.load(file_path)
+        except Exception as e:
+            logger.warning(f"Failed to load bucket for journal conversion / 加载桶失败: {file_path}: {e}")
+            return False
+
+        post["type"] = "journal"
+        post["author"] = author or "共同"
+        post["domain"] = []
+        post["locked"] = bool(locked)
+        post["unlock_hint"] = unlock_hint if locked else ""
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(frontmatter.dumps(post))
+        except OSError as e:
+            logger.error(f"Failed to write journal conversion / 写入转换失败: {file_path}: {e}")
+            return False
+
+        self._move_bucket(file_path, self.journal_dir, [author or "共同"])
+        logger.info(f"Converted bucket to journal / 桶转为日记: {bucket_id}")
+        return True
+
+    # ---------------------------------------------------------
     # Touch bucket (refresh activation time + increment count)
     # 触碰桶（刷新激活时间 + 累加激活次数）
     # Called on every recall hit; affects decay score.

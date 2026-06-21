@@ -26,8 +26,6 @@
 import os
 import re
 import json
-import hashlib
-import sqlite3
 import logging
 
 from openai import AsyncOpenAI
@@ -187,58 +185,8 @@ class Dehydrator:
         else:
             self.client = None
 
-        # --- SQLite dehydration cache ---
-        # --- SQLite 脱水缓存：content hash → summary ---
-        db_path = os.path.join(config["buckets_dir"], "dehydration_cache.db")
-        self.cache_db_path = db_path
-        self._init_cache_db()
         self.dehydrate_prompt = DEHYDRATE_PROMPT
         self.analyze_prompt = ANALYZE_PROMPT
-
-    def _init_cache_db(self):
-        """Create dehydration cache table if not exists."""
-        os.makedirs(os.path.dirname(self.cache_db_path), exist_ok=True)
-        conn = sqlite3.connect(self.cache_db_path)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS dehydration_cache (
-                content_hash TEXT PRIMARY KEY,
-                summary TEXT NOT NULL,
-                model TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )
-        """)
-        conn.commit()
-        conn.close()
-
-    def _get_cached_summary(self, content: str) -> str | None:
-        """Look up cached dehydration result by content hash."""
-        content_hash = hashlib.sha256(content.encode()).hexdigest()
-        conn = sqlite3.connect(self.cache_db_path)
-        row = conn.execute(
-            "SELECT summary FROM dehydration_cache WHERE content_hash = ?",
-            (content_hash,)
-        ).fetchone()
-        conn.close()
-        return row[0] if row else None
-
-    def _set_cached_summary(self, content: str, summary: str):
-        """Store dehydration result in cache."""
-        content_hash = hashlib.sha256(content.encode()).hexdigest()
-        conn = sqlite3.connect(self.cache_db_path)
-        conn.execute(
-            "INSERT OR REPLACE INTO dehydration_cache (content_hash, summary, model) VALUES (?, ?, ?)",
-            (content_hash, summary, self.model)
-        )
-        conn.commit()
-        conn.close()
-
-    def invalidate_cache(self, content: str):
-        """Remove cached summary for specific content (call when bucket content changes)."""
-        content_hash = hashlib.sha256(content.encode()).hexdigest()
-        conn = sqlite3.connect(self.cache_db_path)
-        conn.execute("DELETE FROM dehydration_cache WHERE content_hash = ?", (content_hash,))
-        conn.commit()
-        conn.close()
 
     # ---------------------------------------------------------
     # Dehydrate: compress raw content into concise summary

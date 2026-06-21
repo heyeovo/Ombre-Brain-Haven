@@ -248,8 +248,8 @@ Ombre Brain gives it persistent memory — not cold key-value storage, but a sys
 - **Obsidian 原生 / Obsidian-native**: 每个记忆桶就是一个 Markdown 文件，YAML frontmatter 存元数据。可以直接在 Obsidian 里浏览、编辑、搜索。自动注入 `[[双链]]`。
   Each memory bucket is a Markdown file with YAML frontmatter. Browse, edit, and search directly in Obsidian. Wikilinks are auto-injected.
 
-- **API 脱水 + 缓存 / API dehydration + cache**: 脱水压缩和自动打标通过 LLM API（DeepSeek / Gemini 等）完成，结果缓存到本地 SQLite（`dehydration_cache.db`），相同内容不重复调用 API。向量检索不可用时降级到 fuzzy matching。
-  Dehydration and auto-tagging are done via LLM API (DeepSeek / Gemini etc.), with results cached locally in SQLite (`dehydration_cache.db`) to avoid redundant API calls. Embedding search degrades to fuzzy matching when unavailable.
+- **脱水 / Dehydration**: 脱水不再走 LLM 压缩摘要，直接返回原文+metadata header 用于上下文注入，避免短桶压缩后反而变长、压扁原文情绪温度。自动打标(analyze)仍走 LLM API（DeepSeek / Gemini 等），无缓存。向量检索不可用时降级到 fuzzy matching。
+  Dehydration no longer compresses via LLM — it returns the original content with a metadata header for context injection, avoiding the old pipeline's token bloat on short buckets. Auto-tagging (analyze) still goes through the LLM API (DeepSeek / Gemini etc.), uncached. Embedding search degrades to fuzzy matching when unavailable.
 
 - **历史对话导入 / Conversation history import**: 将过去与 Claude / ChatGPT / DeepSeek 等的对话批量导入为记忆桶。支持 Claude JSON 导出、ChatGPT 导出、Markdown、纯文本等格式，分块处理带断点续传，通过 Dashboard「导入」Tab 操作。
   Batch-import past conversations (Claude / ChatGPT / DeepSeek etc.) as memory buckets. Supports Claude JSON export, ChatGPT export, Markdown, and plain text. Chunked processing with resume support, via the Dashboard "Import" tab.

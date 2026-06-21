@@ -1609,6 +1609,50 @@ async def api_update_bucket(request):
 
     return JSONResponse({"ok": True, "updated": list(updates.keys())})
 
+@mcp.custom_route("/api/bucket/{bucket_id}", methods=["DELETE"])
+async def api_delete_bucket(request):
+    """硬删除桶——前端编辑面板的"抹除此记忆"按钮用。不可恢复。"""
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    bucket_id = request.path_params["bucket_id"]
+    success = await bucket_mgr.delete(bucket_id)
+    if not success:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+@mcp.custom_route("/api/bucket", methods=["POST"])
+async def api_create_bucket(request):
+    """
+    通用桶创建端点(前端"新建记忆"用)。取代 add-bucket route.ts 里的 MCP hold 调用。
+    """
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    content = body.get("content", "")
+    if not content or not content.strip():
+        return JSONResponse({"error": "content required"}, status_code=400)
+    raw_tags = body.get("tags", [])
+    if isinstance(raw_tags, str):
+        tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
+    else:
+        tags = raw_tags
+    bucket_id = await bucket_mgr.create(
+        content=content,
+        tags=tags,
+        importance=int(body.get("importance", 5)),
+        domain=body.get("domain", None),
+        valence=float(body.get("valence", 0.5)),
+        arousal=float(body.get("arousal", 0.3)),
+        name=body.get("name") or None,
+        pinned=bool(body.get("pinned", False)),
+    )
+    return JSONResponse({"ok": True, "id": bucket_id})
+
 @mcp.custom_route("/api/journal", methods=["GET"])
 async def api_list_journal(request):
     """
@@ -2385,22 +2429,6 @@ async def admin_backfill(request):
         from backfill_embeddings import backfill
         asyncio.create_task(backfill(batch_size=20))
         return JSONResponse({"status": "started"})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-@mcp.custom_route("/admin/clear-dehydrate-cache", methods=["POST"])
-async def admin_clear_dehydrate_cache(request):
-    from starlette.responses import JSONResponse
-    err = _require_auth(request)
-    if err: return err
-    try:
-        import sqlite3
-        conn = sqlite3.connect(dehydrator.cache_db_path)
-        result = conn.execute("DELETE FROM dehydration_cache")
-        count = result.rowcount
-        conn.commit()
-        conn.close()
-        return JSONResponse({"status": "ok", "cleared": count})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 

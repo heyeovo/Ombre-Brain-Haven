@@ -2093,11 +2093,14 @@ async def api_search(request):
                     item["vector_similarity"] = vec_sim
             result.append(item)
 
-        # --- Add vector-only matches (not in keyword results) ---
+        # --- Add vector-only matches (vec >= 0.5, not in keyword results) ---
         vector_only = []
+        VEC_MIN_SCORE = 0.5
         if simulate and include_vector and vector_map:
             keyword_ids = seen_ids
             for bid, sim in vector_map.items():
+                if sim < VEC_MIN_SCORE:
+                    continue
                 if bid not in keyword_ids:
                     b = await bucket_mgr.get(bid)
                     if b:
@@ -2109,14 +2112,20 @@ async def api_search(request):
                             "domain": meta.get("domain", []),
                             "content_preview": strip_wikilinks(b.get("content", ""))[:200],
                             "vector_similarity": round(sim, 4),
-                            "matched_fields": None,  # no keyword match info
+                            "matched_fields": None,
                             "_vector_only": True,
                         })
+            vector_only.sort(key=lambda x: x["vector_similarity"], reverse=True)
+            vector_only = vector_only[:limit]
 
-        return JSONResponse({
-            "items": result,
-            "vector_only": vector_only,
-        })
+        if simulate:
+            return JSONResponse({"items": result, "vector_only": vector_only})
+        else:
+            return JSONResponse([{
+                "id": item["id"], "name": item["name"], "score": item["score"],
+                "domain": item.get("domain", []), "valence": item.get("valence", 0.5),
+                "arousal": item.get("arousal", 0.3), "content_preview": item.get("content_preview", ""),
+            } for item in result])
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 

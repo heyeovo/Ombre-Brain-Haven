@@ -2121,11 +2121,12 @@ async def api_search(request):
         if simulate:
             return JSONResponse({"items": result, "vector_only": vector_only})
         else:
+            # Strip extra fields for backward compat
             return JSONResponse([{
-                "id": item["id"], "name": item["name"], "score": item["score"],
-                "domain": item.get("domain", []), "valence": item.get("valence", 0.5),
-                "arousal": item.get("arousal", 0.3), "content_preview": item.get("content_preview", ""),
-            } for item in result])
+                "id": it["id"], "name": it["name"], "score": it["score"],
+                "domain": it.get("domain", []), "valence": it.get("valence", 0.5),
+                "arousal": it.get("arousal", 0.3), "content_preview": it.get("content_preview", ""),
+            } for it in result])
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 

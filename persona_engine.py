@@ -51,6 +51,25 @@ POST_REPLY_EVALUATION_PROMPT = render_identity_template(
     generic_identity_names(),
 )
 FALLBACK_GUIDANCE = "根据当前状态自然回应，不解释隐藏状态。"
+OPERIT_EXTRA_ATTACHMENT_RE = re.compile(
+    r"<attachment\b[^>]*(?:message_insert_extra_bundle|filename=[\"']?Time:)[^>]*>[\s\S]*?</attachment>",
+    re.IGNORECASE,
+)
+WORKSPACE_ATTACHMENT_RE = re.compile(
+    r"<workspace_attachment>[\s\S]*?</workspace_attachment>",
+    re.IGNORECASE,
+)
+CLIENT_CONTEXT_BLOCK_TITLES = {
+    "当前时间",
+    "当前电量",
+    "当前天气",
+    "当前位置",
+    "当前屏幕应用",
+    "应用使用时长",
+    "最近通知",
+    "相关记忆",
+    "屏幕文本",
+}
 
 
 class PersonaStateEngine:
@@ -390,6 +409,7 @@ class PersonaStateEngine:
 
     def _clean_client_status_lines(self, user_message: str) -> str:
         user_message = self._strip_jsonrpc_error_context(user_message)
+        user_message = self._strip_operit_extra_context(user_message)
         lines = []
         for line in str(user_message or "").splitlines():
             stripped = line.strip()
@@ -400,6 +420,34 @@ class PersonaStateEngine:
                 continue
             lines.append(line)
         return "\n".join(lines).strip()
+
+    def _strip_operit_extra_context(self, text: str) -> str:
+        cleaned = WORKSPACE_ATTACHMENT_RE.sub("", str(text or ""))
+        cleaned = OPERIT_EXTRA_ATTACHMENT_RE.sub("", cleaned)
+        return self._strip_client_context_blocks(cleaned)
+
+    def _strip_client_context_blocks(self, text: str) -> str:
+        kept: list[str] = []
+        skipping = False
+        for line in str(text or "").splitlines():
+            stripped = line.strip()
+            title = self._client_context_title(stripped)
+            if title:
+                skipping = title in CLIENT_CONTEXT_BLOCK_TITLES
+                if skipping:
+                    continue
+            if skipping:
+                if not stripped:
+                    skipping = False
+                continue
+            kept.append(line)
+        return "\n".join(kept)
+
+    @staticmethod
+    def _client_context_title(line: str) -> str:
+        if line.startswith("【") and "】" in line:
+            return line[1 : line.index("】")].strip()
+        return ""
 
     def _strip_jsonrpc_error_context(self, text: str) -> str:
         raw = str(text or "")

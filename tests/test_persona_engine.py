@@ -385,6 +385,57 @@ async def test_persona_evaluator_receives_user_message_without_client_status(tes
 
 
 @pytest.mark.asyncio
+async def test_persona_evaluator_strips_operit_extra_attachment(test_config):
+    engine = PersonaStateEngine(_persona_config(test_config))
+    engine.client = FakePersonaClient(_event_payload())
+
+    operit_extra = (
+        '<attachment id="message_insert_extra_bundle_177757652229" '
+        'filename="Time:02:58 01/2026/6" type="text/plain">'
+        "【当前时间】\n2026-06-01 02:58:42 时区: Asia/Shanghai\n\n"
+        "【相关记忆】 查询: 今天想你了\n"
+        "快照: - 上限: 3 命中数量: 0 当前没有命中的记忆"
+        "</attachment>"
+        "<workspace_attachment><workspace_context>工作区结构无变化。</workspace_context></workspace_attachment>"
+    )
+
+    await engine.update_from_exchange(
+        "session-operit-extra",
+        "今天想你了 " + operit_extra,
+        "我也想你。",
+    )
+
+    payload = json.loads(engine.client.calls[0]["messages"][1]["content"])
+    assert payload["latest_user_message"] == "今天想你了"
+    assert "当前时间" not in payload["latest_user_message"]
+    assert "时区" not in payload["latest_user_message"]
+    assert "相关记忆" not in payload["latest_user_message"]
+    assert "workspace_context" not in payload["latest_user_message"]
+
+
+@pytest.mark.asyncio
+async def test_persona_evaluator_strips_bare_operit_context_block(test_config):
+    engine = PersonaStateEngine(_persona_config(test_config))
+    engine.client = FakePersonaClient(_event_payload())
+
+    await engine.update_from_exchange(
+        "session-operit-bare-block",
+        (
+            "今天想你了\n"
+            "【当前时间】\n"
+            "2026-06-01 02:58:42 时区: Asia/Shanghai\n\n"
+            "回来抱抱我"
+        ),
+        "抱，过来。",
+    )
+
+    payload = json.loads(engine.client.calls[0]["messages"][1]["content"])
+    assert payload["latest_user_message"] == "今天想你了\n回来抱抱我"
+    assert "当前时间" not in payload["latest_user_message"]
+    assert "时区" not in payload["latest_user_message"]
+
+
+@pytest.mark.asyncio
 async def test_persona_evaluator_strips_jsonrpc_error_context(test_config):
     engine = PersonaStateEngine(_persona_config(test_config))
     engine.client = FakePersonaClient(_event_payload())

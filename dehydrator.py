@@ -162,6 +162,10 @@ class Dehydrator:
     （根据 BEHAVIOR_SPEC.md 三、降级行为表决策：无本地降级）
     """
 
+    # Class-level: last merge LLM usage for cost display
+    # 类级别：最近一次合并 LLM 用量（供前端显示）
+    _last_merge_usage = None
+
     def __init__(self, config: dict):
         # --- Read dehydration API config / 读取脱水 API 配置 ---
         dehy_cfg = config.get("dehydration", {})
@@ -281,6 +285,19 @@ class Dehydrator:
             max_tokens=self.max_tokens,
             temperature=self.temperature,
         )
+
+        # --- Capture merge usage for cost display / 捕获合并用量 ---
+        try:
+            usage = getattr(response, "usage", None)
+            if usage:
+                Dehydrator._last_merge_usage = {
+                    "model": getattr(response, "model", "") or self.model,
+                    "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+                    "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+                }
+        except Exception:
+            Dehydrator._last_merge_usage = None
+
         if not response.choices:
             return ""
         return response.choices[0].message.content or ""

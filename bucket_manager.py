@@ -28,12 +28,16 @@
 import os
 import re
 import math
+import json
+import atexit
 import logging
 import shutil
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import jieba
 import frontmatter
 from rapidfuzz import fuzz
 
@@ -60,6 +64,7 @@ class BucketManager:
         self.archive_dir = os.path.join(self.base_dir, "archive")
         self.feel_dir = os.path.join(self.base_dir, "feel")
         self.journal_dir = os.path.join(self.base_dir, "journal")
+        self.trash_dir = os.path.join(self.base_dir, "trash")
         self.fuzzy_threshold = config.get("matching", {}).get("fuzzy_threshold", 50)
         self.content_weight = config.get("matching", {}).get("content_weight", 1)
         self.max_results = config.get("matching", {}).get("max_results", 5)
@@ -91,9 +96,112 @@ class BucketManager:
         self.w_time = scoring.get("time_proximity", 1.5)
         self.w_importance = scoring.get("importance", 1.0)
         self.content_weight = scoring.get("content_weight", 1.0)  # body×1, per spec
+        # Runtime-tunable knobs (default off = same behavior as upstream)
+        # 运行时旋钮（默认关 = 行为跟上游一致）
+        self.title_hit_bonus = float(scoring.get("title_hit_bonus", 0.0))
+        self.keyword_first_sort = bool(scoring.get("keyword_first_sort", False))
+        self.precise_match_mode = bool(scoring.get("precise_match_mode", False))
+        _env_warmth = os.environ.get("OMBRE_SCORING_WARMTH_BOOST")
+        self.w_warmth = float(_env_warmth) if _env_warmth is not None else float(scoring.get("warmth_boost", 0.0))
 
         # --- Optional embedding engine for pre-filtering / 可选 embedding 引擎，用于预筛候选集 ---
         self.embedding_engine = embedding_engine
+
+        # --- Hit stats & search tracing / 命中统计 & 检索追溯 ---
+        self._hit_stats_path = os.path.join(self.base_dir, "hit_stats.json")
+        self._hit_stats: dict = {}      # {bucket_id: {count, last_hit_iso, last_query, surface_count}}
+        self._total_searches = 0
+        self._hit_dirty = 0
+        self._recent_searches = deque(maxlen=20)
+        self._load_hit_stats()
+        atexit.register(self._flush_hit_stats, True)
+
+    # Runtime-tunable scoring keys whitelist (for /api/scoring-config)
+    SCORING_OVERRIDE_DEFAULTS = {
+        "content_weight": 1.0,
+        "title_hit_bonus": 0.0,
+        "keyword_first_sort": False,
+        "dryrun_log": False,
+        "precise_match_mode": False,
+        "warmth_boost": 0.0,
+    }
+
+    def apply_runtime_scoring_overrides(self, overrides: dict) -> None:
+        """Apply runtime scoring overrides to this instance (in-place).
+        启动 + POST /api/scoring-config 后调，立刻生效。"""
+        if not isinstance(overrides, dict):
+            return
+        for key in self.SCORING_OVERRIDE_DEFAULTS:
+            if key not in overrides:
+                continue
+            val = overrides[key]
+            try:
+                if key in ("content_weight", "title_hit_bonus", "warmth_boost"):
+                    setattr(self, key if key != "warmth_boost" else "w_warmth", max(0.0, float(val)))
+                elif key in ("keyword_first_sort", "dryrun_log", "precise_match_mode"):
+                    setattr(self, key, bool(val))
+            except (TypeError, ValueError):
+                pass
+        logger.info(
+            f"[scoring] overrides: cw={self.content_weight} bonus={self.title_hit_bonus} "
+            f"kw1={self.keyword_first_sort} precise={self.precise_match_mode} warm={self.w_warmth}"
+        )
+
+    def current_scoring_overrides(self) -> dict:
+        """Return current scoring knob values (for GET /api/scoring-config)."""
+        return {
+            "content_weight": self.content_weight,
+            "title_hit_bonus": self.title_hit_bonus,
+            "keyword_first_sort": self.keyword_first_sort,
+            "dryrun_log": self.dryrun_log,
+            "precise_match_mode": self.precise_match_mode,
+            "warmth_boost": self.w_warmth,
+        }
+
+    # ---------------------------------------------------------
+    # Jieba tokenizer — Chinese-friendly query splitting
+    # 中文分词 — 解决长句无空格拆分问题
+    # ---------------------------------------------------------
+    _TOKEN_SPLIT_RE = None   # lazy compile
+
+    _BUILTIN_STOPWORDS = frozenset([
+        "什么", "怎么", "为什么", "怎样", "如何",
+        "可以", "应该", "想要", "需要",
+        "一下", "一点", "一些", "已经", "还有",
+        "你的", "我的", "他的", "她的", "我们", "你们",
+        "你还", "还记", "记得吗",
+        "现在", "当前", "测试", "调用",
+    ])
+
+    @classmethod
+    def _split_query_tokens(cls, query: str) -> list:
+        """Split Chinese query into keyword tokens using jieba."""
+        import re
+        if cls._TOKEN_SPLIT_RE is None:
+            cls._TOKEN_SPLIT_RE = re.compile(
+                r'[\s,。!?:;、《》「」\"\'“”‘’()()【】\[\]<>\.\!\?\:;,/\\\|·~`@#$%^&*+=_-]+'
+            )
+        raw = cls._TOKEN_SPLIT_RE.split(query or "")
+        tokens = set()
+        for t in raw:
+            if not t:
+                continue
+            if len(t) <= 3:
+                if 2 <= len(t) <= 12:
+                    tokens.add(t)
+                continue
+            # Long token: use jieba to split
+            for w in jieba.lcut(t):
+                if 2 <= len(w) <= 12:
+                    tokens.add(w)
+        # Filter stopwords, keep order
+        out = [t for t in raw if t and 2 <= len(t) <= 12 and t not in cls._BUILTIN_STOPWORDS]
+        # Also add jieba tokens
+        for tok in sorted(tokens, key=len, reverse=True):
+            if tok not in cls._BUILTIN_STOPWORDS and tok not in out:
+                if 2 <= len(tok) <= 12:
+                    out.append(tok)
+        return out
 
     # ---------------------------------------------------------
     # Create a new bucket
@@ -281,6 +389,35 @@ class BucketManager:
             logger.warning(f"Failed to load bucket for update / 加载桶失败: {file_path}: {e}")
             return False
 
+        # --- Noise marking: save/restore importance_before_noise ---
+        # --- 噪声标记：保存/恢复 importance_before_noise ---
+        was_noise = bool(post.get("resolved", False) and post.get("importance") == 1)
+        new_resolved = kwargs.get("resolved")
+        new_importance = kwargs.get("importance")
+
+        # Detect noise state transition
+        # 检测噪声态变化
+        marking_noise = (new_resolved is True and new_importance == 1
+                         and not was_noise)
+        unmarking_noise = (new_resolved is False
+                           and was_noise
+                           and kwargs.get("importance") is None)
+
+        if marking_noise:
+            # Save current importance before marking noise
+            # 保存当前 importance 值
+            current_imp = post.get("importance", 5)
+            if "importance_before_noise" not in post:
+                post["importance_before_noise"] = current_imp
+
+        if unmarking_noise:
+            # Restore importance from backup when un-noising
+            # 取消噪声时恢复原始 importance
+            saved_imp = post.get("importance_before_noise")
+            if saved_imp is not None:
+                kwargs["importance"] = int(saved_imp)
+            post.pop("importance_before_noise", None)
+
         # --- Pinned/protected buckets: lock importance to 10, ignore importance changes ---
         # --- 钉选/保护桶：importance 不可修改，强制保持 10 ---
         is_pinned = post.get("pinned", False) or post.get("protected", False)
@@ -371,21 +508,152 @@ class BucketManager:
     # ---------------------------------------------------------
     async def delete(self, bucket_id: str) -> bool:
         """
-        Delete a memory bucket file.
-        删除指定的记忆桶文件。
+        Soft-delete a memory bucket: move to trash_dir.
+        软删除指定记忆桶：移到回收站目录。
         """
         file_path = self._find_bucket_file(bucket_id)
         if not file_path:
             return False
 
         try:
-            os.remove(file_path)
-        except OSError as e:
-            logger.error(f"Failed to delete bucket file / 删除桶文件失败: {file_path}: {e}")
+            post = frontmatter.load(file_path)
+        except Exception:
             return False
 
-        logger.info(f"Deleted bucket / 删除记忆桶: {bucket_id}")
+        current_type = post.get("type", "dynamic")
+        domain = post.get("domain", [])
+
+        # Save original type and timestamp
+        post["original_type"] = current_type
+        post["trashed_at"] = now_iso()
+
+        # Determine trash subdir
+        trash_sub = os.path.join(self.trash_dir, domain[0]) if domain else self.trash_dir
+        os.makedirs(trash_sub, exist_ok=True)
+
+        dest = os.path.join(trash_sub, os.path.basename(file_path))
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(frontmatter.dumps(post))
+            shutil.move(file_path, dest)
+        except OSError as e:
+            logger.error(f"Failed to soft-delete bucket / 软删除失败: {file_path}: {e}")
+            return False
+
+        # Clean up empty original directory
+        orig_dir = os.path.dirname(file_path)
+        try:
+            if os.path.isdir(orig_dir) and not os.listdir(orig_dir):
+                os.rmdir(orig_dir)
+        except Exception:
+            pass
+
+        logger.info(f"Soft-deleted bucket / 软删除: {bucket_id} → trash")
         return True
+
+    async def restore(self, bucket_id: str) -> bool:
+        """Restore from trash to original type directory."""
+        # Search trash dir
+        file_path = None
+        for root, _, files in os.walk(self.trash_dir):
+            for f in files:
+                if f == f"{bucket_id}.md" or f.startswith(f"{bucket_id}."):
+                    file_path = os.path.join(root, f)
+                    break
+            if file_path:
+                break
+
+        if not file_path:
+            return False
+
+        try:
+            post = frontmatter.load(file_path)
+        except Exception:
+            return False
+
+        original_type = post.get("original_type", "dynamic")
+        domain = post.get("domain", [])
+        post.pop("original_type", None)
+        post.pop("trashed_at", None)
+
+        # Determine target dir
+        type_dir_map = {
+            "permanent": self.permanent_dir,
+            "dynamic": self.dynamic_dir,
+            "archive": self.archive_dir,
+            "feel": self.feel_dir,
+        }
+        target_base = type_dir_map.get(original_type, self.dynamic_dir)
+        target_dir = os.path.join(target_base, domain[0]) if domain else target_base
+        os.makedirs(target_dir, exist_ok=True)
+
+        dest = os.path.join(target_dir, os.path.basename(file_path))
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(frontmatter.dumps(post))
+            shutil.move(file_path, dest)
+        except OSError as e:
+            logger.error(f"Failed to restore / 恢复失败: {e}")
+            return False
+
+        logger.info(f"Restored bucket / 恢复: {bucket_id}")
+        return True
+
+    async def purge(self, bucket_id: str) -> bool:
+        """Permanently delete from trash (physical remove)."""
+        for root, _, files in os.walk(self.trash_dir):
+            for f in files:
+                if f == f"{bucket_id}.md" or f.startswith(f"{bucket_id}."):
+                    file_path = os.path.join(root, f)
+                    try:
+                        os.remove(file_path)
+                    except OSError as e:
+                        logger.error(f"Purge failed / 彻底删除失败: {e}")
+                        return False
+                    logger.info(f"Purged bucket / 彻底删除: {bucket_id}")
+                    return True
+        return False
+
+    async def empty_trash(self) -> int:
+        """Delete all files in trash. Returns count."""
+        count = 0
+        try:
+            for root, _, files in os.walk(self.trash_dir):
+                for f in files:
+                    if f.endswith(".md"):
+                        try:
+                            os.remove(os.path.join(root, f))
+                            count += 1
+                        except OSError:
+                            pass
+        except Exception:
+            pass
+        logger.info(f"Emptied trash / 清空回收站: {count} files")
+        return count
+
+    async def list_trash(self) -> list[dict]:
+        """List all trashed buckets."""
+        result = []
+        try:
+            for root, _, files in os.walk(self.trash_dir):
+                for f in files:
+                    if f.endswith(".md"):
+                        file_path = os.path.join(root, f)
+                        try:
+                            post = frontmatter.load(file_path)
+                            meta = dict(post.metadata)
+                            result.append({
+                                "id": meta.get("id", f.rsplit(".", 1)[0]),
+                                "metadata": meta,
+                                "content": post.content,
+                                "path": file_path,
+                            })
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        result.sort(key=lambda b: b["metadata"].get("trashed_at", ""), reverse=True)
+        return result
 
     # ---------------------------------------------------------
     # Convert an existing bucket into a journal entry
@@ -562,6 +830,8 @@ class BucketManager:
         query_arousal: float = None,
         include_archive: bool = False,
         show_all: bool = False,   # 新增：为True时不过滤/惩罚resolved桶
+        include_noise: bool = False,  # 新增：为True时才包含噪声桶
+        record_stats: bool = True,    # 新增：是否记录命中统计
     ) -> list[dict]:
         """
         Multi-dimensional indexed search for memory buckets.
@@ -580,7 +850,7 @@ class BucketManager:
                 bucket["score"] = 100.0
                 return [bucket]
             return []
-    
+
         limit = limit or self.max_results
         all_buckets = await self.list_all(include_archive=include_archive)
 
@@ -619,49 +889,116 @@ class BucketManager:
             except Exception as e:
                 logger.warning(f"Embedding pre-filter failed: {e}")
 
+        # --- Layer 1.5: noise filtering (exclude noise buckets by default) ---
+        # --- 第1.5层：噪声过滤（默认排除已标记噪声的桶）---
+        if not include_noise:
+            candidates = [
+                b for b in candidates
+                if not (b.get("metadata", {}).get("resolved", False)
+                        and b.get("metadata", {}).get("importance") == 1)
+            ]
+
         # --- Layer 2: weighted multi-dim ranking ---
         # --- 第二层：多维加权精排 ---
         scored = []
         for bucket in candidates:
             meta = bucket.get("metadata", {})
 
+            # keyword bypass: if any token matches name/domain, always pass threshold
+            # 关键词命中优先：只要命中了名字/域就强制通过
+            keyword_matched = False
+            title_hit = False
+            if query:
+                tokens = self._split_query_tokens(query)
+                name_lower = meta.get("name", "").lower()
+                domain_text = " ".join(meta.get("domain", [])).lower()
+                for t in tokens:
+                    if t.lower() in name_lower or t.lower() in domain_text:
+                        keyword_matched = True
+                        break
+                # Check title (name) hit for bonus/sort
+                if self.title_hit_bonus > 0 or self.keyword_first_sort:
+                    for t in tokens:
+                        if self.precise_match_mode:
+                            if t.lower() in name_lower:
+                                title_hit = True
+                                break
+                        elif fuzz.partial_ratio(t, name_lower) >= 50:
+                            title_hit = True
+                            break
+
             try:
                 # Dim 1: topic relevance (fuzzy text, 0~1)
-                topic_score = self._calc_topic_score(query, bucket)
+                if self.precise_match_mode and query:
+                    # Strict mode: only keyword matching, skip emotion/time/imp
+                    match = self._calc_topic_match(query, bucket)
+                    topic_score = match["score"]
+                    # Normalize: raw hits / max possible
+                    total_weight = 3 + 2.5 + 2 + self.content_weight
+                    raw_name = sum(1 for t in tokens if t.lower() in meta.get("name", "").lower()) * 3
+                    raw_domain = sum(1 for t in tokens if t.lower() in domain_text) * 2.5
+                    raw_tags = sum(1 for t in tokens
+                                   if any(t.lower() in tag.lower() for tag in meta.get("tags", []))) * 2
+                    raw_content = sum(1 for t in tokens
+                                      if t.lower() in bucket.get("content", "")[:3000].lower()) * self.content_weight
+                    precise_score = (raw_name + raw_domain + raw_tags + raw_content) / total_weight
+                    normalized = precise_score * 100
+                    if self.w_warmth > 0:
+                        b_valence = float(meta.get("valence", 0.5))
+                        warmth = max(0.0, b_valence - 0.5) * self.w_warmth
+                        normalized += warmth * 10
+                    emotion_score = 0; time_score = 0; importance_score = 0
+                else:
+                    match = self._calc_topic_match(query, bucket)
+                    topic_score = match["score"]
 
-                # Dim 2: emotion resonance (coordinate distance, 0~1)
-                emotion_score = self._calc_emotion_score(
-                    query_valence, query_arousal, meta
-                )
+                    # Dim 2: emotion resonance
+                    emotion_score = self._calc_emotion_score(query_valence, query_arousal, meta)
 
-                # Dim 3: time proximity (exponential decay, 0~1)
-                time_score = self._calc_time_score(meta)
+                    # Dim 3: time proximity
+                    time_score = self._calc_time_score(meta)
 
-                # Dim 4: importance (direct normalization)
-                importance_score = max(1, min(10, int(meta.get("importance", 5)))) / 10.0
+                    # Dim 4: importance
+                    importance_score = max(1, min(10, int(meta.get("importance", 5)))) / 10.0
 
-                # --- Weighted sum / 加权求和 ---
-                total = (
-                    topic_score * self.w_topic
-                    + emotion_score * self.w_emotion
-                    + time_score * self.w_time
-                    + importance_score * self.w_importance
-                )
-                # Normalize to 0~100 for readability
-                weight_sum = self.w_topic + self.w_emotion + self.w_time + self.w_importance
-                normalized = (total / weight_sum) * 100 if weight_sum > 0 else 0
+                    # Weighted sum
+                    total = (
+                        topic_score * self.w_topic
+                        + emotion_score * self.w_emotion
+                        + time_score * self.w_time
+                        + importance_score * self.w_importance
+                    )
 
-                # search() only serves query-based retrieval paths (breath with
-                # query, dedup check, debug endpoint) — per spec, resolved state
-                # should be fully ignored here. The surfacing-mode (no query)
-                # path in server.py handles resolved-based weight decay separately.
-                # search() 只服务于有 query 的检索路径，resolved 状态在这里完全
-                # 忽略；无 query 的浮现模式在 server.py 里单独走权重衰减逻辑。
-                if not show_all and normalized < self.fuzzy_threshold:
+                    # Warmth bonus: positive valence memories get extra weight
+                    if self.w_warmth > 0:
+                        b_valence = float(meta.get("valence", 0.5))
+                        warmth = max(0.0, b_valence - 0.5)
+                        total += warmth * self.w_warmth  # numerator only, not in denominator
+
+                    weight_sum = self.w_topic + self.w_emotion + self.w_time + self.w_importance
+                    normalized = (total / weight_sum) * 100 if weight_sum > 0 else 0
+
+                # Title hit bonus (extra points added after normalization)
+                if title_hit and self.title_hit_bonus > 0:
+                    normalized += self.title_hit_bonus
+
+                # Keyword bypass: if token matched name/domain, skip threshold check
+                # 关键词命中优先：命中了名字/域就强制通过
+                passed_threshold = normalized >= self.fuzzy_threshold
+                if keyword_matched and not passed_threshold:
+                    passed_threshold = True
+                    normalized = max(normalized, self.fuzzy_threshold * 0.7)
+
+                if not show_all and not passed_threshold:
                     continue
-                if normalized >= self.fuzzy_threshold or show_all:
+                if passed_threshold or show_all:
                     bucket["score"] = round(normalized, 2)
+                    bucket["matched_in"] = match.get("matched_in", [])
+                    bucket["field_scores"] = match.get("field_scores", {})
+                    if title_hit:
+                        bucket["_title_hit"] = True
                     scored.append(bucket)
+
             except Exception as e:
                 logger.warning(
                     f"Scoring failed for bucket {bucket.get('id', '?')} / "
@@ -669,8 +1006,139 @@ class BucketManager:
                 )
                 continue
 
-        scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:limit]
+        # Keyword-first sort: title hits always sort above non-title hits
+        if self.keyword_first_sort or (self.title_hit_bonus > 0):
+            scored.sort(key=lambda x: (
+                x.get("_title_hit", False),
+                x["score"]
+            ), reverse=True)
+        else:
+            scored.sort(key=lambda x: x["score"], reverse=True)
+        result = scored[:limit]
+
+        # --- Record hit stats for search tracing / 记录命中统计 ---
+        if record_stats:
+            self.record_hit(query, result)
+
+        return result
+
+    # ---------------------------------------------------------
+    # Hit stats & search tracing / 命中统计 & 检索追溯
+    # ---------------------------------------------------------
+    def _load_hit_stats(self):
+        """Load hit stats from disk, if file exists."""
+        try:
+            if os.path.exists(self._hit_stats_path):
+                with open(self._hit_stats_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self._hit_stats = data.get("buckets", {})
+                self._total_searches = data.get("total_searches", 0)
+        except Exception:
+            pass
+
+    def _flush_hit_stats(self, force=False):
+        """Persist hit stats to disk. Debounced: writes every 10 dirty or forced."""
+        if not force:
+            self._hit_dirty += 1
+            if self._hit_dirty < 10:
+                return
+        try:
+            data = {"total_searches": self._total_searches, "buckets": self._hit_stats}
+            tmp = self._hit_stats_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._hit_stats_path)
+            self._hit_dirty = 0
+        except Exception:
+            pass
+
+    def record_hit(self, query, scored_buckets):
+        """Record keyword search hit stats for each result bucket."""
+        from utils import now_iso as _now_iso
+        self._total_searches += 1
+        ts = _now_iso()
+        # Record per-bucket hits (exclude feel type for privacy)
+        hit_entries = []
+        for b in scored_buckets[:20]:
+            meta = b.get("metadata", {})
+            if meta.get("type") == "feel":
+                continue
+            bid = b["id"]
+            entry = self._hit_stats.setdefault(bid, {"count": 0, "surface_count": 0})
+            entry["count"] += 1
+            entry["last_hit_iso"] = ts
+            entry["last_query"] = query[:200]
+            hit_entries.append({
+                "id": bid, "name": meta.get("name", bid),
+                "score": b.get("score", 0), "domain": meta.get("domain", []),
+            })
+        # Record search trace
+        self._recent_searches.appendleft({
+            "kind": "search", "query": query[:200], "time_iso": ts,
+            "count": len(scored_buckets), "top": hit_entries[:10],
+        })
+        self._flush_hit_stats()
+
+    def record_surface_trace(self, items):
+        """Record breath surface (no-query) event trace."""
+        from utils import now_iso as _now_iso
+        ts = _now_iso()
+        surface_entries = []
+        for b in items[:10]:
+            meta = b.get("metadata", {})
+            bid = b["id"]
+            entry = self._hit_stats.setdefault(bid, {"count": 0, "surface_count": 0})
+            entry["surface_count"] += 1
+            surface_entries.append({
+                "id": bid, "name": meta.get("name", bid),
+                "importance": meta.get("importance"), "pinned": meta.get("pinned"),
+            })
+        self._recent_searches.appendleft({
+            "kind": "surface", "query": None, "time_iso": ts,
+            "count": len(items), "top": surface_entries,
+        })
+        self._flush_hit_stats()
+
+    def get_hit_stats(self, limit=50, include_zero=False, order="desc", exclude_gated=True):
+        """Return hit statistics for all tracked buckets.
+        exclude_gated: exclude feel-type and noise buckets.
+        """
+        from utils import now_iso as _now_iso
+        items = []
+        for bid, entry in self._hit_stats.items():
+            cc = entry.get("count", 0)
+            if not include_zero and cc == 0:
+                continue
+            items.append({
+                "id": bid,
+                "count": cc,
+                "surface_count": entry.get("surface_count", 0),
+                "last_hit_iso": entry.get("last_hit_iso", ""),
+                "last_query": entry.get("last_query", ""),
+            })
+        reverse = order != "asc"
+        items.sort(key=lambda x: x["count"], reverse=reverse)
+        return {
+            "total_searches": self._total_searches,
+            "tracked_buckets": len(self._hit_stats),
+            "items": items[:limit],
+        }
+
+    def reset_hit_stats(self):
+        """Clear all hit stats in memory and on disk."""
+        self._hit_stats = {}
+        self._total_searches = 0
+        self._recent_searches.clear()
+        self._hit_dirty = 0
+        try:
+            if os.path.exists(self._hit_stats_path):
+                os.remove(self._hit_stats_path)
+        except Exception:
+            pass
+
+    def get_recent_searches(self, limit=20):
+        """Return recent search/surface traces (newest first)."""
+        return list(self._recent_searches)[:limit]
 
     # ---------------------------------------------------------
     # Topic relevance sub-score:
@@ -679,41 +1147,79 @@ class BucketManager:
     # ---------------------------------------------------------
     def _multi_word_ratio(self, words: list[str], text: str) -> float:
         """
-        Multi-keyword fuzzy match: split query into words, score each word
-        against text independently, return the equal-weighted average.
-        多关键词拆词匹配：query 按空格拆词，每词单独算 partial_ratio，
-        取加权平均（等权）合并，避免要求关键词连续出现才能得高分。
+        Multi-keyword fuzzy match: split query into words via jieba,
+        score each word against text independently. Uses partial_ratio
+        (substring match) by default; switches to exact substring check
+        in precise_match_mode.
         """
         if not text:
             return 0.0
-        return sum(fuzz.partial_ratio(w, text) for w in words) / len(words)
+        # Use jieba tokens when available (more than whitespace split)
+        tokens = self._split_query_tokens(" ".join(words))
+        if not tokens:
+            return 0.0
+        text_lower = text.lower()
+        if self.precise_match_mode:
+            # Exact substring check: token must appear as-is in text
+            hits = sum(1 for w in tokens if w.lower() in text_lower)
+            return (hits / len(tokens)) * 100.0
+        else:
+            return sum(fuzz.partial_ratio(w, text) for w in tokens) / len(tokens)
 
     def _calc_topic_score(self, query: str, bucket: dict) -> float:
         """
         Calculate text dimension relevance score (0~1).
-        计算文本维度的相关性得分。
+        Delegates to _calc_topic_match for the weighted sum.
+        计算文本维度的相关性得分。委托 _calc_topic_match。
+        """
+        return self._calc_topic_match(query, bucket)["score"]
+
+    def _calc_topic_match(self, query: str, bucket: dict,
+                           match_threshold: float = 50.0) -> dict:
+        """
+        Calculate per-field fuzzy match details.
+        Returns {score, field_scores, matched_in}.
+        score: normalized weighted sum (identical to _calc_topic_score).
+        field_scores: raw rapidfuzz partial_ratio per field (0-100).
+        matched_in: list of field names whose raw ratio >= match_threshold.
+        计算逐字段匹配详情。返回综合分 + 各字段原始 fuzzy 分 + 命中字段。
         """
         meta = bucket.get("metadata", {})
         words = [w for w in query.split() if w] or [query]
+        weight_sum = 3 + 2.5 + 2 + self.content_weight
 
-        name_score = self._multi_word_ratio(words, meta.get("name", "")) * 3
-        domain_score = (
-            max(
-                (self._multi_word_ratio(words, d) for d in meta.get("domain", [])),
-                default=0,
-            )
-            * 2.5
+        raw_name = self._multi_word_ratio(words, meta.get("name", ""))
+        raw_domain = max(
+            (self._multi_word_ratio(words, d) for d in meta.get("domain", [])),
+            default=0,
         )
-        tag_score = (
-            max(
-                (self._multi_word_ratio(words, tag) for tag in meta.get("tags", [])),
-                default=0,
-            )
-            * 2
+        raw_tags = max(
+            (self._multi_word_ratio(words, tag) for tag in meta.get("tags", [])),
+            default=0,
         )
-        content_score = self._multi_word_ratio(words, bucket.get("content", "")[:3000]) * self.content_weight
+        raw_content = self._multi_word_ratio(words, bucket.get("content", "")[:3000])
 
-        return (name_score + domain_score + tag_score + content_score) / (100 * (3 + 2.5 + 2 + self.content_weight))
+        weighted = (
+            raw_name * 3 + raw_domain * 2.5
+            + raw_tags * 2 + raw_content * self.content_weight
+        )
+        score = weighted / (100 * weight_sum)
+
+        field_scores = {
+            "name": round(raw_name, 1),
+            "domain": round(raw_domain, 1),
+            "tags": round(raw_tags, 1),
+            "content": round(raw_content, 1),
+        }
+        matched_in = [
+            k for k, v in field_scores.items() if v >= match_threshold
+        ]
+
+        return {
+            "score": score,
+            "field_scores": field_scores,
+            "matched_in": matched_in,
+        }
 
     # ---------------------------------------------------------
     # Emotion resonance sub-score:

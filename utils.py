@@ -49,6 +49,7 @@ def load_config(config_path: str = None) -> dict:
                 "arousal_boost": 0.8,
             },
         },
+        "auto_merge": True,
         "matching": {
             "fuzzy_threshold": 50,
             "max_results": 5,
@@ -117,6 +118,13 @@ def load_config(config_path: str = None) -> dict:
     env_embed_base_url = os.environ.get("OMBRE_EMBEDDING_BASE_URL", "")
     if env_embed_base_url:
         config.setdefault("embedding", {})["base_url"] = env_embed_base_url
+
+    # OMBRE_AUTO_MERGE overrides auto_merge (true/false)
+    env_auto_merge = os.environ.get("OMBRE_AUTO_MERGE", "")
+    if env_auto_merge.lower() in ("0", "false", "no"):
+        config["auto_merge"] = False
+    elif env_auto_merge.lower() in ("1", "true", "yes"):
+        config["auto_merge"] = True
 
     # --- Ensure bucket storage directories exist ---
     # --- 确保记忆桶存储目录存在 ---
@@ -230,3 +238,68 @@ def now_iso() -> str:
     返回当前时间的 ISO 格式字符串。
     """
     return datetime.now().isoformat(timespec="seconds")
+
+
+# ============================================================
+# LLM pricing — per 1M tokens (input, output) in USD
+# LLM 定价 — 每百万 token (input, output) 美元
+# Model matching: exact match first, then longest prefix match
+# 模型匹配: 先精确, 失败后最长前缀匹配
+# ============================================================
+LLM_PRICING = {
+    "claude-sonnet-4-6":  (3.00, 15.00),
+    "claude-sonnet-4":    (3.00, 15.00),
+    "claude-sonnet":      (3.00, 15.00),
+    "claude-haiku-4-5":   (1.00,  5.00),
+    "claude-haiku":       (1.00,  5.00),
+    "claude-opus":        (15.00, 75.00),
+    "gemini-2.5-flash":   (0.075,  0.30),
+    "gemini-2.0-flash":   (0.075,  0.30),
+    "gemini-2.5-pro":     (1.25,  10.00),
+    "gemini-1.5-flash":   (0.075,  0.30),
+    "gemini-1.5-pro":     (1.25,  10.00),
+    "deepseek-chat":      (0.14,   0.28),
+    "deepseek-reasoner":  (0.55,   2.19),
+    "qwen-max":           (0.40,   1.60),
+    "qwen-plus":          (0.10,   0.30),
+    "gpt-4.1":            (2.00,   8.00),
+    "gpt-4o-mini":        (0.15,   0.60),
+    "gpt-4o":             (2.50,  10.00),
+}
+
+
+def estimate_llm_cost(model: str, prompt_tokens: int, completion_tokens: int) -> dict:
+    """Estimate LLM API cost in USD and CNY.
+    估算 LLM API 调用费用（美元 + 人民币）。
+
+    Returns {usd, cny, in_tokens, out_tokens, model_matched, known}
+    known=False means model not in pricing table, cost will be 0.
+    """
+    if not model:
+        return {"usd": 0.0, "cny": 0.0, "in_tokens": prompt_tokens or 0,
+                "out_tokens": completion_tokens or 0, "model_matched": "", "known": False}
+    m = model.lower()
+    # Exact match first, then longest prefix match
+    matched_key = None
+    if m in LLM_PRICING:
+        matched_key = m
+    else:
+        for k in sorted(LLM_PRICING.keys(), key=len, reverse=True):
+            if m.startswith(k) or k in m:
+                matched_key = k
+                break
+    if not matched_key:
+        return {"usd": 0.0, "cny": 0.0, "in_tokens": prompt_tokens or 0,
+                "out_tokens": completion_tokens or 0, "model_matched": "", "known": False}
+    p_in, p_out = LLM_PRICING[matched_key]
+    p_tok = max(0, int(prompt_tokens or 0))
+    c_tok = max(0, int(completion_tokens or 0))
+    usd = (p_tok / 1_000_000) * p_in + (c_tok / 1_000_000) * p_out
+    return {
+        "usd": round(usd, 6),
+        "cny": round(usd * 7.2, 4),
+        "in_tokens": p_tok,
+        "out_tokens": c_tok,
+        "model_matched": matched_key,
+        "known": True,
+    }

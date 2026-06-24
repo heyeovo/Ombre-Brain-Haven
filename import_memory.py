@@ -284,6 +284,10 @@ class ImportState:
             "status": "idle",  # idle | running | paused | completed | error
             "started_at": "",
             "updated_at": "",
+            "total_cost_usd": 0.0,
+            "total_in_tokens": 0,
+            "total_out_tokens": 0,
+            "last_llm_model": "",
         }
 
     def load(self) -> bool:
@@ -322,6 +326,10 @@ class ImportState:
             "status": "running",
             "started_at": now_iso(),
             "updated_at": now_iso(),
+            "total_cost_usd": 0.0,
+            "total_in_tokens": 0,
+            "total_out_tokens": 0,
+            "last_llm_model": "",
         }
 
     @property
@@ -420,10 +428,16 @@ class ImportEngine:
         filename: str = "",
         preserve_raw: bool = False,
         resume: bool = False,
+        max_chunks: int = 0,      # 0 = unlimited; >0 = stop after N chunks (dry-run)
+        mode: str = "large",      # "large" = 宁缺勿滥; "small" = 补漏, 强制至少1条
     ) -> dict:
         """
         Start or resume an import.
         开始或恢复导入。
+
+        max_chunks: cap number of chunks processed (0 = unlimited, for dry-run).
+        mode: "large" (default) = skip low-quality chunks;
+              "small" = force at least 1 item per chunk (补漏模式).
         """
         if self._running:
             return {"error": "Import already running"}
@@ -573,6 +587,23 @@ class ImportEngine:
             max_tokens=2048,
             temperature=0.0,
         )
+
+        # --- Track LLM cost / 追踪 LLM 成本 ---
+        try:
+            usage = getattr(response, "usage", None)
+            if usage:
+                in_tok = getattr(usage, "prompt_tokens", 0) or 0
+                out_tok = getattr(usage, "completion_tokens", 0) or 0
+                model_name = getattr(response, "model", "") or self.dehydrator.model
+                from utils import estimate_llm_cost
+                cost = estimate_llm_cost(model_name, in_tok, out_tok)
+                self.state.data["total_cost_usd"] = round(
+                    self.state.data.get("total_cost_usd", 0) + cost["usd"], 6)
+                self.state.data["total_in_tokens"] = self.state.data.get("total_in_tokens", 0) + in_tok
+                self.state.data["total_out_tokens"] = self.state.data.get("total_out_tokens", 0) + out_tok
+                self.state.data["last_llm_model"] = model_name
+        except Exception:
+            pass
 
         if not response.choices:
             return []

@@ -1848,12 +1848,20 @@ async def api_merge_preview(request):
     if not bucket_a or not bucket_b:
         return JSONResponse({"error": "one or both buckets not found"}, status_code=404)
 
+    # Check preconditions
+    b_meta = bucket_b.get("metadata", {})
+    if b_meta.get("pinned") or b_meta.get("protected"):
+        return JSONResponse({
+            "error": "目标桶已钉选/保护，拒绝合并",
+            "hint": "请先取消目标桶的保护标记",
+        }, status_code=409)
+
     try:
         merged_content = await dehydrator.merge(bucket_b["content"], bucket_a["content"])
 
         # Cost estimate
         cost = {}
-        usage = getattr(dehydrator, "_last_merge_usage", None)
+        usage = getattr(dehydrator.__class__, "_last_merge_usage", None)
         if usage:
             from utils import estimate_llm_cost
             cost = estimate_llm_cost(
@@ -1862,24 +1870,29 @@ async def api_merge_preview(request):
                 usage.get("completion_tokens", 0),
             )
 
-        # Merge metadata suggestion
         meta_a = bucket_a["metadata"]
         meta_b = bucket_b["metadata"]
-        merged_meta = {
-            "tags": list(set(meta_a.get("tags", []) + meta_b.get("tags", []))),
-            "domain": list(set(meta_a.get("domain", []) + meta_b.get("domain", []))),
-            "importance": max(meta_a.get("importance", 5), meta_b.get("importance", 5)),
-            "valence": round((meta_a.get("valence", 0.5) + meta_b.get("valence", 0.5)) / 2, 2),
-            "arousal": round((meta_a.get("arousal", 0.3) + meta_b.get("arousal", 0.3)) / 2, 2),
-        }
+        a_content = bucket_a.get("content", "") or ""
+        b_content = bucket_b.get("content", "") or ""
 
         return JSONResponse({
+            "ok": True,
+            "preview": True,
+            "a": {"id": bucket_id, "name": meta_a.get("name", bucket_id)},
+            "b": {"id": into_id, "name": meta_b.get("name", into_id)},
             "merged_content": merged_content,
-            "a_content": bucket_a["content"],
-            "b_content": bucket_b["content"],
-            "a_name": meta_a.get("name", bucket_id),
-            "b_name": meta_b.get("name", into_id),
-            "merged_meta": merged_meta,
+            "a_content": a_content,
+            "b_content": b_content,
+            # Word counts
+            "a_chars": len(a_content),
+            "b_chars": len(b_content),
+            "merged_chars": len(merged_content),
+            # Merged metadata
+            "importance": max(meta_a.get("importance", 5), meta_b.get("importance", 5)),
+            "tags": list(set(meta_a.get("tags", []) + meta_b.get("tags", []))),
+            "domain": list(set(meta_a.get("domain", []) + meta_b.get("domain", []))),
+            "valence": round((meta_a.get("valence", 0.5) + meta_b.get("valence", 0.5)) / 2, 2),
+            "arousal": round((meta_a.get("arousal", 0.3) + meta_b.get("arousal", 0.3)) / 2, 2),
             "cost": cost,
         })
     except Exception as e:
@@ -2052,8 +2065,10 @@ async def api_search(request):
                 pass
 
         result = []
+        seen_ids = set()
         for b in matches:
             meta = b.get("metadata", {})
+            seen_ids.add(b["id"])
             vec_sim = vector_map.get(b["id"], 0)
             item = {
                 "id": b["id"],
@@ -2064,21 +2079,44 @@ async def api_search(request):
                 "arousal": meta.get("arousal", 0.3),
                 "content_preview": strip_wikilinks(b.get("content", ""))[:200],
             }
-            # --- Simulate mode: add field-level match details ---
             if simulate:
                 match_in = b.get("matched_in", [])
                 field_scores = b.get("field_scores", {})
                 item["matched_fields"] = {
-                    "name": round(field_scores.get("name", 0) * 3 / 100, 3),
-                    "domain": round(field_scores.get("domain", 0) * 2.5 / 100, 3),
-                    "tags": round(field_scores.get("tags", 0) * 2 / 100, 3),
-                    "content": round(field_scores.get("content", 0) * bucket_mgr.content_weight / 100, 3),
+                    "name": round(field_scores.get("name", 0), 1),
+                    "domain": round(field_scores.get("domain", 0), 1),
+                    "tags": round(field_scores.get("tags", 0), 1),
+                    "content": round(field_scores.get("content", 0), 1),
                     "matched_in": match_in,
                 }
                 if include_vector and vec_sim > 0:
                     item["vector_similarity"] = vec_sim
             result.append(item)
-        return JSONResponse(result)
+
+        # --- Add vector-only matches (not in keyword results) ---
+        vector_only = []
+        if simulate and include_vector and vector_map:
+            keyword_ids = seen_ids
+            for bid, sim in vector_map.items():
+                if bid not in keyword_ids:
+                    b = await bucket_mgr.get(bid)
+                    if b:
+                        meta = b.get("metadata", {})
+                        vector_only.append({
+                            "id": bid,
+                            "name": meta.get("name", bid),
+                            "score": 0,
+                            "domain": meta.get("domain", []),
+                            "content_preview": strip_wikilinks(b.get("content", ""))[:200],
+                            "vector_similarity": round(sim, 4),
+                            "matched_fields": None,  # no keyword match info
+                            "_vector_only": True,
+                        })
+
+        return JSONResponse({
+            "items": result,
+            "vector_only": vector_only,
+        })
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 

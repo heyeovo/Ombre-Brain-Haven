@@ -1064,10 +1064,11 @@ class BucketManager:
             if meta.get("type") == "feel":
                 continue
             bid = b["id"]
-            entry = self._hit_stats.setdefault(bid, {"count": 0, "surface_count": 0})
+            entry = self._hit_stats.setdefault(bid, {"count": 0, "surface_count": 0, "name": meta.get("name", bid)})
             entry["count"] += 1
             entry["last_hit_iso"] = ts
             entry["last_query"] = query[:200]
+            entry["name"] = meta.get("name", bid)
             hit_entries.append({
                 "id": bid, "name": meta.get("name", bid),
                 "score": b.get("score", 0), "domain": meta.get("domain", []),
@@ -1111,6 +1112,7 @@ class BucketManager:
                 continue
             items.append({
                 "id": bid,
+                "name": entry.get("name", bid),  # include name for display
                 "count": cc,
                 "surface_count": entry.get("surface_count", 0),
                 "last_hit_iso": entry.get("last_hit_iso", ""),

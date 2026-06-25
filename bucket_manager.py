@@ -405,7 +405,7 @@ class BucketManager:
         # 检测噪声态变化
         marking_noise = (new_resolved is True and new_importance == 1
                          and not was_noise)
-        unmarking_noise = (new_resolved is False
+        unmarking_noise = ((new_resolved == 0 or new_resolved is False)
                            and was_noise
                            and kwargs.get("importance") is None)
 

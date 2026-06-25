@@ -1514,15 +1514,17 @@ async def dream() -> str:
 # =============================================================
 @mcp.custom_route("/api/buckets", methods=["GET"])
 async def api_buckets(request):
-    """List all buckets with metadata (no content for efficiency)."""
+    """List all buckets with metadata. ?full=1 returns full content."""
     from starlette.responses import JSONResponse
     err = _require_auth(request)
     if err: return err
     try:
+        full = request.query_params.get("full", "").lower() in ("1", "true")
         all_buckets = await bucket_mgr.list_all(include_archive=True)
         result = []
         for b in all_buckets:
             meta = b.get("metadata", {})
+            raw_content = strip_wikilinks(b.get("content", ""))
             result.append({
                 "id": b["id"],
                 "name": meta.get("name", b["id"]),
@@ -1540,7 +1542,7 @@ async def api_buckets(request):
                 "last_active": meta.get("last_active", ""),
                 "activation_count": meta.get("activation_count", 1),
                 "score": decay_engine.calculate_score(meta),
-                "content_preview": strip_wikilinks(b.get("content", ""))[:200],
+                "content_preview": raw_content[:200] if not full else raw_content,
                 "wish": meta.get("wish", False),
                 "todo": meta.get("todo", ""),
                 "todo_done": meta.get("todo_done", False),

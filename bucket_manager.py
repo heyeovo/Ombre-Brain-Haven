@@ -1011,10 +1011,9 @@ class BucketManager:
 
                 if not show_all and not passed_threshold:
                     continue
-                # show_all mode: still require at least one field with query match
+                # show_all mode: at least one field genuinely matched (>=50% fuzzy)
                 if show_all:
-                    fs = match.get("field_scores", {})
-                    if not any(v > 0 for v in fs.values()):
+                    if len(match.get("matched_in", [])) == 0:
                         continue
                 if passed_threshold or show_all:
                     bucket["score"] = round(normalized, 2)

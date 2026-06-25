@@ -96,11 +96,13 @@ class BucketManager:
         self.w_time = scoring.get("time_proximity", 1.5)
         self.w_importance = scoring.get("importance", 1.0)
         self.content_weight = scoring.get("content_weight", 1.0)  # body×1, per spec
-        # Runtime-tunable knobs (default off = same behavior as upstream)
-        # 运行时旋钮（默认关 = 行为跟上游一致）
+        # Runtime-tunable knobs
+        # 运行时旋钮
         self.title_hit_bonus = float(scoring.get("title_hit_bonus", 0.0))
         self.keyword_first_sort = bool(scoring.get("keyword_first_sort", False))
         self.precise_match_mode = bool(scoring.get("precise_match_mode", False))
+        self.keyword_bypass = bool(scoring.get("keyword_bypass", False))
+        self.token_exact_match = bool(scoring.get("token_exact_match", True))  # default ON
         _env_warmth = os.environ.get("OMBRE_SCORING_WARMTH_BOOST")
         self.w_warmth = float(_env_warmth) if _env_warmth is not None else float(scoring.get("warmth_boost", 0.0))
 
@@ -121,6 +123,8 @@ class BucketManager:
         "content_weight": 1.0,
         "title_hit_bonus": 0.0,
         "keyword_first_sort": False,
+        "keyword_bypass": False,
+        "token_exact_match": True,
         "dryrun_log": False,
         "precise_match_mode": False,
         "warmth_boost": 0.0,
@@ -138,7 +142,7 @@ class BucketManager:
             try:
                 if key in ("content_weight", "title_hit_bonus", "warmth_boost"):
                     setattr(self, key if key != "warmth_boost" else "w_warmth", max(0.0, float(val)))
-                elif key in ("keyword_first_sort", "dryrun_log", "precise_match_mode"):
+                elif key in ("keyword_first_sort", "keyword_bypass", "token_exact_match", "dryrun_log", "precise_match_mode"):
                     setattr(self, key, bool(val))
             except (TypeError, ValueError):
                 pass
@@ -153,6 +157,8 @@ class BucketManager:
             "content_weight": self.content_weight,
             "title_hit_bonus": self.title_hit_bonus,
             "keyword_first_sort": self.keyword_first_sort,
+            "keyword_bypass": self.keyword_bypass,
+            "token_exact_match": self.token_exact_match,
             "dryrun_log": self.dryrun_log,
             "precise_match_mode": self.precise_match_mode,
             "warmth_boost": self.w_warmth,
@@ -904,11 +910,11 @@ class BucketManager:
         for bucket in candidates:
             meta = bucket.get("metadata", {})
 
-            # keyword bypass: if any token matches name/domain, always pass threshold
-            # 关键词命中优先：只要命中了名字/域就强制通过
+            # keyword bypass: token hits on name/domain skip threshold check
+            # 关键词命中优先：命中了名字/域就强制通过（仅 keyword_bypass 开启时）
             keyword_matched = False
             title_hit = False
-            if query:
+            if query and self.keyword_bypass:
                 tokens = self._split_query_tokens(query)
                 name_lower = meta.get("name", "").lower()
                 domain_text = " ".join(meta.get("domain", [])).lower()
@@ -928,69 +934,88 @@ class BucketManager:
                             break
 
             try:
-                # Dim 1: topic relevance (fuzzy text, 0~1)
+                # Always compute fuzzy match for matched_in/field_scores display
+                match = self._calc_topic_match(query, bucket)
+
                 if self.precise_match_mode and query:
-                    # Strict mode: only keyword matching, skip emotion/time/imp
-                    match = self._calc_topic_match(query, bucket)
-                    topic_score = match["score"]
-                    # Normalize: raw hits / max possible
+                    # ===============================================
+                    # precise_match_mode: token exact only, cut 3D, bypass threshold
+                    # ===============================================
+                    tokens = self._split_query_tokens(query)
+                    name_lower = meta.get("name", "").lower()
+                    domain_text = " ".join(meta.get("domain", [])).lower()
                     total_weight = 3 + 2.5 + 2 + self.content_weight
-                    raw_name = sum(1 for t in tokens if t.lower() in meta.get("name", "").lower()) * 3
+                    raw_name = sum(1 for t in tokens if t.lower() in name_lower) * 3
                     raw_domain = sum(1 for t in tokens if t.lower() in domain_text) * 2.5
                     raw_tags = sum(1 for t in tokens
                                    if any(t.lower() in tag.lower() for tag in meta.get("tags", []))) * 2
                     raw_content = sum(1 for t in tokens
                                       if t.lower() in bucket.get("content", "")[:3000].lower()) * self.content_weight
-                    precise_score = (raw_name + raw_domain + raw_tags + raw_content) / total_weight
-                    normalized = precise_score * 100
+                    topic_score = (raw_name + raw_domain + raw_tags + raw_content) / total_weight
+                    normalized = topic_score * 100
                     if self.w_warmth > 0:
                         b_valence = float(meta.get("valence", 0.5))
                         warmth = max(0.0, b_valence - 0.5) * self.w_warmth
                         normalized += warmth * 10
                     emotion_score = 0; time_score = 0; importance_score = 0
+                    passed_threshold = True  # precise mode: any hit passes
+                    normalized = max(normalized, 1.0)
+
                 else:
-                    match = self._calc_topic_match(query, bucket)
-                    topic_score = match["score"]
+                    # ===============================================
+                    # Normal 4D weighted scoring
+                    # ===============================================
+                    if self.token_exact_match and query:
+                        # Use token exact substring matching for topic_score
+                        tokens = self._split_query_tokens(query)
+                        name_lower = meta.get("name", "").lower()
+                        domain_text = " ".join(meta.get("domain", [])).lower()
+                        total_weight = 3 + 2.5 + 2 + self.content_weight
+                        raw_name = sum(1 for t in tokens if t.lower() in name_lower) * 3
+                        raw_domain = sum(1 for t in tokens if t.lower() in domain_text) * 2.5
+                        raw_tags = sum(1 for t in tokens
+                                       if any(t.lower() in tag.lower() for tag in meta.get("tags", []))) * 2
+                        raw_content = sum(1 for t in tokens
+                                          if t.lower() in bucket.get("content", "")[:3000].lower()) * self.content_weight
+                        topic_score = (raw_name + raw_domain + raw_tags + raw_content) / total_weight
+                    else:
+                        # Default: fuzzy partial_ratio
+                        topic_score = match["score"]
 
-                    # Dim 2: emotion resonance
                     emotion_score = self._calc_emotion_score(query_valence, query_arousal, meta)
-
-                    # Dim 3: time proximity
                     time_score = self._calc_time_score(meta)
-
-                    # Dim 4: importance
                     importance_score = max(1, min(10, int(meta.get("importance", 5)))) / 10.0
 
-                    # Weighted sum
                     total = (
                         topic_score * self.w_topic
                         + emotion_score * self.w_emotion
                         + time_score * self.w_time
                         + importance_score * self.w_importance
                     )
-
-                    # Warmth bonus: positive valence memories get extra weight
                     if self.w_warmth > 0:
                         b_valence = float(meta.get("valence", 0.5))
-                        warmth = max(0.0, b_valence - 0.5)
-                        total += warmth * self.w_warmth  # numerator only, not in denominator
+                        total += max(0.0, b_valence - 0.5) * self.w_warmth
 
                     weight_sum = self.w_topic + self.w_emotion + self.w_time + self.w_importance
                     normalized = (total / weight_sum) * 100 if weight_sum > 0 else 0
 
-                # Title hit bonus (extra points added after normalization)
-                if title_hit and self.title_hit_bonus > 0:
-                    normalized += self.title_hit_bonus
+                    # Title hit bonus
+                    if title_hit and self.title_hit_bonus > 0:
+                        normalized += self.title_hit_bonus
 
-                # Keyword bypass: if token matched name/domain, skip threshold check
-                # 关键词命中优先：命中了名字/域就强制通过
-                passed_threshold = normalized >= self.fuzzy_threshold
-                if keyword_matched and not passed_threshold:
-                    passed_threshold = True
-                    normalized = max(normalized, self.fuzzy_threshold * 0.7)
+                    # Threshold
+                    passed_threshold = normalized >= self.fuzzy_threshold
+                    if keyword_matched and not passed_threshold:
+                        passed_threshold = True
+                        normalized = max(normalized, self.fuzzy_threshold * 0.7)
 
                 if not show_all and not passed_threshold:
                     continue
+                # show_all mode: still require at least one field with query match
+                if show_all:
+                    fs = match.get("field_scores", {})
+                    if not any(v > 0 for v in fs.values()):
+                        continue
                 if passed_threshold or show_all:
                     bucket["score"] = round(normalized, 2)
                     bucket["matched_in"] = match.get("matched_in", [])

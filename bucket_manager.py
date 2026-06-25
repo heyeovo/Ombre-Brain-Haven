@@ -944,13 +944,17 @@ class BucketManager:
                     tokens = self._split_query_tokens(query)
                     name_lower = meta.get("name", "").lower()
                     domain_text = " ".join(meta.get("domain", [])).lower()
+                    tags_lower = " ".join(meta.get("tags", [])).lower()
+                    content_lower = bucket.get("content", "").lower()
                     total_weight = 3 + 2.5 + 2 + self.content_weight
-                    raw_name = sum(1 for t in tokens if t.lower() in name_lower) * 3
-                    raw_domain = sum(1 for t in tokens if t.lower() in domain_text) * 2.5
-                    raw_tags = sum(1 for t in tokens
-                                   if any(t.lower() in tag.lower() for tag in meta.get("tags", []))) * 2
-                    raw_content = sum(1 for t in tokens
-                                      if t.lower() in bucket.get("content", "")[:3000].lower()) * self.content_weight
+                    name_hits = sum(1 for t in tokens if t.lower() in name_lower)
+                    domain_hits = sum(1 for t in tokens if t.lower() in domain_text)
+                    tags_hits = sum(1 for t in tokens if t.lower() in tags_lower)
+                    content_hits = sum(1 for t in tokens if t.lower() in content_lower)
+                    raw_name = name_hits * 3
+                    raw_domain = domain_hits * 2.5
+                    raw_tags = tags_hits * 2
+                    raw_content = content_hits * self.content_weight
                     topic_score = (raw_name + raw_domain + raw_tags + raw_content) / total_weight
                     normalized = topic_score * 100
                     if self.w_warmth > 0:
@@ -960,6 +964,14 @@ class BucketManager:
                     emotion_score = 0; time_score = 0; importance_score = 0
                     passed_threshold = True  # precise mode: any hit passes
                     normalized = max(normalized, 1.0)
+                    # Override matched_in/field_scores with token-exact results
+                    match["field_scores"] = {
+                        "name": 100.0 if name_hits > 0 else 0.0,
+                        "domain": 100.0 if domain_hits > 0 else 0.0,
+                        "tags": 100.0 if tags_hits > 0 else 0.0,
+                        "content": 100.0 if content_hits > 0 else 0.0,
+                    }
+                    match["matched_in"] = [f for f, v in match["field_scores"].items() if v >= 50]
 
                 else:
                     # ===============================================
@@ -970,14 +982,26 @@ class BucketManager:
                         tokens = self._split_query_tokens(query)
                         name_lower = meta.get("name", "").lower()
                         domain_text = " ".join(meta.get("domain", [])).lower()
+                        tags_lower = " ".join(meta.get("tags", [])).lower()
+                        content_lower = bucket.get("content", "").lower()
                         total_weight = 3 + 2.5 + 2 + self.content_weight
-                        raw_name = sum(1 for t in tokens if t.lower() in name_lower) * 3
-                        raw_domain = sum(1 for t in tokens if t.lower() in domain_text) * 2.5
-                        raw_tags = sum(1 for t in tokens
-                                       if any(t.lower() in tag.lower() for tag in meta.get("tags", []))) * 2
-                        raw_content = sum(1 for t in tokens
-                                          if t.lower() in bucket.get("content", "")[:3000].lower()) * self.content_weight
+                        name_hits = sum(1 for t in tokens if t.lower() in name_lower)
+                        domain_hits = sum(1 for t in tokens if t.lower() in domain_text)
+                        tags_hits = sum(1 for t in tokens if t.lower() in tags_lower)
+                        content_hits = sum(1 for t in tokens if t.lower() in content_lower)
+                        raw_name = name_hits * 3
+                        raw_domain = domain_hits * 2.5
+                        raw_tags = tags_hits * 2
+                        raw_content = content_hits * self.content_weight
                         topic_score = (raw_name + raw_domain + raw_tags + raw_content) / total_weight
+                        # Override matched_in/field_scores with token-exact results
+                        match["field_scores"] = {
+                            "name": 100.0 if name_hits > 0 else 0.0,
+                            "domain": 100.0 if domain_hits > 0 else 0.0,
+                            "tags": 100.0 if tags_hits > 0 else 0.0,
+                            "content": 100.0 if content_hits > 0 else 0.0,
+                        }
+                        match["matched_in"] = [f for f, v in match["field_scores"].items() if v >= 50]
                     else:
                         # Default: fuzzy partial_ratio
                         topic_score = match["score"]

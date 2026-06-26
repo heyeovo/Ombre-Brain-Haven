@@ -422,7 +422,8 @@ class BucketManager:
             saved_imp = post.get("importance_before_noise")
             if saved_imp is not None:
                 kwargs["importance"] = int(saved_imp)
-            post.pop("importance_before_noise", None)
+            if "importance_before_noise" in post:
+                del post["importance_before_noise"]
 
         # --- Pinned/protected buckets: lock importance to 10, ignore importance changes ---
         # --- 钉选/保护桶：importance 不可修改，强制保持 10 ---

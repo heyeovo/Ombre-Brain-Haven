@@ -119,6 +119,9 @@ def test_dashboard_breath_debug_loads_recall_moment_candidates():
     breath_block = html.split("async function runBreathDebug()", 1)[1].split("async function loadDiffusionDebug", 1)[0]
 
     assert 'id="recall-results"' in html
+    assert 'id="breath-rerank"' in html
+    assert "if (useRerank) url += '&rerank=1';" in breath_block
+    assert "renderRecallDebug(data.rerank)" in breath_block
     assert "loadRecallDebug(query);" in breath_block
     assert "BASE + '/api/recall-debug?q='" in html
     assert "function renderRecallDebug(data)" in html

@@ -6027,6 +6027,70 @@ async def _build_recall_debug_payload(
     }
 
 
+async def _build_breath_debug_rerank_payload(
+    query: str,
+    *,
+    max_candidates: int = 12,
+    max_results: int = 3,
+    max_tokens: int = 400,
+    direct_render_mode: str = "compact",
+    valence: float | None = None,
+    arousal: float | None = None,
+) -> dict:
+    enabled = bool(getattr(reranker_engine, "enabled", False))
+    base = {
+        "requested": True,
+        "enabled": enabled,
+        "applied": False,
+        "candidate_limit": int(getattr(reranker_engine, "candidate_limit", 20) or 20),
+        "score_weight": _safe_float(getattr(reranker_engine, "score_weight", 0.65)),
+    }
+    if not str(query or "").strip():
+        return {
+            **base,
+            "status": "ok",
+            "skip_reason": "query_required",
+            "candidate_count": 0,
+            "admitted_count": 0,
+            "suppressed_count": 0,
+            "returned_moment_ids": [],
+            "candidates": [],
+            "warnings": [],
+        }
+    if not enabled:
+        return {
+            **base,
+            "status": "ok",
+            "skip_reason": "reranker_disabled",
+            "candidate_count": 0,
+            "admitted_count": 0,
+            "suppressed_count": 0,
+            "returned_moment_ids": [],
+            "candidates": [],
+            "warnings": [],
+        }
+
+    payload = await _build_recall_debug_payload(
+        query,
+        max_candidates=max_candidates,
+        max_results=max_results,
+        max_tokens=max_tokens,
+        direct_render_mode=direct_render_mode,
+        valence=valence,
+        arousal=arousal,
+    )
+    payload.update(base)
+    candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+    payload["applied"] = any(candidate.get("rerank_score") is not None for candidate in candidates)
+    if payload.get("status") != "ok":
+        payload["skip_reason"] = payload.get("error") or "recall_debug_failed"
+    elif not candidates:
+        payload["skip_reason"] = "no_candidates"
+    elif not payload["applied"]:
+        payload["skip_reason"] = "no_rerank_scores"
+    return payload
+
+
 def _secondary_direct_limit(query: str, related_per_memory: int) -> int:
     return _recall_query_plan(query).secondary_direct_limit(related_per_memory)
 
@@ -10107,6 +10171,7 @@ async def api_breath_debug(request):
     q_arousal = request.query_params.get("arousal")
     q_valence = float(q_valence) if q_valence else None
     q_arousal = float(q_arousal) if q_arousal else None
+    rerank_requested = _bool_value(request.query_params.get("rerank"), False)
 
     try:
         all_buckets = await bucket_mgr.list_all(include_archive=False)
@@ -10182,7 +10247,7 @@ async def api_breath_debug(request):
 
         results.sort(key=lambda x: x["normalized"], reverse=True)
         passed = [r for r in results if r["passed_threshold"]]
-        return JSONResponse({
+        payload = {
             "query": query,
             "valence": q_valence,
             "arousal": q_arousal,
@@ -10192,7 +10257,45 @@ async def api_breath_debug(request):
             "total_candidates": len(results),
             "passed_count": len(passed),
             "results": results[:50],  # top 50 for debug
-        })
+        }
+        if rerank_requested:
+            try:
+                payload["rerank"] = await _build_breath_debug_rerank_payload(
+                    query,
+                    max_candidates=_int_between(
+                        request.query_params.get("rerank_max_candidates"),
+                        12,
+                        1,
+                        100,
+                    ),
+                    max_results=_int_between(
+                        request.query_params.get("rerank_max_results"),
+                        3,
+                        1,
+                        20,
+                    ),
+                    max_tokens=_int_between(
+                        request.query_params.get("rerank_max_tokens"),
+                        400,
+                        1,
+                        20000,
+                    ),
+                    direct_render_mode=request.query_params.get("direct_render_mode", "compact"),
+                    valence=q_valence,
+                    arousal=q_arousal,
+                )
+            except Exception as e:
+                payload["rerank"] = {
+                    "requested": True,
+                    "enabled": bool(getattr(reranker_engine, "enabled", False)),
+                    "applied": False,
+                    "status": "error",
+                    "skip_reason": "exception",
+                    "error": str(e),
+                    "candidates": [],
+                    "warnings": [],
+                }
+        return JSONResponse(payload)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 

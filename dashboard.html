@@ -1416,6 +1416,19 @@
     color: var(--text-dim);
     font-weight: 500;
   }
+  .breath-controls .breath-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text);
+  }
+  .breath-controls .breath-check input {
+    width: 14px;
+    height: 14px;
+    padding: 0;
+    border-radius: 4px;
+    box-shadow: none;
+  }
   .breath-info {
     font-size: 12px;
     color: var(--text-dim);
@@ -2434,6 +2447,7 @@
     <input type="number" id="breath-valence" placeholder="0~1" min="0" max="1" step="0.1" style="width:80px" />
     <label>Arousal</label>
     <input type="number" id="breath-arousal" placeholder="0~1" min="0" max="1" step="0.1" style="width:80px" />
+    <label class="breath-check"><input type="checkbox" id="breath-rerank" /> Rerank</label>
     <button onclick="runBreathDebug()">模拟 Breath</button>
   </div>
 
@@ -5999,6 +6013,7 @@ async function runBreathDebug() {
   var query = document.getElementById('breath-query').value.trim();
   var valence = document.getElementById('breath-valence').value;
   var arousal = document.getElementById('breath-arousal').value;
+  var useRerank = document.getElementById('breath-rerank').checked;
   var results = document.getElementById('breath-results');
   var info = document.getElementById('breath-info');
   var recall = document.getElementById('recall-results');
@@ -6021,6 +6036,7 @@ async function runBreathDebug() {
   var url = BASE + '/api/breath-debug?q=' + encodeURIComponent(query);
   if (valence) url += '&valence=' + valence;
   if (arousal) url += '&arousal=' + arousal;
+  if (useRerank) url += '&rerank=1';
 
   try {
     var res = await authFetch(url);
@@ -6044,10 +6060,15 @@ async function runBreathDebug() {
       ' &nbsp;|&nbsp; 阈值=<code>' + data.threshold + '</code>' +
       ' &nbsp;|&nbsp; 候选=<code>' + data.total_candidates + '</code> 桶' +
       ' → 通过=<code>' + data.passed_count + '</code> 桶' +
+      (data.rerank ? breathRerankInfo(data.rerank) : '') +
       (query ? '' : ' &nbsp;|&nbsp; <em>未输入 query，topic 分数全为 0</em>');
 
     if (query) {
-      loadRecallDebug(query);
+      if (data.rerank) {
+        recall.innerHTML = renderRecallDebug(data.rerank);
+      } else {
+        loadRecallDebug(query);
+      }
       loadDiffusionDebug(query);
     }
 
@@ -6094,6 +6115,17 @@ async function runBreathDebug() {
   }
 }
 
+function breathRerankInfo(rerank) {
+  if (!rerank || !rerank.requested) return '';
+  if (!rerank.enabled) {
+    return ' &nbsp;|&nbsp; rerank=<code>disabled</code>';
+  }
+  var state = rerank.applied ? 'applied' : (rerank.skip_reason || 'not_applied');
+  return ' &nbsp;|&nbsp; rerank=<code>' + esc(state) + '</code>' +
+    ' candidates=<code>' + esc(rerank.candidate_limit || '') + '</code>' +
+    ' weight=<code>' + esc(rerank.score_weight == null ? '' : rerank.score_weight) + '</code>';
+}
+
 async function loadRecallDebug(query) {
   var target = document.getElementById('recall-results');
   if (!target) return;
@@ -6122,6 +6154,12 @@ function renderRecallDebug(data) {
     { text: 'profile ' + (thresholds.profile || 'default') },
     { text: 'direct ' + (thresholds.direct_render_mode || 'auto') },
   ];
+  if (data.requested) {
+    chips.push({
+      text: data.enabled ? 'rerank ' + (data.applied ? 'applied' : (data.skip_reason || 'not applied')) : 'rerank disabled',
+      state: data.enabled && data.applied ? 'allow' : 'block',
+    });
+  }
   var body = candidates.length
     ? '<div class="moment-list">' + candidates.map(renderRecallCandidate).join('') + '</div>'
     : '<div class="loading">没有 moment candidates。</div>';

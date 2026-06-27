@@ -1111,6 +1111,44 @@ async def test_search_reranker_reorders_breath_moment_candidates(patch_breath):
 
 
 @pytest.mark.asyncio
+async def test_breath_debug_rerank_payload_reuses_recall_reranker(patch_breath):
+    import server
+
+    reranker = DummyRerankerEngine(
+        enabled=True,
+        score_by_text={
+            "Disney birthday trip": 0.98,
+            "Disney generic project": 0.05,
+        },
+    )
+    patch_breath(
+        [
+            _bucket("N", "Disney generic project note: keyword seed drift.", importance=10),
+            _bucket("T", "Disney birthday trip: remembered the exact itinerary.", importance=1),
+        ],
+        search_ids=["N", "T"],
+        reranker_engine=reranker,
+    )
+
+    payload = await server._build_breath_debug_rerank_payload(
+        "Disney",
+        max_candidates=12,
+        max_results=3,
+        max_tokens=200,
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["requested"] is True
+    assert payload["enabled"] is True
+    assert payload["applied"] is True
+    assert reranker.calls
+    by_bucket = {candidate["bucket_id"]: candidate for candidate in payload["candidates"]}
+    assert by_bucket["T"]["final_rank"] == 0
+    assert by_bucket["T"]["rerank_score"] == 0.98
+    assert by_bucket["N"]["final_rank"] > by_bucket["T"]["final_rank"]
+
+
+@pytest.mark.asyncio
 async def test_search_keeps_order_when_breath_reranker_returns_empty(patch_breath):
     import server
 

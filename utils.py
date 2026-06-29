@@ -49,7 +49,7 @@ def load_config(config_path: str = None) -> dict:
                 "arousal_boost": 0.8,
             },
         },
-        "auto_merge": True,
+        "auto_merge": False,
         "matching": {
             "fuzzy_threshold": 50,
             "max_results": 5,

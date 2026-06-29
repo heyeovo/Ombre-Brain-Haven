@@ -600,6 +600,73 @@ async def breath(
                 logger.warning(f"importance_min dehydrate failed: {e}")
         return "\n---\n".join(results) if results else "没有可以展示的记忆。"
 
+    # --- Feel retrieval: domain="feel" is a special channel ---
+    # --- Feel 检索：domain="feel" 是独立入口 ---
+    if domain.strip().lower() == "feel":
+        try:
+            all_buckets = await bucket_mgr.list_all(include_archive=False)
+            feels = [b for b in all_buckets if b["metadata"].get("type") == "feel"]
+            feels.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+            feels = feels[:max_results]
+            if not feels:
+                return "没有留下过 feel。"
+            results = []
+            for f in feels:
+                created = f["metadata"].get("created", "")
+                entry = f"[{created}] [bucket_id:{f['id']}]\n{strip_wikilinks(f['content'])}"
+                results.append(entry)
+                if count_tokens_approx("\n---\n".join(results)) > max_tokens:
+                    break
+            return "\n---\n".join(results)
+        except Exception as e:
+            logger.error(f"Feel retrieval failed: {e}")
+            return "读取 feel 失败。"
+
+    # --- Journal retrieval: domain="journal" is a fully independent channel ---
+    # --- 日记检索：domain="journal" 完全独立通道，不与普通breath/search混 ---
+    if domain.strip().lower() == "journal":
+        try:
+            journal_entries = await bucket_mgr.list_journal()
+            journal_entries.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+            journal_entries = journal_entries[:max_results]
+            if not journal_entries:
+                return "日记本是空的。"
+            results = []
+            for j in journal_entries:
+                meta = j["metadata"]
+                name = meta.get("name", j["id"])
+                author = meta.get("author", "共同")
+                created = meta.get("created", "")
+                if meta.get("locked"):
+                    hint = meta.get("unlock_hint", "")
+                    # --- 日期形式的 hint：到点自动解锁；非日期形式视为密码，保持锁定 ---
+                    auto_unlocked = False
+                    try:
+                        unlock_date = datetime.fromisoformat(str(hint))
+                        auto_unlocked = datetime.now() >= unlock_date
+                    except (ValueError, TypeError):
+                        auto_unlocked = False
+                    if not auto_unlocked:
+                        entry = (
+                            f"🔒 [{name}] [作者:{author}] [bucket_id:{j['id']}]\n"
+                            f"（已上锁，提示：{hint or '无'}）"
+                        )
+                        results.append(entry)
+                        if count_tokens_approx("\n---\n".join(results)) > max_tokens:
+                            break
+                        continue
+                entry = (
+                    f"[{created}] [{name}] [作者:{author}] [bucket_id:{j['id']}]\n"
+                    f"{strip_wikilinks(j['content'])}"
+                )
+                results.append(entry)
+                if count_tokens_approx("\n---\n".join(results)) > max_tokens:
+                    break
+            return "=== 日记本 ===\n" + "\n---\n".join(results)
+        except Exception as e:
+            logger.error(f"Journal retrieval failed: {e}")
+            return "读取日记失败。"
+
     # --- No args or empty query: surfacing mode (weight pool active push) ---
     # --- 无参数或空query：浮现模式（权重池主动推送）---
     if not query or not query.strip():
@@ -738,72 +805,6 @@ async def breath(
             parts.append("=== 还记得这个吗 ===\n" + wish_result)
         return "\n\n".join(parts)
 
-    # --- Feel retrieval: domain="feel" is a special channel ---
-    # --- Feel 检索：domain="feel" 是独立入口 ---
-    if domain.strip().lower() == "feel":
-        try:
-            all_buckets = await bucket_mgr.list_all(include_archive=False)
-            feels = [b for b in all_buckets if b["metadata"].get("type") == "feel"]
-            feels.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
-            feels = feels[:20]  # 只取最近20条
-            if not feels:
-                return "没有留下过 feel。"
-            results = []
-            for f in feels:
-                created = f["metadata"].get("created", "")
-                entry = f"[{created}] [bucket_id:{f['id']}]\n{strip_wikilinks(f['content'])}"
-                results.append(entry)
-                if count_tokens_approx("\n---\n".join(results)) > max_tokens:
-                    break
-            return "=== 你留下的 feel ===\n" + "\n---\n".join(results)
-        except Exception as e:
-            logger.error(f"Feel retrieval failed: {e}")
-            return "读取 feel 失败。"
-
-    # --- Journal retrieval: domain="journal" is a fully independent channel ---
-    # --- 日记检索：domain="journal" 完全独立通道，不与普通breath/search混 ---
-    if domain.strip().lower() == "journal":
-        try:
-            journal_entries = await bucket_mgr.list_journal()
-            journal_entries.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
-            journal_entries = journal_entries[:20]
-            if not journal_entries:
-                return "日记本是空的。"
-            results = []
-            for j in journal_entries:
-                meta = j["metadata"]
-                name = meta.get("name", j["id"])
-                author = meta.get("author", "共同")
-                created = meta.get("created", "")
-                if meta.get("locked"):
-                    hint = meta.get("unlock_hint", "")
-                    # --- 日期形式的 hint：到点自动解锁；非日期形式视为密码，保持锁定 ---
-                    auto_unlocked = False
-                    try:
-                        unlock_date = datetime.fromisoformat(str(hint))
-                        auto_unlocked = datetime.now() >= unlock_date
-                    except (ValueError, TypeError):
-                        auto_unlocked = False
-                    if not auto_unlocked:
-                        entry = (
-                            f"🔒 [{name}] [作者:{author}] [bucket_id:{j['id']}]\n"
-                            f"（已上锁，提示：{hint or '无'}）"
-                        )
-                        results.append(entry)
-                        if count_tokens_approx("\n---\n".join(results)) > max_tokens:
-                            break
-                        continue
-                entry = (
-                    f"[{created}] [{name}] [作者:{author}] [bucket_id:{j['id']}]\n"
-                    f"{strip_wikilinks(j['content'])}"
-                )
-                results.append(entry)
-                if count_tokens_approx("\n---\n".join(results)) > max_tokens:
-                    break
-            return "=== 日记本 ===\n" + "\n---\n".join(results)
-        except Exception as e:
-            logger.error(f"Journal retrieval failed: {e}")
-            return "读取日记失败。"
 
     # --- With args: search mode (keyword + vector dual channel) ---
     # --- 有参数：检索模式（关键词 + 向量双通道）---
@@ -1715,14 +1716,29 @@ async def api_create_bucket(request):
         tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
     else:
         tags = raw_tags
+
+    # --- Auto-tagging (same as MCP hold tool) / 自动打标 ---
+    domain = body.get("domain", None)
+    name = body.get("name") or None
+    try:
+        analysis = await dehydrator.analyze(content)
+        if not domain:
+            domain = analysis.get("domain", None)
+        if not name:
+            name = analysis.get("suggested_name") or None
+        auto_tags = analysis.get("tags", [])
+        all_tags = list(dict.fromkeys(auto_tags + tags))  # API tags first, user tags appended
+    except Exception:
+        all_tags = tags
+
     bucket_id = await bucket_mgr.create(
         content=content,
-        tags=tags,
+        tags=all_tags,
         importance=int(body.get("importance", 5)),
-        domain=body.get("domain", None),
+        domain=domain,
         valence=float(body.get("valence", 0.5)),
         arousal=float(body.get("arousal", 0.3)),
-        name=body.get("name") or None,
+        name=name,
         pinned=bool(body.get("pinned", False)),
     )
     return JSONResponse({"ok": True, "id": bucket_id})
@@ -2030,6 +2046,19 @@ async def api_create_journal(request):
     )
     _invalidate_cache("JOURNAL")
     return JSONResponse({"ok": True, "id": bucket_id})
+
+@mcp.custom_route("/api/journal/{journal_id}", methods=["DELETE"])
+async def api_delete_journal(request):
+    """删除日记条目(前端日记弹窗的抹除按钮用)。"""
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    journal_id = request.path_params["journal_id"]
+    success = await bucket_mgr.delete_journal(journal_id)
+    if not success:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    _invalidate_cache("JOURNAL")
+    return JSONResponse({"ok": True})
 
 @mcp.custom_route("/api/search", methods=["GET"])
 async def api_search(request):

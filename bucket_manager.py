@@ -697,6 +697,29 @@ class BucketManager:
         logger.info(f"Converted bucket to journal / 桶转为日记: {bucket_id}")
         return True
 
+    async def delete_journal(self, journal_id: str) -> bool:
+        """
+        Delete a journal entry. 日记专属删除——独立于常规 delete()。
+        Searches journal_dir directly (not _find_bucket_file which excludes journals).
+        """
+        if not os.path.exists(self.journal_dir):
+            return False
+        for root, _, files in os.walk(self.journal_dir):
+            for fname in files:
+                if not fname.endswith(".md"):
+                    continue
+                name_part = fname[:-3]
+                if name_part == journal_id or name_part.endswith(f"_{journal_id}"):
+                    file_path = os.path.join(root, fname)
+                    try:
+                        os.remove(file_path)
+                        logger.info(f"Deleted journal entry / 已删除日记: {journal_id}")
+                        return True
+                    except OSError as e:
+                        logger.error(f"Failed to delete journal / 删除日记失败: {file_path}: {e}")
+                        return False
+        return False
+
     # ---------------------------------------------------------
     # Touch bucket (refresh activation time + increment count)
     # 触碰桶（刷新激活时间 + 累加激活次数）

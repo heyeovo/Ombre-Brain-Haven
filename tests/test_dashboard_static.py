@@ -525,6 +525,8 @@ def test_dashboard_exposes_gateway_upstream_editor():
     assert "<h3>Gateway 上游模型</h3>" not in config_view
     assert 'id="cfg-upstreams-list"' in upstream_view
     assert "function renderGatewayUpstreams()" in html
+    assert "function gatewayCacheRetentionOptions(strategy, selected)" in html
+    assert "function updateGatewayCacheRetentionOptions(index)" in html
     assert "function collectGatewayUpstreams(includeKeyValues)" in html
     assert "function collectGatewayUpstreamsForSave(includeKeyValues)" in html
     assert "gatewayUpstreams = (((cfg.gateway || {}).upstreams) || []).map(normalizeGatewayUpstream);" in load_block
@@ -534,6 +536,11 @@ def test_dashboard_exposes_gateway_upstream_editor():
     assert "var upstreamsResult = collectGatewayUpstreamsForSave(!!persistEnv);" in save_block
     assert "candidate.gateway = { upstreams: upstreamsResult.upstreams };" in save_block
     assert "api_key_values" in html
+    assert 'onchange="updateGatewayCacheRetentionOptions(' in html
+    assert 'id="cfg-upstream-cache-retention-' in html
+    assert "current.prompt_cache_retention = current.prompt_cache ? value('cfg-upstream-cache-retention-' + index).trim() : '';" in html
+    assert "choices.push({ value: '24h', label: '24h' });" in html
+    assert "choices.push({ value: '1h', label: '1h' });" in html
     assert "填写了真实 key 时，请使用“应用并保存密钥到 .env”" in html
     assert "'upstream-config-status'" in html
     assert "document.querySelectorAll('[id^=\"cfg-upstream-key-values-\"]')" in html

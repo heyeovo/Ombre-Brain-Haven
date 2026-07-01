@@ -6465,6 +6465,42 @@ function normalizeGatewayUpstream(raw) {
   };
 }
 
+function gatewayCacheRetentionChoices(strategy) {
+  strategy = String(strategy || '').trim();
+  var choices = [{ value: '', label: 'default' }];
+  if (strategy === 'openai') {
+    choices.push({ value: '24h', label: '24h' });
+  } else if (strategy === 'anthropic' || strategy === 'anthropic_explicit') {
+    choices.push({ value: '1h', label: '1h' });
+  }
+  return choices;
+}
+
+function gatewayCacheRetentionAllowed(strategy, value) {
+  value = String(value || '').trim();
+  return gatewayCacheRetentionChoices(strategy).some(function(choice) {
+    return choice.value === value;
+  });
+}
+
+function gatewayCacheRetentionOptions(strategy, selected) {
+  selected = String(selected || '').trim();
+  if (!gatewayCacheRetentionAllowed(strategy, selected)) selected = '';
+  return gatewayCacheRetentionChoices(strategy).map(function(choice) {
+    return '<option value="' + escAttr(choice.value) + '"' + (choice.value === selected ? ' selected' : '') + '>' + esc(choice.label) + '</option>';
+  }).join('');
+}
+
+function updateGatewayCacheRetentionOptions(index) {
+  var cacheEl = document.getElementById('cfg-upstream-cache-' + index);
+  var retentionEl = document.getElementById('cfg-upstream-cache-retention-' + index);
+  if (!cacheEl || !retentionEl) return;
+  var strategy = cacheEl.value || '';
+  var selected = gatewayCacheRetentionAllowed(strategy, retentionEl.value) ? retentionEl.value : '';
+  retentionEl.innerHTML = gatewayCacheRetentionOptions(strategy, selected);
+  retentionEl.disabled = !strategy;
+}
+
 function splitEnvLines(value) {
   return String(value || '')
     .split(/[\n,]+/)
@@ -6495,7 +6531,7 @@ function syncGatewayUpstreamsFromDom() {
     current.api_key_values = splitSecretLines(value('cfg-upstream-key-values-' + index));
     current.default_model = value('cfg-upstream-default-' + index).trim();
     current.prompt_cache = value('cfg-upstream-cache-' + index).trim();
-    current.prompt_cache_retention = value('cfg-upstream-cache-retention-' + index).trim();
+    current.prompt_cache_retention = current.prompt_cache ? value('cfg-upstream-cache-retention-' + index).trim() : '';
     current.anthropic_version = value('cfg-upstream-anthropic-version-' + index).trim();
     current.anthropic_beta = value('cfg-upstream-anthropic-beta-' + index).trim();
     current.models = Array.prototype.slice.call(
@@ -6545,9 +6581,9 @@ function renderGatewayUpstreams() {
         '<div class="config-row"><label>Key values</label><textarea id="cfg-upstream-key-values-' + index + '" placeholder="可选：一行一个真实 key，对应上面的 env 名"></textarea></div>' +
         '<div class="upstream-note">留空不改。只有点“应用并保存密钥到 .env”才会写入，并用于本次热更新。</div>' +
         '<div class="config-row"><label>Default</label><input type="text" id="cfg-upstream-default-' + index + '" placeholder="默认模型，可留空" value="' + escAttr(upstream.default_model) + '" /></div>' +
-        '<div class="config-row"><label>Cache</label><select id="cfg-upstream-cache-' + index + '"><option value=""' + (!upstream.prompt_cache ? ' selected' : '') + '>none</option><option value="openai"' + (upstream.prompt_cache === 'openai' ? ' selected' : '') + '>openai</option><option value="anthropic"' + (upstream.prompt_cache === 'anthropic' ? ' selected' : '') + '>anthropic</option><option value="anthropic_explicit"' + (upstream.prompt_cache === 'anthropic_explicit' ? ' selected' : '') + '>anthropic_explicit</option></select></div>' +
+        '<div class="config-row"><label>Cache</label><select id="cfg-upstream-cache-' + index + '" onchange="updateGatewayCacheRetentionOptions(' + index + ')"><option value=""' + (!upstream.prompt_cache ? ' selected' : '') + '>none</option><option value="openai"' + (upstream.prompt_cache === 'openai' ? ' selected' : '') + '>openai</option><option value="anthropic"' + (upstream.prompt_cache === 'anthropic' ? ' selected' : '') + '>anthropic</option><option value="anthropic_explicit"' + (upstream.prompt_cache === 'anthropic_explicit' ? ' selected' : '') + '>anthropic_explicit</option></select></div>' +
         '<div class="upstream-note">中转站选择：OpenAI 兼容选 openai；Claude 官方/多数中转选 anthropic_explicit；只认顶层 cache_control 的中转选 anthropic。</div>' +
-        '<div class="config-row"><label>Cache TTL</label><input type="text" id="cfg-upstream-cache-retention-' + index + '" placeholder="24h / 1h，可留空" value="' + escAttr(upstream.prompt_cache_retention) + '" /></div>' +
+        '<div class="config-row"><label>Cache TTL</label><select id="cfg-upstream-cache-retention-' + index + '"' + (!upstream.prompt_cache ? ' disabled' : '') + '>' + gatewayCacheRetentionOptions(upstream.prompt_cache, upstream.prompt_cache_retention) + '</select></div>' +
         '<div class="config-row"><label>Anthropic ver.</label><input type="text" id="cfg-upstream-anthropic-version-' + index + '" placeholder="2023-06-01" value="' + escAttr(upstream.anthropic_version) + '" /></div>' +
         '<div class="config-row"><label>Anthropic beta</label><input type="text" id="cfg-upstream-anthropic-beta-' + index + '" placeholder="可留空" value="' + escAttr(upstream.anthropic_beta) + '" /></div>' +
         '<div style="font-size:12px;color:var(--text-dim);font-weight:600;margin:14px 0 8px;">Models</div>' +

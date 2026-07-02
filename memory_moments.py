@@ -330,6 +330,25 @@ class MemoryMomentStore:
         include_sections: set[str] | list[str] | tuple[str, ...] | None = None,
         exclude_sections: set[str] | list[str] | tuple[str, ...] | None = None,
     ) -> list[dict]:
+        return self.search_moment_items(
+            query,
+            self.list_all(),
+            limit=limit,
+            bucket_boosts=bucket_boosts,
+            include_sections=include_sections,
+            exclude_sections=exclude_sections,
+        )
+
+    def search_moment_items(
+        self,
+        query: str,
+        moments: list[dict],
+        *,
+        limit: int = 20,
+        bucket_boosts: dict[str, float] | None = None,
+        include_sections: set[str] | list[str] | tuple[str, ...] | None = None,
+        exclude_sections: set[str] | list[str] | tuple[str, ...] | None = None,
+    ) -> list[dict]:
         query = str(query or "").strip()
         if not query:
             return []
@@ -339,7 +358,7 @@ class MemoryMomentStore:
         query_terms = content_terms_for_query(query, self.relevance_options)
         expanded_query_terms = _expanded_query_terms(query, self.relevance_options)
         scored = []
-        for moment in self.list_all():
+        for moment in moments or []:
             section = str(moment.get("section") or "")
             if included and section not in included:
                 continue

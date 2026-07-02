@@ -2687,6 +2687,7 @@ class GatewayService:
                         session_id,
                         all_buckets,
                         grouped_moments,
+                        all_moments=all_moments,
                         search_query=self._dynamic_recall_search_query(
                             current_user_query,
                             memory_sentinel_debug,
@@ -8346,6 +8347,7 @@ class GatewayService:
         all_buckets: list[dict],
         grouped_moments: dict[str, list[dict]],
         *,
+        all_moments: list[dict] | None = None,
         search_query: str = "",
         include_query_planner_debug: bool = False,
     ) -> tuple[list[dict], list[dict], list[dict], list[dict]] | tuple[
@@ -8467,12 +8469,25 @@ class GatewayService:
                 moment_search_queries.append(raw_moment_query)
             seen_moment_ids: set[str] = set()
             for moment_query in moment_search_queries:
-                for moment in self.memory_moment_store.search_moments(
-                    moment_query,
-                    limit=max(self.moment_search_limit, self.inject_max_cards * 8),
-                    bucket_boosts=bucket_boosts,
-                    exclude_sections=TASK_ONLY_MOMENT_SECTIONS,
-                ):
+                search_limit = max(self.moment_search_limit, self.inject_max_cards * 8)
+                if all_moments is None:
+                    query_planner_debug["moment_search_source"] = "sqlite_store"
+                    searched_moments = self.memory_moment_store.search_moments(
+                        moment_query,
+                        limit=search_limit,
+                        bucket_boosts=bucket_boosts,
+                        exclude_sections=TASK_ONLY_MOMENT_SECTIONS,
+                    )
+                else:
+                    query_planner_debug["moment_search_source"] = "cached_graph"
+                    searched_moments = self.memory_moment_store.search_moment_items(
+                        moment_query,
+                        all_moments,
+                        limit=search_limit,
+                        bucket_boosts=bucket_boosts,
+                        exclude_sections=TASK_ONLY_MOMENT_SECTIONS,
+                    )
+                for moment in searched_moments:
                     moment_id = str(moment.get("moment_id") or "")
                     if moment_id and moment_id in seen_moment_ids:
                         continue

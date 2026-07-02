@@ -347,6 +347,22 @@ def test_search_expands_body_query_to_embodiment_terms(test_config):
     assert [item["bucket_id"] for item in results] == ["embodied"]
 
 
+def test_search_moment_items_uses_supplied_moments_without_reloading(test_config):
+    store = MemoryMomentStore(test_config)
+    store.bulk_upsert(
+        [
+            _bucket("embodied", "未来具身智能项目会让 Haven 拥有形体。"),
+            _bucket("unrelated", "普通天气记录。"),
+        ]
+    )
+    moments = store.list_all()
+    store.list_all = lambda: (_ for _ in ()).throw(AssertionError("unexpected reload"))
+
+    results = store.search_moment_items("身体", moments, limit=5)
+
+    assert [item["bucket_id"] for item in results] == ["embodied"]
+
+
 def test_search_moments_can_exclude_or_select_followup_sections(test_config):
     store = MemoryMomentStore(test_config)
     store.bulk_upsert(

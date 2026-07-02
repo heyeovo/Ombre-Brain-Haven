@@ -424,6 +424,59 @@ def test_moment_graph_refresh_reuses_same_bucket_list_without_signature(
     assert signature_calls == [1]
 
 
+def test_dynamic_moment_search_uses_cached_graph_moments(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=0,
+        related_memory_budget=0,
+        query_planner_enabled=False,
+        retrieval_mode="graph",
+        word_map_hint_enabled=False,
+        first_card_min_score=0.1,
+    )
+    target_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n火焰是小雨和 Haven 的关系意象。",
+        name="火焰意象",
+        hours_ago=2,
+        domain=["relationship.symbol"],
+        keywords=["火焰", "意象"],
+    )
+    _create_bucket(
+        bucket_mgr,
+        content="### moment\n普通天气记录。",
+        name="普通天气",
+        hours_ago=2,
+    )
+    _, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr, embedding_results=[])
+    all_buckets = _run(bucket_mgr.list_all())
+    all_moments, grouped_moments, _edges = service._refresh_moment_graph(all_buckets)
+
+    def fail_search_moments(*args, **kwargs):
+        raise AssertionError("unexpected sqlite moment search")
+
+    monkeypatch.setattr(service.memory_moment_store, "search_moments", fail_search_moments)
+
+    selected, candidates, _suppressed, _suppressed_buckets, planner_debug = _run(
+        service._select_dynamic_moments(
+            "火焰意象",
+            "sess-cached-moment-search",
+            all_buckets,
+            grouped_moments,
+            all_moments=all_moments,
+            include_query_planner_debug=True,
+        )
+    )
+
+    assert planner_debug["moment_search_source"] == "cached_graph"
+    assert target_id in {moment["bucket_id"] for moment in selected + candidates}
+
+
 def test_gateway_private_context_avoids_identity_boundary(monkeypatch, test_config, bucket_mgr):
     cfg = _gateway_config(test_config)
     cfg["identity"] = {
@@ -12403,10 +12456,8 @@ def test_voice_query_keeps_voice_direct_without_low_score_background_diffusion(
         bucket_mgr,
         embedding_results=[(voice_id, 0.96), (background_id, 0.20)],
     )
-    monkeypatch.setattr(
-        service.memory_moment_store,
-        "search_moments",
-        lambda *args, **kwargs: [
+    def fake_moment_search(*args, **kwargs):
+        return [
             {
                 "bucket_id": voice_id,
                 "moment_id": f"{voice_id}:voice",
@@ -12425,8 +12476,10 @@ def test_voice_query_keeps_voice_direct_without_low_score_background_diffusion(
                 "rerank_score": 0.18,
                 "metadata": {"bucket_name": "我们关于流星的讨论", "bucket_domain": ["关系"]},
             },
-        ],
-    )
+        ]
+
+    monkeypatch.setattr(service.memory_moment_store, "search_moments", fake_moment_search)
+    monkeypatch.setattr(service.memory_moment_store, "search_moment_items", fake_moment_search)
 
     payload, recalled_ids, debug = _run(
         service.prepare_payload(

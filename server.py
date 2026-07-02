@@ -7895,7 +7895,7 @@ async def hold(
     date: str = "",
     domain: str = "",
 ) -> str:
-    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；显式 domain 会覆盖自动领域；显式 valence/arousal 会覆盖自动情绪。title 可选，传了就用你给的标题，不传则自动生成。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection、### todo。### todo 只放明确可完成、可标 done、可写回的待办；“以后聊到 X 要想到 Y”这类回应提示放 ### reflection，不写 todo。feel=True/whisper=True 时 content 只写第一人称感受，不写分段标题。"""
+    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；title 可选，传了就用给定标题，不传则自动生成。普通记忆不用填写 domain，系统会自动判断；维护自我锚点等特殊桶时可显式传 domain。显式 valence/arousal 会覆盖自动情绪。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection、### todo。### todo 只放明确可完成、可标 done、可写回的待办；“以后聊到 X 要想到 Y”这类回应提示放 ### reflection，不写 todo。feel=True/whisper=True 时 content 只写第一人称感受，不写分段标题。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -7972,7 +7972,7 @@ async def hold(
     except Exception as e:
         logger.warning(f"Auto-tagging failed, using defaults / 自动打标失败: {e}")
         analysis = {
-            "domain": ["未分类"], "valence": 0.5, "arousal": 0.3,
+            "domain": ["general"], "valence": 0.5, "arousal": 0.3,
             "tags": [], "suggested_name": "",
         }
 
@@ -8145,7 +8145,7 @@ async def _grow_direct_structured_content(content: str, title: str = "", gate_pr
     except Exception as e:
         logger.warning(f"Direct grow auto-tagging failed, using defaults / 直接写入打标失败: {e}")
         analysis = {
-            "domain": ["未分类"], "valence": 0.5, "arousal": 0.3,
+            "domain": ["general"], "valence": 0.5, "arousal": 0.3,
             "tags": [], "suggested_name": "",
         }
 
@@ -8163,9 +8163,9 @@ async def _grow_direct_structured_content(content: str, title: str = "", gate_pr
         importance = max(1, min(10, int(analysis.get("importance", 5))))
     except (TypeError, ValueError):
         importance = 5
-    domain = analysis.get("domain", ["未分类"])
+    domain = analysis.get("domain", ["general"])
     if not isinstance(domain, list):
-        domain = ["未分类"]
+        domain = ["general"]
     name = title.strip() or _title_from_memory_heading(direct_content) or analysis.get("suggested_name", "")
     related_bucket = await _find_readonly_related_bucket(direct_content)
 
@@ -8230,7 +8230,7 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
         except Exception as e:
             logger.warning(f"Fast-path analyze failed / 快速路径打标失败: {e}")
             analysis = {
-                "domain": ["未分类"], "valence": 0.5, "arousal": 0.3,
+                "domain": ["general"], "valence": 0.5, "arousal": 0.3,
                 "tags": [], "suggested_name": "",
             }
         fast_tags = analysis.get("tags", [])
@@ -8247,7 +8247,7 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
             content=content.strip(),
             tags=fast_tags,
             importance=analysis.get("importance", 5) if isinstance(analysis.get("importance"), int) else 5,
-            domain=analysis.get("domain", ["未分类"]),
+            domain=analysis.get("domain", ["general"]),
             valence=analysis.get("valence", 0.5),
             arousal=analysis.get("arousal", 0.3),
             name=title.strip() or analysis.get("suggested_name", ""),
@@ -8295,7 +8295,7 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
                 content=item_content,
                 tags=item_tags,
                 importance=item.get("importance", 5),
-                domain=item.get("domain", ["未分类"]),
+                domain=item.get("domain", ["general"]),
                 valence=item.get("valence", 0.5),
                 arousal=item.get("arousal", 0.3),
                 name=item.get("name", ""),
@@ -9078,7 +9078,7 @@ async def api_create_memory(request):
         return JSONResponse({"error": "invalid type"}, status_code=400)
 
     now = _current_time_iso()
-    domain = _string_list(body.get("domain"), ["未分类"])
+    domain = _string_list(body.get("domain"), ["general"])
     tags = _string_list(body.get("tags"), [])
     if _has_favorite_tag(tags) and not _has_favorite_reason(content):
         return JSONResponse({"error": _favorite_reason_error()}, status_code=400)

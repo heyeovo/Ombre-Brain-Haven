@@ -62,7 +62,55 @@ LEGACY_DOMAIN_MAP = {
     "social": "life.social",
     "study_work": "project.work",
     "craft_body": "project.companion_system",
+    "日常": "life",
+    "生活": "life",
+    "饮食": "life.food",
+    "出行": "life.outing",
+    "健康": "life.health",
+    "睡眠": "life.sleep",
+    "事务": "life.schedule",
+    "计划": "life.schedule",
+    "待办": "life.schedule",
+    "人际": "relationship",
+    "关系": "relationship",
+    "恋爱": "relationship",
+    "亲密": "relationship.intimacy",
+    "沟通": "relationship.communication",
+    "暗号": "relationship.symbol",
+    "意象": "relationship.symbol",
+    "内心": "life.mood",
+    "情绪": "life.mood",
+    "数字": "project.companion_system",
+    "编程": "project.companion_system",
+    "技术": "project.companion_system",
+    "项目": "project",
+    "工作": "project.work",
+    "学业": "project.academic",
+    "学习": "project.academic",
+    "个人项目": "project.personal",
+    "未分类": "general",
+    "通用": "general",
 }
+
+DOMAIN_PROMPT_CHOICES = [
+    ("relationship.identity", "关系身份、称呼、角色定位、关系事实"),
+    ("relationship.intimacy", "亲密关系、身体、欲望、具身互动"),
+    ("relationship.symbol", "暗号、意象、象征、私密信号"),
+    ("relationship.communication", "沟通方式、回应偏好、边界、修复方式"),
+    ("relationship.weather", "关系天气、日印象、周印象"),
+    ("life.health", "健康、身体状态、生病"),
+    ("life.sleep", "睡眠、作息、熬夜"),
+    ("life.food", "饮食、餐厅、口味"),
+    ("life.outing", "出行、通勤、旅行、外出"),
+    ("life.mood", "心情、情绪、自省、梦境"),
+    ("life.schedule", "日程、计划、待办、deadline"),
+    ("life.social", "现实人际、朋友、家庭、群聊"),
+    ("project.companion_system", "给哥哥搭东西、Ombre/Gateway/bridge、记忆系统、代码、模型、MCP、硬件"),
+    ("project.work", "工作、实习、求职、简历、职场"),
+    ("project.academic", "学业、论文、课程、作业、答辩"),
+    ("project.personal", "个人项目、创作、阅读、手工"),
+    ("general", "不确定或无法细分"),
+]
 
 DOMAIN_ALIASES = {
     "relationship": {
@@ -414,6 +462,10 @@ def domain_parent(domain: str) -> str:
 def domain_label(domain: str) -> str:
     value = _clean(domain)
     return DOMAIN_LABELS.get(value, value or DOMAIN_LABELS["general"])
+
+
+def domain_prompt_options_text() -> str:
+    return "\n".join(f"- {key}：{description}" for key, description in DOMAIN_PROMPT_CHOICES)
 
 
 def domain_options() -> list[dict[str, str]]:

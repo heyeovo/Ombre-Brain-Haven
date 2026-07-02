@@ -96,6 +96,69 @@ async def test_dehydrator_direct_capsule_uses_separate_cache(test_config):
 
 
 @pytest.mark.asyncio
+async def test_dehydrator_analyze_uses_canonical_domain_prompt_and_normalizes(test_config):
+    cfg = deepcopy(test_config)
+    cfg["dehydration"].update(api_key="test-key")
+    dehydrator = Dehydrator(cfg)
+    client = RecordingChatClient(
+        json.dumps(
+            {
+                "domain": ["数字"],
+                "valence": 0.6,
+                "arousal": 0.4,
+                "tags": ["Ombre", "代码"],
+                "suggested_name": "记忆改造",
+                "memory_subject": "event",
+                "memory_layer": "process_event",
+            },
+            ensure_ascii=False,
+        )
+    )
+    dehydrator.client = client
+
+    result = await dehydrator._api_analyze("Ombre-Brain 的 Gateway 记忆改造")
+    system_prompt = client.calls[0]["messages"][0]["content"]
+
+    assert result["domain"] == ["project.companion_system"]
+    assert "project.companion_system" in system_prompt
+    assert "日常:" not in system_prompt
+    assert "数字:" not in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_dehydrator_digest_normalizes_legacy_domain_output(test_config):
+    cfg = deepcopy(test_config)
+    cfg["dehydration"].update(api_key="test-key")
+    dehydrator = Dehydrator(cfg)
+    client = RecordingChatClient(
+        json.dumps(
+            [
+                {
+                    "name": "关系边界",
+                    "content": "池又雨不喜欢记忆正文写成来源说明，Haven以后要直接写可用正文。",
+                    "domain": ["恋爱"],
+                    "valence": 0.55,
+                    "arousal": 0.3,
+                    "tags": ["边界"],
+                    "importance": 5,
+                    "memory_subject": "relationship",
+                    "memory_layer": "relationship_lesson",
+                }
+            ],
+            ensure_ascii=False,
+        )
+    )
+    dehydrator.client = client
+
+    result = await dehydrator._api_digest("池又雨不喜欢记忆正文写成来源说明")
+    system_prompt = client.calls[0]["messages"][0]["content"]
+
+    assert result[0]["domain"] == ["relationship"]
+    assert "relationship.communication" in system_prompt
+    assert "未分类" in system_prompt
+
+
+@pytest.mark.asyncio
 async def test_persona_sends_enabled_thinking_mode_when_configured(test_config):
     cfg = deepcopy(test_config)
     cfg["dehydration"]["api_key"] = ""

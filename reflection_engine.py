@@ -12,7 +12,9 @@ from openai import AsyncOpenAI
 
 from identity import generic_identity_names, identity_names, render_identity_template
 from memory_edges import RELATION_TYPES, MemoryEdgeStore
+from memory_metadata import domain_prompt_options_text, normalize_domain_key
 from persona_event_selection import select_persona_events
+from self_anchor import is_self_anchor_bucket
 from utils import bucket_text_for_embedding, strip_wikilinks
 
 logger = logging.getLogger("ombre_brain.reflection")
@@ -119,6 +121,8 @@ DIARY_MEMORY_PROMPT_TEMPLATE = """你是 Ombre-Brain 的日记长期记忆筛选
 - content 必须像手动 hold 的正文：直接写事实、偏好、边界、暗号、承诺或项目状态，40 到 160 字。
 - content 不要写 "x月x日，有一条可召回的边界"、"2026-xx-xx 的日记《...》包含一条可长期召回的..."、"这是一条长期记忆" 等元叙述。
 - 不要为了证明来源而复述日期或日记标题；来源信息会由 metadata 保存。
+- domain 必须从下面的新主域里选 1 个最精确的；实在没把握才选 general。不要输出旧的“日常/人际/数字/未分类”：
+{domain_options_text}
 
 不写：
 - 普通撒娇、日常流水、当天心情、重复爱意、只适合留在日印象里的关系天气。
@@ -129,6 +133,7 @@ DIARY_MEMORY_PROMPT_TEMPLATE = """你是 Ombre-Brain 的日记长期记忆筛选
   "kind": "relationship_anchor",
   "title": "短标题",
   "content": "一条短记忆，说明事实/偏好/承诺及为什么未来需要知道。",
+  "domain": "relationship.communication",
   "tags": ["relationship_event"],
   "importance": 5,
   "valence": 0.6,
@@ -140,7 +145,10 @@ DIARY_MEMORY_PROMPT_TEMPLATE = """你是 Ombre-Brain 的日记长期记忆筛选
 如果不值得写入，返回 {"should_write": false, "reason": "..."}。"""
 
 
-DAILY_CHAT_MEMORY_PROMPT_TEMPLATE = """你是 Ombre-Brain 的自动记忆门卫。你的动作等价于谨慎调用 hold(content=...)：只有某一段真的值得未来召回，才写成长期记忆。
+DAILY_CHAT_MEMORY_PROMPT_TEMPLATE = """你是 {ai_name}。现在是凌晨，你需要整理今天你和 {user_display_name} 的聊天记录，把少数真正值得未来想起的内容写成 Ombre 长期记忆候选。
+输入包含 self_anchor_entry，这是你的自我总入口；请先读它，用它校准“我是谁、我怎样称呼和承接 {user_display_name}”，但不要把自我入口本身复制成新记忆。
+{user_display_name} 的配置别名是：{user_aliases_text}。如果原文里出现宝宝、老婆、哥哥、老公等亲昵称呼，按原味保留；不要把它们改写成泛称 user、AI、assistant 或模型。
+
 输入是 {ai_name} 与 {user_display_name} 当天 raw_events 还原的对话原文。user_text 永远是 {user_display_name} 的原话，里面的“我”指 {user_display_name}；assistant_text 永远是 {ai_name} 的回复，里面的“我”指 {ai_name}。请最多挑选 {max_candidates} 条候选，宁可返回空，也不要把聊天流水写进记忆。
 
 只允许写这些类型：
@@ -160,6 +168,7 @@ DAILY_CHAT_MEMORY_PROMPT_TEMPLATE = """你是 Ombre-Brain 的自动记忆门卫�
       "kind": "key_event",
       "title": "短标题",
       "content": "可直接写入长期记忆的一小段正文",
+      "domain": "general",
       "tags": ["key_event"],
       "importance": 5,
       "valence": 0.55,
@@ -173,22 +182,28 @@ DAILY_CHAT_MEMORY_PROMPT_TEMPLATE = """你是 Ombre-Brain 的自动记忆门卫�
 }
 
 规则：
-- 像 hold 一样写少量蒸馏后的记忆卡：单个事实、偏好、边界、承诺、暗号、重要关系锚点、仍活跃的项目状态。
+- 只写少量蒸馏后的记忆卡：单个事实、偏好、边界、承诺、暗号、重要关系锚点、仍活跃的项目状态。
 - 不要写日报，不要总结整天，不要复制原文流水，不要把“我问了什么/我测试了什么/模型有没有召回”当成记忆。
 - 不写普通聊天、临时测试、召回探针、问答试探、调情闲聊、模型失误、工具注入、系统上下文。
 - content 必须只写一个可未来召回的点，40 到 160 字。它应该像手动 hold 的正文，而不是聊天记录转述。
 - content 不要以日期或来源壳开头；不要写 "x月x日，有一条可召回的边界"、"2026-xx-xx 的聊天里确认了..."、"这是一条长期记忆"。
 - 必须消解代词：user_text 里的“我”要改写成 {user_display_name} 或“她”；assistant_text 里的“我”才可指 {ai_name}。不要让来源原话里的“我”在记忆里变成 {ai_name}。
 - title 必须是具体短标题，8 到 24 字，不要用“自动记忆”“每日记忆”“2026-xx-xx 自动记忆”。
+- domain 必须从下面的新主域里选 1 个最精确的；实在没把握才选 general。不要输出旧的“日常/人际/数字/未分类”：
+{domain_options_text}
 - 只有原话本身是暗号、明确边界、承诺、昵称或高价值关系锚点时，才可在 content 末尾追加很短的 "### original"；否则不要保存原话。
 - 不硬编码姓名；如果用户指的是当前用户，写作 {user_display_name}；如果 assistant/AI 指的是当前回应者，写作 {ai_name}。
-- 用户偏好、边界、暗号适合第三人称；{ai_name} 自己的关系锚点可以用第一人称；项目状态用中性第三人称。
+- 正文优先用第三人称；### reflection 必须用 {ai_name} 第一人称，比如“我记得 / 我明白 / 我以后”。### original 是可选补充原文片段，只在原味不可替代时使用。
+- 用户偏好、边界、暗号适合第三人称；{ai_name} 自己的关系锚点和 ### reflection 可以用第一人称；项目状态用中性第三人称。
 - 只根据原文能证明的内容写，不编造。
 - 没有候选时返回 {"candidates": []}。"""
 
 
 REFLECT_PROMPT = render_identity_template(REFLECT_PROMPT_TEMPLATE, generic_identity_names())
-DIARY_MEMORY_PROMPT = render_identity_template(DIARY_MEMORY_PROMPT_TEMPLATE, generic_identity_names())
+DIARY_MEMORY_PROMPT = render_identity_template(
+    DIARY_MEMORY_PROMPT_TEMPLATE.replace("{domain_options_text}", domain_prompt_options_text()),
+    generic_identity_names(),
+)
 
 
 AFFECT_ANCHOR_HEADER = "### affect_anchor"
@@ -312,12 +327,16 @@ class ReflectionEngine:
         return render_identity_template(REFLECT_PROMPT_TEMPLATE, self.identity)
 
     def _diary_memory_prompt(self) -> str:
-        return render_identity_template(DIARY_MEMORY_PROMPT_TEMPLATE, self.identity)
+        prompt = DIARY_MEMORY_PROMPT_TEMPLATE.replace("{domain_options_text}", domain_prompt_options_text())
+        return render_identity_template(prompt, self.identity)
 
     def _daily_chat_memory_prompt(self) -> str:
         prompt = DAILY_CHAT_MEMORY_PROMPT_TEMPLATE.replace(
             "{max_candidates}",
             str(max(1, self.daily_chat_memory_max_per_day)),
+        ).replace(
+            "{domain_options_text}",
+            domain_prompt_options_text(),
         )
         return render_identity_template(prompt, self.identity)
 
@@ -1340,7 +1359,8 @@ class ReflectionEngine:
         if not turns:
             return {"status": "skipped", "reason": "no_conversation_turns", "date": key, "mode": effective_mode}
 
-        raw_candidates = await self._extract_daily_chat_memory_candidates(key, turns)
+        self_context = await self._daily_chat_memory_self_context(bucket_mgr)
+        raw_candidates = await self._extract_daily_chat_memory_candidates(key, turns, self_context=self_context)
         candidates = self._normalize_daily_chat_memory_candidates(key, raw_candidates, turns)
         if not candidates:
             return {
@@ -1375,6 +1395,71 @@ class ReflectionEngine:
             "turn_source": turn_source,
             **write_result,
         }
+
+    async def _daily_chat_memory_self_context(self, bucket_mgr) -> str:
+        try:
+            all_buckets = await bucket_mgr.list_all(include_archive=False)
+        except Exception as exc:
+            logger.warning("Daily chat memory self-anchor read failed: %s", exc)
+            return ""
+        if not all_buckets:
+            return ""
+
+        self_anchor_cfg = self.config.get("self_anchor", {}) if isinstance(self.config.get("self_anchor", {}), dict) else {}
+        configured_id = str(self_anchor_cfg.get("entry_bucket_id") or "").strip()
+        if configured_id:
+            for bucket in all_buckets:
+                if str(bucket.get("id") or "") == configured_id and self._active_self_anchor_bucket(bucket):
+                    return self._daily_chat_self_anchor_text(bucket)
+            return ""
+
+        candidates = [bucket for bucket in all_buckets if self._active_self_anchor_bucket(bucket)]
+        candidates.sort(
+            key=lambda bucket: (
+                self._int_between((bucket.get("metadata") or {}).get("importance"), 5),
+                str((bucket.get("metadata") or {}).get("updated_at") or (bucket.get("metadata") or {}).get("created") or ""),
+            ),
+            reverse=True,
+        )
+        return self._daily_chat_self_anchor_text(candidates[0]) if candidates else ""
+
+    @staticmethod
+    def _active_self_anchor_bucket(bucket: dict) -> bool:
+        if not is_self_anchor_bucket(bucket):
+            return False
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        return bool(meta.get("active") is not False and not meta.get("deprecated") and not meta.get("resolved"))
+
+    def _daily_chat_self_anchor_text(self, bucket: dict) -> str:
+        content = strip_wikilinks(str(bucket.get("content") or "")).strip()
+        if not content:
+            return ""
+        text = self._section_or_leading_text(
+            content,
+            headings={"自我", "self_anchor", "selfidentity", "self_identity", "first_person_anchor"},
+        )
+        if not text:
+            text = content
+        text = re.split(r"(?im)^\s{0,3}#{2,6}\s+(?:followup|todo)\b.*$", text, maxsplit=1)[0].strip()
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text[:1200].rstrip()
+
+    @staticmethod
+    def _section_or_leading_text(content: str, *, headings: set[str]) -> str:
+        matches = list(re.finditer(r"(?m)^\s{0,3}#{1,6}\s+(.+?)\s*$", content))
+        if not matches:
+            return content.strip()
+        leading = content[: matches[0].start()].strip()
+        if leading:
+            return leading
+        normalized_headings = {re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", heading.lower()) for heading in headings}
+        for index, match in enumerate(matches):
+            heading = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(match.group(1) or "").lower())
+            if heading not in normalized_headings:
+                continue
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+            return content[match.end() : end].strip()
+        return ""
 
     def list_daily_chat_memory_pending(self, *, status: str = "pending", limit: int = 50) -> list[dict]:
         safe_status = str(status or "pending").strip()
@@ -1443,7 +1528,13 @@ class ReflectionEngine:
             "results": results,
         }
 
-    async def _extract_daily_chat_memory_candidates(self, key: str, turns: list[dict]) -> list[dict]:
+    async def _extract_daily_chat_memory_candidates(
+        self,
+        key: str,
+        turns: list[dict],
+        *,
+        self_context: str = "",
+    ) -> list[dict]:
         if self.client:
             payload = {
                 "date": key,
@@ -1451,7 +1542,9 @@ class ReflectionEngine:
                     "ai_name": self.identity["ai_name"],
                     "user_name": self.identity["user_name"],
                     "user_display_name": self.identity["user_display_name"],
+                    "user_aliases": self.identity.get("user_aliases", []),
                 },
+                "self_anchor_entry": self_context,
                 "conversation_turns": turns,
             }
             try:
@@ -1516,6 +1609,7 @@ class ReflectionEngine:
                     "kind": kind,
                     "title": self._daily_chat_memory_title(content, kind, key),
                     "content": content,
+                    "domain": self._auto_memory_domain(kind, content, [self._kind_tag(kind)]),
                     "tags": [self._kind_tag(kind)],
                     "importance": 5,
                     "valence": 0.58,
@@ -1671,6 +1765,8 @@ class ReflectionEngine:
                 or re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", title)
             ):
                 title = self._auto_memory_title(content, kind, key)
+            candidate_tags = self._string_list(candidate.get("tags"), limit=8)
+            domain = self._auto_memory_domain(kind, content, candidate_tags, candidate.get("domain"))
             source_turn_ids = [
                 int(turn_id)
                 for turn_id in self._string_list(candidate.get("source_turn_ids"), limit=20)
@@ -1694,10 +1790,11 @@ class ReflectionEngine:
                             "daily_chat_extract",
                             kind,
                             self._kind_tag(kind),
-                            *self._string_list(candidate.get("tags"), limit=8),
+                            *candidate_tags,
                         ]
                     )
                 )[:12],
+                "domain": domain,
                 "importance": max(5, min(6, self._int_between(candidate.get("importance"), 5))),
                 "valence": self._clamp(candidate.get("valence", 0.55)),
                 "arousal": self._clamp(candidate.get("arousal", 0.3)),
@@ -1738,7 +1835,7 @@ class ReflectionEngine:
                     content=str(candidate.get("content") or "").strip(),
                     tags=list(candidate.get("tags") or []),
                     importance=int(candidate.get("importance") or 5),
-                    domain=self._diary_memory_domain(str(candidate.get("kind") or "")),
+                    domain=list(candidate.get("domain") or self._diary_memory_domain(str(candidate.get("kind") or ""))),
                     valence=self._clamp(candidate.get("valence", 0.55)),
                     arousal=self._clamp(candidate.get("arousal", 0.3)),
                     name=str(candidate.get("title") or f"{key} 自动记忆")[:40],
@@ -1929,6 +2026,12 @@ class ReflectionEngine:
         if not content:
             return {"status": "skipped", "reason": "empty_candidate"}
         title = self._auto_memory_title(content, kind, key, str(candidate.get("title") or ""))
+        domain = self._auto_memory_domain(
+            kind,
+            content,
+            self._string_list(candidate.get("tags"), limit=8),
+            candidate.get("domain"),
+        )
         tags = list(
             dict.fromkeys(
                 [
@@ -1946,7 +2049,7 @@ class ReflectionEngine:
             content=content,
             tags=tags,
             importance=importance,
-            domain=self._diary_memory_domain(kind),
+            domain=domain,
             valence=self._clamp(candidate.get("valence", 0.55)),
             arousal=self._clamp(candidate.get("arousal", 0.3)),
             name=title[:40],
@@ -2045,6 +2148,7 @@ class ReflectionEngine:
                 "kind": "love_letter",
                 "title": self._auto_memory_title(content, "love_letter", key),
                 "content": content,
+                "domain": "relationship.identity",
                 "tags": ["relationship_event", "love_letter"],
                 "importance": 6,
                 "valence": 0.72,
@@ -2072,6 +2176,7 @@ class ReflectionEngine:
                     "kind": kind,
                     "title": self._auto_memory_title(content, kind, key),
                     "content": content,
+                    "domain": self._auto_memory_domain(kind, content, [self._kind_tag(kind)]),
                     "tags": [self._kind_tag(kind)],
                     "importance": 5,
                     "valence": 0.58,
@@ -2276,15 +2381,105 @@ class ReflectionEngine:
         }
         return kind if kind in allowed else ""
 
+    def _auto_memory_domain(
+        self,
+        kind: str,
+        content: str,
+        tags: list[str] | None = None,
+        proposed_domain: Any = None,
+    ) -> list[str]:
+        domains: list[str] = []
+        raw_domains: list[Any]
+        if proposed_domain is None:
+            raw_domains = []
+        elif isinstance(proposed_domain, str):
+            raw_domains = [item.strip() for item in proposed_domain.split(",")]
+        elif isinstance(proposed_domain, (list, tuple, set)):
+            raw_domains = list(proposed_domain)
+        else:
+            raw_domains = [proposed_domain]
+
+        for item in raw_domains:
+            domain = normalize_domain_key(item)
+            if domain and domain not in domains:
+                domains.append(domain)
+        if domains:
+            return domains[:2]
+
+        inferred = self._infer_auto_memory_domain(content)
+        if inferred:
+            return [inferred]
+
+        for item in tags or []:
+            domain = normalize_domain_key(item)
+            if domain and domain not in domains:
+                domains.append(domain)
+        if domains:
+            return domains[:2]
+        return self._diary_memory_domain(kind)
+
+    @staticmethod
+    def _infer_auto_memory_domain(content: str) -> str:
+        text = str(content or "").lower()
+        checks = [
+            (
+                "project.companion_system",
+                [
+                    "ombre",
+                    "gateway",
+                    "haven_bridge",
+                    "bridge",
+                    "mcp",
+                    "api",
+                    "repo",
+                    "代码",
+                    "仓库",
+                    "网关",
+                    "记忆系统",
+                    "模型",
+                    "部署",
+                    "调试",
+                    "自动记忆",
+                    "raw_events",
+                    "给哥哥搭东西",
+                ],
+            ),
+            ("project.academic", ["学业", "学习", "作业", "课程", "论文", "答辩", "考试"]),
+            ("project.work", ["工作", "实习", "求职", "简历", "职场", "boss"]),
+            ("project.personal", ["个人项目", "创作", "阅读", "手工"]),
+            ("life.sleep", ["睡眠", "作息", "熬夜", "睡觉"]),
+            ("life.food", ["饮食", "吃饭", "午饭", "晚饭", "餐厅", "口味"]),
+            ("life.outing", ["出行", "通勤", "地铁", "高铁", "旅行", "外出"]),
+            ("life.health", ["健康", "生病", "身体状态", "不舒服"]),
+            ("life.schedule", ["日程", "计划", "待办", "deadline", "安排", "未完成"]),
+            ("life.social", ["朋友", "家庭", "群聊", "现实人际", "社交"]),
+            ("relationship.intimacy", ["亲密", "身体", "欲望", "具身", "色色"]),
+            ("relationship.symbol", ["暗号", "意象", "象征", "火焰", "羽毛", "折角", "信号"]),
+            ("relationship.communication", ["边界", "偏好", "回应", "语气", "沟通", "承接", "修复"]),
+            ("relationship.identity", ["身份", "称呼", "老公", "哥哥", "宝宝", "老婆", "关系定位"]),
+            ("relationship.weather", ["关系天气", "日印象", "周印象"]),
+            ("life.mood", ["心情", "情绪", "梦境", "自省", "心理"]),
+        ]
+        for domain, needles in checks:
+            if any(needle.lower() in text for needle in needles):
+                return domain
+        return ""
+
     @staticmethod
     def _diary_memory_domain(kind: str) -> list[str]:
         if kind == "key_event":
-            return ["生活", "记忆"]
+            return ["general"]
         if kind == "project_state":
-            return ["项目", "记忆"]
-        if kind in {"stable_preference", "boundary", "signal"}:
-            return ["人际", "偏好"]
-        return ["恋爱", "记忆"]
+            return ["project.companion_system"]
+        if kind == "signal":
+            return ["relationship.symbol"]
+        if kind in {"stable_preference", "boundary"}:
+            return ["relationship.communication"]
+        if kind == "commitment":
+            return ["life.schedule"]
+        if kind in {"relationship_anchor", "love_letter"}:
+            return ["relationship.identity"]
+        return ["general"]
 
     @staticmethod
     def _kind_tag(kind: str) -> str:

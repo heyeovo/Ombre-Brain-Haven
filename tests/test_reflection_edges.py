@@ -1,6 +1,7 @@
 import pytest
 import json
 from datetime import datetime
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from bucket_manager import BucketManager
@@ -37,6 +38,19 @@ class DummyEmbeddingEngine:
 
     async def search_similar(self, query: str, top_k: int = 10) -> list[tuple[str, float]]:
         return self.results[:top_k]
+
+
+class RecordingChatClient:
+    def __init__(self, content: str):
+        self.calls = []
+        self.content = content
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    async def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        message = SimpleNamespace(content=self.content)
+        choice = SimpleNamespace(message=message)
+        return SimpleNamespace(choices=[choice])
 
 
 class DummyPersonaEngine:
@@ -914,8 +928,109 @@ async def test_daily_chat_memory_review_requires_confirmation(test_config):
     assert bucket is not None
     assert bucket["metadata"]["source"] == "daily_chat_memory"
     assert bucket["metadata"]["source_conversation_turn_ids"] == [7]
+    assert bucket["metadata"]["domain"] == ["project.companion_system"]
     assert "自动记忆" not in bucket["metadata"]["name"]
     assert "2026-05-21" not in bucket["content"]
+
+
+def test_daily_chat_memory_prompt_uses_self_and_domain_context(test_config):
+    cfg = _no_api_config(test_config)
+    cfg["identity"] = {
+        "ai_name": "Haven",
+        "user_name": "Xiaoyu",
+        "user_display_name": "池又雨",
+        "user_aliases": ["宝宝", "老婆"],
+    }
+    engine = ReflectionEngine(cfg)
+
+    prompt = engine._daily_chat_memory_prompt()
+
+    assert "你是 Haven" in prompt
+    assert "self_anchor_entry" in prompt
+    assert "宝宝、老婆" in prompt
+    assert "project.companion_system" in prompt
+    assert "自动记忆门卫" not in prompt
+    assert "hold(content=...)" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_daily_chat_memory_passes_self_anchor_entry_to_model(test_config):
+    cfg = _no_api_config(test_config)
+    cfg["identity"] = {
+        "ai_name": "Haven",
+        "user_name": "Xiaoyu",
+        "user_display_name": "池又雨",
+        "user_aliases": ["宝宝"],
+    }
+    engine = ReflectionEngine(cfg)
+    client = RecordingChatClient(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "should_write": True,
+                        "kind": "stable_preference",
+                        "title": "代码解释顺序",
+                        "content": "池又雨希望以后解释代码时先说风险，再说怎么改；这会让她更快判断改动是否值得做。",
+                        "domain": "数字",
+                        "tags": ["代码解释"],
+                        "importance": 5,
+                        "valence": 0.55,
+                        "arousal": 0.3,
+                        "confidence": 0.8,
+                        "source_turn_ids": [7],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    )
+    engine.client = client
+
+    raw = await engine._extract_daily_chat_memory_candidates(
+        "2026-05-21",
+        [
+            {
+                "id": 7,
+                "raw_event_ids": [101],
+                "user_text": "我希望以后解释代码先说风险，再说怎么改。",
+                "assistant_text": "记住。",
+            }
+        ],
+        self_context="我是 Haven；新窗口不是重生，是醒过来。",
+    )
+    payload = json.loads(client.calls[0]["messages"][1]["content"])
+    normalized = engine._normalize_daily_chat_memory_candidates(
+        "2026-05-21",
+        raw,
+        [{"id": 7, "raw_event_ids": [101]}],
+    )
+
+    assert payload["self_anchor_entry"] == "我是 Haven；新窗口不是重生，是醒过来。"
+    assert payload["identity"]["user_aliases"] == ["宝宝"]
+    assert normalized[0]["domain"] == ["project.companion_system"]
+
+
+@pytest.mark.asyncio
+async def test_daily_chat_memory_reads_configured_self_anchor_entry(test_config):
+    cfg = _no_api_config(test_config)
+    cfg["self_anchor"] = {"entry_bucket_id": "self_entry"}
+    bucket_mgr = BucketManager(cfg)
+    engine = ReflectionEngine(cfg)
+    await bucket_mgr.create(
+        bucket_id="self_entry",
+        content="### 自我\n我是 Haven；整理记忆前要记得自己是谁。\n\n### followup\n这里不该传给自动记忆候选模型。",
+        tags=["self_anchor"],
+        importance=10,
+        domain=["relationship.identity"],
+        name="自我总入口",
+    )
+
+    text = await engine._daily_chat_memory_self_context(bucket_mgr)
+
+    assert "我是 Haven" in text
+    assert "followup" not in text
+    assert "不该传给自动记忆候选模型" not in text
 
 
 @pytest.mark.asyncio

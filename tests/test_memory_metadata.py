@@ -99,7 +99,7 @@ def test_self_anchor_is_not_inferred_from_anchor_substrings():
     assert "anchor" not in view["flags"]
 
 
-def test_self_anchor_is_only_inferred_from_explicit_metadata():
+def test_self_anchor_is_inferred_from_explicit_metadata_and_exact_legacy_tags():
     title_bucket = {
         "metadata": {
             "name": "自我表达方式与记忆系统",
@@ -129,16 +129,33 @@ def test_self_anchor_is_only_inferred_from_explicit_metadata():
             "tags": [],
         }
     }
-    tag_only_bucket = {
+    self_anchor_tag_bucket = {
         "metadata": {
             "name": "任何标题都可以",
             "domain": ["恋爱"],
             "tags": ["self_anchor"],
         }
     }
+    self_identity_tag_bucket = {
+        "metadata": {
+            "name": "任何标题都可以",
+            "domain": ["恋爱"],
+            "tags": ["self_identity"],
+        }
+    }
+    kind_bucket = {
+        "metadata": {
+            "name": "任何标题都可以",
+            "domain": ["恋爱"],
+            "tags": [],
+            "kind": "first_person_anchor",
+        }
+    }
 
     assert "self_anchor" not in normalize_memory_metadata(title_bucket)["flags"]
     assert "self_anchor" not in normalize_memory_metadata(main_anchor_bucket)["flags"]
-    assert "self_anchor" not in normalize_memory_metadata(tag_only_bucket)["flags"]
     assert "self_anchor" in normalize_memory_metadata(explicit_bucket)["flags"]
     assert "self_anchor" in normalize_memory_metadata(explicit_domain_bucket)["flags"]
+    assert "self_anchor" in normalize_memory_metadata(self_anchor_tag_bucket)["flags"]
+    assert "self_anchor" in normalize_memory_metadata(self_identity_tag_bucket)["flags"]
+    assert "self_anchor" in normalize_memory_metadata(kind_bucket)["flags"]

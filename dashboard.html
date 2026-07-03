@@ -3871,7 +3871,12 @@ function isSelfAnchorBucket(bucket) {
   if (bucket.self_anchor) return true;
   if (bucketFlags(bucket).includes('self_anchor')) return true;
   var tags = bucketTags(bucket);
-  return tags.includes('自我') || tags.includes('self_anchor') || tags.includes('first_person_anchor');
+  return tags.includes('自我')
+    || tags.includes('self_anchor')
+    || tags.includes('self_identity')
+    || tags.includes('self-identity')
+    || tags.includes('first_person_anchor')
+    || tags.includes('first-person-anchor');
 }
 
 function isReflectionEventBucket(bucket) {

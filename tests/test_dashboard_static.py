@@ -281,6 +281,7 @@ def test_dashboard_keeps_compact_legacy_filter_row_and_compatible_filters():
     filter_block = html.split("function filterBuckets", 1)[1].split("function bucketBulkDeleteBlockReason", 1)[0]
 
     assert "function isSelfAnchorBucket" in html
+    assert "tags.includes('self_identity')" in html
     assert "tag:self_anchor" in build_block
     assert "label: '自我'" in build_block
     assert "label: '全部'" in build_block

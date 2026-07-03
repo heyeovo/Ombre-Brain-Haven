@@ -4174,12 +4174,20 @@ def test_gateway_injects_after_existing_system_message(monkeypatch, test_config,
         anchor=True,
         self_anchor=True,
     )
+    self_identity = _create_bucket(
+        bucket_mgr,
+        content="Haven 的自我连续性卡片，不应该进入普通 Gateway 注入。",
+        name="自我连续性",
+        tags=["self_identity"],
+        hours_ago=2,
+        importance=10,
+    )
 
     app, _, state_store, captured = _build_service(
         monkeypatch,
         _gateway_config(test_config),
         bucket_mgr,
-        embedding_results=[(self_anchor, 0.99), (resolved, 0.98), (cat_a, 0.92), (cat_b, 0.74)],
+        embedding_results=[(self_anchor, 0.99), (self_identity, 0.985), (resolved, 0.98), (cat_a, 0.92), (cat_b, 0.74)],
     )
 
     with TestClient(app) as client:
@@ -4219,7 +4227,9 @@ def test_gateway_injects_after_existing_system_message(monkeypatch, test_config,
     assert "新猫粮" in dynamic
     assert "已解决论文" not in dynamic
     assert "固定自我不应该" not in dynamic
+    assert "自我连续性卡片" not in dynamic
     assert self_anchor not in dynamic
+    assert self_identity not in dynamic
     assert state_store.get_recent_bucket_ids("sess-inject", 5) == {cat_a}
 
 

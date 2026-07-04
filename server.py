@@ -132,21 +132,8 @@ decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引�
 import_engine = ImportEngine(config, bucket_mgr, dehydrator, embedding_engine)  # Import engine / 导入引擎
 
 # --- event_time migration: backfill missing event_time for existing buckets ---
-# --- event_time 存量迁移：补全缺失的 event_time 字段 ---
-try:
-    all_existing = await bucket_mgr.list_all(include_archive=True)
-    migrated = 0
-    for b in all_existing:
-        meta = b.get("metadata", {})
-        if "event_time" not in meta:
-            created = meta.get("created", "")
-            if created:
-                await bucket_mgr.update(b["id"], event_time=created)
-                migrated += 1
-    if migrated:
-        logger.info(f"event_time migration: backfilled {migrated} buckets with event_time=created")
-except Exception as e:
-    logger.warning(f"event_time migration skipped: {e}")
+# See bucket_manager.py __init__ — runs sync at import time, no await needed
+# --- event_time 存量迁移：在 bucket_mgr 初始化时同步完成，无需 await ---
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable

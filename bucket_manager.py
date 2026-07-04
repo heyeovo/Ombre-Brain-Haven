@@ -118,6 +118,42 @@ class BucketManager:
         self._load_hit_stats()
         atexit.register(self._flush_hit_stats, True)
 
+        # --- event_time migration: backfill missing event_time for all buckets ---
+        # --- event_time 存量迁移：补全缺失的 event_time 字段（同步操作，不依赖 await）---
+        self._migrate_event_time()
+
+    def _migrate_event_time(self) -> None:
+        """Backfill event_time = created for buckets that don't have it yet."""
+        all_dirs = [self.permanent_dir, self.dynamic_dir, self.feel_dir,
+                     self.archive_dir]
+        migrated = 0
+        for dir_path in all_dirs:
+            if not os.path.exists(dir_path):
+                continue
+            for root, _, files in os.walk(dir_path):
+                for filename in files:
+                    if not filename.endswith(".md"):
+                        continue
+                    file_path = os.path.join(root, filename)
+                    try:
+                        post = frontmatter.load(file_path)
+                        if "event_time" in post.metadata:
+                            continue
+                        created = post.get("created", "")
+                        if not created:
+                            continue
+                        post["event_time"] = created
+                        with open(file_path, "w", encoding="utf-8") as f:
+                            f.write(frontmatter.dumps(post))
+                        migrated += 1
+                    except Exception:
+                        pass
+        if migrated:
+            logger.info(
+                f"event_time migration: backfilled {migrated} buckets "
+                f"with event_time=created"
+            )
+
     # Runtime-tunable scoring keys whitelist (for /api/scoring-config)
     SCORING_OVERRIDE_DEFAULTS = {
         "content_weight": 1.0,

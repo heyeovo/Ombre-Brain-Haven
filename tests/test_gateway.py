@@ -12722,6 +12722,11 @@ def test_activated_axis_suppresses_diffusion_target_outside_axis(
     assert related_memory == ""
     assert target_rows
     assert target_rows[0]["suppression_reason"] == "activated_axis_mismatch"
+    axis_trace = target_rows[0]["diffusion_trace"]
+    assert axis_trace["gate"]["allowed"] is False
+    assert axis_trace["gate"]["reason"] == "activated_axis_mismatch"
+    assert axis_trace["final"]["status"] == "suppressed"
+    assert axis_trace["final"]["suppression_reason"] == "activated_axis_mismatch"
 
 
 def test_activated_axis_rejects_high_confidence_technical_domain_diffusion(

@@ -10442,6 +10442,10 @@ class GatewayService:
             and confidence >= max(self.diffusion_inject_min_confidence + 0.2, 0.80)
             and not self._axis_lite_has_technical_axis(query_plan)
         )
+        explicit_edge_axis_bypass = (
+            strong_explicit_edge
+            and self._diffusion_explicit_edge_can_bridge_axis(query_plan)
+        )
         strong_local_chain = (
             bool(row.get("chain_bundle"))
             and path_len <= 2
@@ -10454,7 +10458,7 @@ class GatewayService:
             if not (
                 has_caution_path
                 or has_source_record_topic_evidence
-                or strong_explicit_edge
+                or explicit_edge_axis_bypass
                 or strong_local_chain
                 or (why == "semantic_neighbor" and confidence >= self.high_confidence_semantic_score)
             ):
@@ -10465,7 +10469,7 @@ class GatewayService:
             if not (
                 has_caution_path
                 or has_source_record_topic_evidence
-                or strong_explicit_edge
+                or explicit_edge_axis_bypass
             ):
                 return False, "activated_axis_mismatch"
         if strong_local_chain:
@@ -10484,6 +10488,12 @@ class GatewayService:
                 return True, ""
             return False, "query_topic_evidence_missing"
         return False, "unknown_diffusion_reason"
+
+    def _diffusion_explicit_edge_can_bridge_axis(self, query_plan: Any) -> bool:
+        if not bool(getattr(query_plan, "activated_axis_multi", False)):
+            return False
+        query = str(getattr(query_plan, "query", "") or "")
+        return bool(query and self.recall_policy.has_axis_relation_marker(query))
 
     def _diffusion_candidate_rank_key(self, row: dict[str, Any]) -> tuple:
         why_priority = {

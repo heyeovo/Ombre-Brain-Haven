@@ -233,6 +233,7 @@ class BucketManager:
         author: str = "",
         locked: bool = False,
         unlock_hint: str = "",
+        event_time: str = "",
     ) -> str:
         """
         Create a new memory bucket, return bucket ID.
@@ -276,6 +277,7 @@ class BucketManager:
             "created": now_iso(),
             "last_active": now_iso(),
             "activation_count": 0,
+            "event_time": event_time or now_iso(),
         }
         if pinned:
             metadata["pinned"] = True
@@ -470,6 +472,8 @@ class BucketManager:
             post["unlock_hint"] = kwargs["unlock_hint"]
         if "related" in kwargs:
             post["related"] = kwargs["related"]
+        if "event_time" in kwargs:
+            post["event_time"] = kwargs["event_time"]
 
         # --- Auto-refresh activation time / 自动刷新激活时间 ---
         # 修改：内容变更也不会刷新激活时间
@@ -1454,6 +1458,13 @@ class BucketManager:
 
             dest = safe_path(archive_subdir, os.path.basename(file_path))
 
+            # Preserve feel/wish flags in tags before overwriting type / 保留 feel/wish 标记
+            original_type = post.get("type", "")
+            if original_type == "feel":
+                tags = post.get("tags", [])
+                if isinstance(tags, list) and "feel" not in tags:
+                    tags.insert(0, "feel")
+                    post["tags"] = tags
             # Update type marker then move file / 更新类型标记后移动文件
             post["type"] = "archived"
             with open(file_path, "w", encoding="utf-8") as f:
@@ -1483,6 +1494,9 @@ class BucketManager:
             os.makedirs(dynamic_subdir, exist_ok=True)
             dest = safe_path(dynamic_subdir, os.path.basename(file_path))
             post["type"] = "dynamic"
+            # Restore feel type if tags indicate it was a feel bucket / 恢复 feel 类型
+            if isinstance(post.get("tags"), list) and "feel" in post["tags"]:
+                post["type"] = "feel"
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(frontmatter.dumps(post))
             shutil.move(file_path, str(dest))

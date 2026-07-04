@@ -131,6 +131,23 @@ dehydrator = Dehydrator(config)                      # Dehydrator / 脱水器
 decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引擎
 import_engine = ImportEngine(config, bucket_mgr, dehydrator, embedding_engine)  # Import engine / 导入引擎
 
+# --- event_time migration: backfill missing event_time for existing buckets ---
+# --- event_time 存量迁移：补全缺失的 event_time 字段 ---
+try:
+    all_existing = await bucket_mgr.list_all(include_archive=True)
+    migrated = 0
+    for b in all_existing:
+        meta = b.get("metadata", {})
+        if "event_time" not in meta:
+            created = meta.get("created", "")
+            if created:
+                await bucket_mgr.update(b["id"], event_time=created)
+                migrated += 1
+    if migrated:
+        logger.info(f"event_time migration: backfilled {migrated} buckets with event_time=created")
+except Exception as e:
+    logger.warning(f"event_time migration skipped: {e}")
+
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
 # stdio mode ignores host (no network)
@@ -360,6 +377,7 @@ async def breath_hook(request):
         unresolved = [b for b in all_buckets
                       if not b["metadata"].get("resolved", False)
                       and b["metadata"].get("type") not in ("permanent", "feel")
+                      and "journey" not in (b["metadata"].get("domain") or [])
                       and not b["metadata"].get("pinned")
                       and not b["metadata"].get("protected")]
         scored = sorted(unresolved, key=lambda b: decay_engine.calculate_score(b["metadata"]), reverse=True)
@@ -577,6 +595,7 @@ async def breath(
             b for b in all_buckets
             if int(b["metadata"].get("importance", 0)) >= importance_min
             and b["metadata"].get("type") not in ("feel",)
+            and "journey" not in (b["metadata"].get("domain") or [])
         ]
         filtered.sort(key=lambda b: int(b["metadata"].get("importance", 0)), reverse=True)
         filtered = filtered[:20]
@@ -599,6 +618,44 @@ async def breath(
             except Exception as e:
                 logger.warning(f"importance_min dehydrate failed: {e}")
         return "\n---\n".join(results) if results else "没有可以展示的记忆。"
+
+    # --- Journey retrieval: domain="journey" — 轨迹桶独立通道 ---
+    # --- 轨迹检索：按 event_time 倒序，不受常规浮现限制 ---
+    if domain.strip().lower() == "journey":
+        try:
+            all_buckets = await bucket_mgr.list_all(include_archive=False)
+            journeys = [
+                b for b in all_buckets
+                if "journey" in (b["metadata"].get("domain") or [])
+                and b["metadata"].get("type") not in ("feel", "archived")
+            ]
+            journeys.sort(
+                key=lambda b: b["metadata"].get("event_time", b["metadata"].get("created", "")),
+                reverse=True,
+            )
+            journeys = journeys[:max_results]
+            if not journeys:
+                return "还没有轨迹桶。"
+            results = []
+            token_used = 0
+            for j in journeys:
+                meta = j["metadata"]
+                event_time = meta.get("event_time", meta.get("created", ""))
+                name = meta.get("name", j["id"])
+                try:
+                    clean_meta = {k: v for k, v in meta.items() if k != "tags"}
+                    summary = await dehydrator.dehydrate(strip_wikilinks(j["content"]), clean_meta)
+                    t = count_tokens_approx(summary)
+                    if token_used + t > max_tokens:
+                        break
+                    results.append(f"[{event_time}] [bucket_id:{j['id']}] {name}\n{summary}")
+                    token_used += t
+                except Exception as e:
+                    logger.warning(f"Journey dehydrate failed / 轨迹脱水失败: {e}")
+            return "\n---\n".join(results) if results else "轨迹桶内容无法展示。"
+        except Exception as e:
+            logger.error(f"Journey retrieval failed / 轨迹检索失败: {e}")
+            return "读取轨迹桶失败。"
 
     # --- Feel retrieval: domain="feel" is a special channel ---
     # --- Feel 检索：domain="feel" 是独立入口 ---
@@ -855,8 +912,20 @@ async def breath(
         matches.sort(key=lambda b: b.get("score", 0), reverse=True)
         matches = matches[:max_results]
 
+    # --- Exclude journey domain from normal search / 排除轨迹桶 ---
+    # Only include journey when explicitly requested via domain="journey"
+    if domain.strip().lower() != "journey":
+        matches = [
+            b for b in matches
+            if "journey" not in (b.get("metadata", {}).get("domain") or [])
+        ]
+
     results = []
     token_used = 0
+
+    # --- 收集主结果 + 关联去重：记录所有已出现过的 bucket_id ---
+    # --- 避免 A→B, B→A 循环关联导致重复返回 ---
+    seen_ids = {b["id"] for b in matches}
 
     # --- Pinned/protected buckets participate in normal scoring (importance=10
     # --- gives them enough boost); no forced top-insertion here anymore —
@@ -888,10 +957,14 @@ async def breath(
 
             # --- 关系边：命中桶若有 related 字段，附带关联桶摘要 ---
             # --- 不占主结果名额(max_results只数主结果)，但仍受 max_tokens 约束 ---
+            # --- seen_ids 去重：已出现在主结果中的桶不再重复关联 ---
             related_ids = clean_meta.get("related") or []
             for rel_id in related_ids[:2]:  # 每条最多带2个关联，避免一条带出一长串
                 if token_used >= max_tokens:
                     break
+                if rel_id in seen_ids:
+                    continue   # 已出现（主结果或其他桶的关联），跳过
+                seen_ids.add(rel_id)
                 try:
                     rel_bucket = await bucket_mgr.get(rel_id)
                     if not rel_bucket:
@@ -1551,6 +1624,7 @@ async def api_buckets(request):
                 # Noise = resolved + importance==1 (user-marked soft-delete)
                 # 噪声 = 已解决 + importance为1（用户标记的软删除）
                 "noise": bool(meta.get("resolved", False) and meta.get("importance") == 1),
+                "event_time": meta.get("event_time", meta.get("created", "")),
             })
         result.sort(key=lambda x: x["score"], reverse=True)
         return JSONResponse(result)
@@ -1641,7 +1715,7 @@ async def api_update_bucket(request):
         "name", "domain", "valence", "arousal", "importance", "tags",
         "resolved", "pinned", "digested", "content",
         "wish", "todo", "todo_done", "author", "locked", "unlock_hint", "related",
-        "model_valence",
+        "model_valence", "event_time",
     }
     updates = {k: v for k, v in body.items() if k in allowed_fields}
     if not updates:

@@ -566,7 +566,7 @@ async def breath(
     max_results: int = 20,
     importance_min: int = -1,
 ) -> str:
-    """检索/浮现记忆。不传query或传空=自动浮现,有query=关键词检索。max_tokens控制返回总token上限(默认10000)。domain逗号分隔,valence/arousal 0~1(-1忽略)。max_results控制返回数量上限(默认20,最大50)。importance_min>=1时按重要度批量拉取(不走语义搜索,按importance降序返回最多20条)。domain="journal"读取独立日记通道(上锁的桶只显示标题和提示)。"""
+    """检索/浮现记忆。不传query或传空=自动浮现,有query=关键词检索。max_tokens控制返回总token上限(默认10000)。domain可选值:不传(普通浮现/搜索)、"feel"(读感受)、"journey"(读轨迹桶,按event_time倒序)、"journal"(读日记)。valence/arousal 0~1(-1忽略)。max_results控制返回数量上限(默认20,最大50)。importance_min>=1时按重要度批量拉取。"""
     await decay_engine.ensure_started()
     max_results = min(max_results, 50)
     max_tokens = min(max_tokens, 20000)
@@ -997,6 +997,7 @@ async def hold(
     importance: int = 5,
     pinned: bool = False,
     feel: bool = False,
+    journey: bool = False,
     source_bucket: str = "",    valence: float = -1,
     arousal: float = -1,
     wish: bool = False,
@@ -1007,7 +1008,7 @@ async def hold(
     locked: bool = False,
     unlock_hint: str = "",
 ) -> str:
-    """存储单条记忆,自动打标+合并。tags逗号分隔,importance 1-10。pinned=True创建永久钉选桶。feel=True存储你的第一人称感受(不参与普通浮现)。source_bucket=被消化的记忆桶ID(feel模式下,标记源记忆为已消化)。wish=True打上长期悬念标签。todo=附着待办内容,todo_done=是否已完成。journal=True存进独立日记通道(只能breath(domain="journal")读取),author=言之/小羊/共同,locked=True上锁(配合unlock_hint:日期或密码)。"""
+    """存储单条记忆,自动打标+合并。tags逗号分隔,importance 1-10。pinned=True创建永久钉选桶。feel=True存储你的第一人称感受(不参与普通浮现)。journey=True存为轨迹桶(domain含journey,不参与普通浮现/搜索,需breath(domain="journey")读取)。source_bucket=被消化的记忆桶ID(feel模式下,标记源记忆为已消化)。wish=True打上长期悬念标签。todo=附着待办内容,todo_done=是否已完成。journal=True存进独立日记通道(只能breath(domain="journal")读取),author=言之/小羊/共同,locked=True上锁(配合unlock_hint:日期或密码)。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -1066,6 +1067,24 @@ async def hold(
             except Exception as e:
                 logger.warning(f"Failed to mark source as digested / 标记已消化失败: {e}")
         return f"🫧feel→{bucket_id}"
+
+    # --- Journey mode: normal bucket with domain=["journey"], excluded from regular surfacing ---
+    # --- 轨迹模式：普通桶但 domain=["journey"]，不参与普通浮现和搜索 ---
+    if journey:
+        bucket_id = await bucket_mgr.create(
+            content=content,
+            tags=extra_tags,
+            importance=importance,
+            domain=["journey"],
+            valence=valence if 0 <= valence <= 1 else 0.5,
+            arousal=arousal if 0 <= arousal <= 1 else 0.3,
+            name=None,
+        )
+        try:
+            await embedding_engine.generate_and_store(bucket_id, content)
+        except Exception:
+            pass
+        return f"🗺️轨迹→{bucket_id} (breath(domain=\"journey\") 读取)"
 
     # --- Step 1: auto-tagging / 自动打标 ---
     try:

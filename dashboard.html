@@ -3589,6 +3589,11 @@ function clearAuthSensitiveFields(password) {
     var input = document.getElementById(id);
     if (input) input.value = '';
   });
+  gatewayUpstreams = gatewayUpstreams.map(function(upstream) {
+    upstream = normalizeGatewayUpstream(upstream);
+    upstream.api_key_values = [];
+    return upstream;
+  });
   document.querySelectorAll('[id^="cfg-upstream-key-values-"]').forEach(function(input) {
     input.value = '';
   });
@@ -7354,6 +7359,7 @@ function renderGatewayUpstreams() {
   list.innerHTML = gatewayUpstreams.map(function(upstream, index) {
     upstream = normalizeGatewayUpstream(upstream);
     var envText = upstream.api_key_envs.join('\n');
+    var keyValuesText = upstream.api_key_values.join('\n');
     var modelRows = (upstream.models.length ? upstream.models : [{ id: '', upstream_model: '' }]).map(function(model, modelIndex) {
       model = normalizeGatewayModelEntry(model);
       return '' +
@@ -7376,7 +7382,7 @@ function renderGatewayUpstreams() {
         '<div class="config-row"><label>Base URL</label><input type="text" id="cfg-upstream-url-' + index + '" placeholder="https://.../v1" value="' + escAttr(upstream.base_url) + '" /></div>' +
         '<div class="config-row"><label>Key envs</label><textarea id="cfg-upstream-envs-' + index + '" placeholder="OMBRE_GATEWAY_PROVIDER_API_KEY_1&#10;OMBRE_GATEWAY_PROVIDER_API_KEY_2">' + esc(envText) + '</textarea></div>' +
         '<div class="upstream-note">一行一个环境变量名。多 key 会按现有 Gateway 逻辑在可重试错误时切到下一个。</div>' +
-        '<div class="config-row"><label>Key values</label><textarea id="cfg-upstream-key-values-' + index + '" placeholder="可选：一行一个真实 key，对应上面的 env 名"></textarea></div>' +
+        '<div class="config-row"><label>Key values</label><textarea id="cfg-upstream-key-values-' + index + '" placeholder="可选：一行一个真实 key，对应上面的 env 名">' + esc(keyValuesText) + '</textarea></div>' +
         '<div class="upstream-note">留空不改。只有点“应用并保存密钥到 .env”才会写入，并用于本次热更新。</div>' +
         '<div class="config-row"><label>Default</label><input type="text" id="cfg-upstream-default-' + index + '" placeholder="默认模型，可留空" value="' + escAttr(upstream.default_model) + '" /></div>' +
         '<div class="config-row"><label>Cache</label><select id="cfg-upstream-cache-' + index + '" onchange="updateGatewayCacheRetentionOptions(' + index + ')"><option value=""' + (!upstream.prompt_cache ? ' selected' : '') + '>none</option><option value="openai"' + (upstream.prompt_cache === 'openai' ? ' selected' : '') + '>openai</option><option value="anthropic"' + (upstream.prompt_cache === 'anthropic' ? ' selected' : '') + '>anthropic</option><option value="anthropic_explicit"' + (upstream.prompt_cache === 'anthropic_explicit' ? ' selected' : '') + '>anthropic_explicit</option></select></div>' +

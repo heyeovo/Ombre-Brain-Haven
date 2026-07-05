@@ -653,6 +653,9 @@ def test_dashboard_exposes_gateway_upstream_editor():
     assert "function collectGatewayUpstreams(includeKeyValues)" in html
     assert "function collectGatewayUpstreamsForSave(includeKeyValues)" in html
     assert "gatewayUpstreams = (((cfg.gateway || {}).upstreams) || []).map(normalizeGatewayUpstream);" in load_block
+    assert "var keyValuesText = upstream.api_key_values.join('\\n');" in html
+    assert 'id="cfg-upstream-key-values-\' + index + \'" placeholder="可选：一行一个真实 key，对应上面的 env 名">\' + esc(keyValuesText) + \'</textarea>' in html
+    assert "upstream.api_key_values = [];" in html
     assert "document.getElementById('upstream-config-view').style.display = target === 'upstream-config' ? '' : 'none';" in html
     assert "if (target === 'upstream-config') loadConfig();" in html
     assert "if (activeTarget === 'upstream-config')" in save_block

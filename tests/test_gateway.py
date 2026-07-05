@@ -4838,7 +4838,7 @@ def test_gateway_operit_context_rewrite_debug_distinguishes_system_rolecard(
         bucket_mgr,
         embedding_results=[],
     )
-    system_content = "【角色卡】\nHaven 的固定角色设定在 system 里。"
+    system_content = "【角色卡】\nHaven 的固定角色设定在 system 里。\nOPENAI_API_KEY=secret-value"
     operit_extra = (
         ' <attachment id="message_insert_extra_bundle_177757652231" '
         'filename="Time:02:58 01/2026/6" type="text/plain" size="104">'
@@ -4860,6 +4860,19 @@ def test_gateway_operit_context_rewrite_debug_distinguishes_system_rolecard(
     assert rewrite_debug["incoming_system_count"] == 1
     assert rewrite_debug["incoming_system_chars"] == len(system_content)
     assert rewrite_debug["incoming_operit_titles"] == ["角色卡", "当前时间"]
+    assert rewrite_debug["incoming_system_titles"] == ["角色卡"]
+    assert rewrite_debug["incoming_user_titles"] == ["当前时间"]
+    assert len(rewrite_debug["incoming_system_outlines"]) == 1
+    system_outline = rewrite_debug["incoming_system_outlines"][0]
+    assert system_outline["index"] == 0
+    assert system_outline["chars"] == len(system_content)
+    assert len(system_outline["sha256_12"]) == 12
+    assert system_outline["titles"] == ["角色卡"]
+    assert system_outline["preview_lines"] == [
+        "【角色卡】",
+        "Haven 的固定角色设定在 system 里。",
+        "[redacted potential secret line]",
+    ]
     assert rewrite_debug["operit_stable_titles"] == []
     assert rewrite_debug["operit_activity_titles"] == ["当前时间"]
 

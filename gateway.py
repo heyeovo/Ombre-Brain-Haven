@@ -16054,6 +16054,9 @@ class GatewayService:
             "incoming_system_chars": 0,
             "incoming_system_count": 0,
             "incoming_operit_titles": [],
+            "incoming_system_titles": [],
+            "incoming_user_titles": [],
+            "incoming_system_outlines": [],
             "operit_stable_titles": [],
             "operit_activity_titles": [],
         }
@@ -16130,24 +16133,67 @@ class GatewayService:
     def _operit_incoming_debug(self, messages: list[dict]) -> dict[str, Any]:
         roles: list[str] = []
         titles: list[str] = []
+        system_titles: list[str] = []
+        user_titles: list[str] = []
+        system_outlines: list[dict[str, Any]] = []
         system_chars = 0
         system_count = 0
-        for message in messages or []:
+        for index, message in enumerate(messages or []):
             if not isinstance(message, dict):
                 continue
             role = str(message.get("role") or "")
             roles.append(role)
             text = self._coerce_message_text(message.get("content"))
+            message_titles = self._operit_titles_from_text(text)
             if role == "system":
                 system_count += 1
                 system_chars += len(text)
-            titles.extend(self._operit_titles_from_text(text))
+                system_titles.extend(message_titles)
+                system_outlines.append(self._system_debug_outline(index, text, message_titles))
+            elif role == "user":
+                user_titles.extend(message_titles)
+            titles.extend(message_titles)
         return {
             "incoming_roles": roles[:80],
             "incoming_system_chars": system_chars,
             "incoming_system_count": system_count,
             "incoming_operit_titles": self._unique_strings(titles),
+            "incoming_system_titles": self._unique_strings(system_titles),
+            "incoming_user_titles": self._unique_strings(user_titles),
+            "incoming_system_outlines": system_outlines[:5],
         }
+
+    def _system_debug_outline(
+        self,
+        index: int,
+        text: str,
+        titles: list[str] | None = None,
+    ) -> dict[str, Any]:
+        raw = str(text or "")
+        return {
+            "index": index,
+            "chars": len(raw),
+            "sha256_12": hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12] if raw else "",
+            "titles": self._unique_strings(titles or self._operit_titles_from_text(raw))[:30],
+            "preview_lines": self._debug_preview_lines(raw, max_lines=12, max_chars=160),
+        }
+
+    @staticmethod
+    def _debug_preview_lines(text: str, *, max_lines: int, max_chars: int) -> list[str]:
+        lines: list[str] = []
+        secret_re = re.compile(r"(?i)(api[_-]?key|secret|token|bearer|password|authorization|cookie)")
+        for raw_line in str(text or "").splitlines():
+            line = re.sub(r"\s+", " ", raw_line).strip()
+            if not line:
+                continue
+            if secret_re.search(line):
+                line = "[redacted potential secret line]"
+            elif len(line) > max_chars:
+                line = line[: max(0, max_chars - 3)].rstrip() + "..."
+            lines.append(line)
+            if len(lines) >= max_lines:
+                break
+        return lines
 
     @staticmethod
     def _unique_strings(values: list[str]) -> list[str]:

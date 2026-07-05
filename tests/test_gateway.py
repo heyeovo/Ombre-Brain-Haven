@@ -2885,6 +2885,101 @@ def test_gateway_forwards_native_anthropic_explicit_cache_control(monkeypatch, t
     assert "今天怎么样？" in forwarded["messages"][-1]["content"]
 
 
+def test_gateway_chat_completions_routes_anthropic_upstream_with_cache(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    def upstream_responder(_body, request, captured):
+        captured[-1]["url"] = str(request.url)
+        captured[-1]["x_api_key"] = request.headers.get("x-api-key")
+        captured[-1]["auth"] = request.headers.get("Authorization")
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_native",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-3-5-sonnet-latest",
+                "content": [{"type": "text", "text": "native ok"}],
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {
+                    "input_tokens": 24,
+                    "output_tokens": 2,
+                    "cache_read_input_tokens": 12,
+                    "cache_creation_input_tokens": 6,
+                },
+            },
+        )
+
+    cfg = _gateway_config(
+        test_config,
+        upstream_base_url="",
+        upstream_models=[],
+        upstream_default_model="claude/native",
+        upstreams=[
+            {
+                "name": "anthropic-native",
+                "protocol": "anthropic",
+                "base_url": "https://claude.example/v1",
+                "api_key_env": "OMBRE_GATEWAY_UPSTREAM_API_KEY",
+                "default_model": "claude/native",
+                "prompt_cache": "anthropic_explicit",
+                "prompt_cache_retention": "1h",
+                "models": [
+                    {
+                        "id": "claude/native",
+                        "upstream_model": "claude-3-5-sonnet-latest",
+                    }
+                ],
+            }
+        ],
+    )
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        upstream_responder=upstream_responder,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-chat-anthropic",
+            },
+            json={
+                "model": "claude/native",
+                "messages": [
+                    {"role": "system", "content": "你是一个自然聊天助手。"},
+                    {"role": "user", "content": "今天怎么样？"},
+                ],
+                "max_tokens": 256,
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["object"] == "chat.completion"
+    assert body["model"] == "claude/native"
+    assert body["choices"][0]["message"] == {"role": "assistant", "content": "native ok"}
+    assert body["usage"]["prompt_tokens"] == 24
+    assert body["usage"]["completion_tokens"] == 2
+    assert body["usage"]["prompt_tokens_details"]["cached_tokens"] == 12
+    assert body["usage"]["cache_creation_input_tokens"] == 6
+
+    assert captured[0]["url"] == "https://claude.example/v1/messages"
+    assert captured[0]["x_api_key"] == "upstream-secret"
+    assert captured[0]["auth"] is None
+    forwarded = captured[0]["json"]
+    assert forwarded["model"] == "claude-3-5-sonnet-latest"
+    assert isinstance(forwarded["system"], list)
+    assert forwarded["system"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert "prompt_cache_key" not in forwarded
+
+
 def test_gateway_explicit_anthropic_cache_uses_prior_message_before_current_user():
     service = object.__new__(GatewayService)
     payload = {
@@ -3076,6 +3171,120 @@ def test_gateway_streams_native_anthropic_messages(monkeypatch, test_config, buc
         if turn.get("session_id") == "sess-native-anthropic-stream"
     ]
     assert turns[0]["assistant_text"] == "hello"
+
+
+def test_gateway_streams_chat_completions_from_anthropic_upstream(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    def upstream_responder(_body, request, captured):
+        captured[-1]["url"] = str(request.url)
+        captured[-1]["x_api_key"] = request.headers.get("x-api-key")
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                b'event: message_start\n'
+                b'data: {"type":"message_start","message":{"id":"msg_stream","type":"message",'
+                b'"role":"assistant","model":"claude-3-5-sonnet-latest","content":[],'
+                b'"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":11}}}\n\n'
+                b'event: content_block_start\n'
+                b'data: {"type":"content_block_start","index":0,'
+                b'"content_block":{"type":"text","text":""}}\n\n'
+                b'event: content_block_delta\n'
+                b'data: {"type":"content_block_delta","index":0,'
+                b'"delta":{"type":"text_delta","text":"he"}}\n\n'
+                b'event: content_block_delta\n'
+                b'data: {"type":"content_block_delta","index":0,'
+                b'"delta":{"type":"text_delta","text":"llo"}}\n\n'
+                b'event: message_delta\n'
+                b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},'
+                b'"usage":{"output_tokens":2,"cache_read_input_tokens":8}}\n\n'
+                b'event: message_stop\n'
+                b'data: {"type":"message_stop"}\n\n'
+            ),
+        )
+
+    cfg = _gateway_config(
+        test_config,
+        upstream_base_url="",
+        upstream_models=[],
+        upstream_default_model="claude/native",
+        upstreams=[
+            {
+                "name": "anthropic-native",
+                "protocol": "anthropic",
+                "base_url": "https://claude.example/v1",
+                "api_key_env": "OMBRE_GATEWAY_UPSTREAM_API_KEY",
+                "default_model": "claude/native",
+                "prompt_cache": "anthropic",
+                "models": [
+                    {
+                        "id": "claude/native",
+                        "upstream_model": "claude-3-5-sonnet-latest",
+                    }
+                ],
+            }
+        ],
+    )
+    app, _, state_store, captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        upstream_responder=upstream_responder,
+    )
+
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-chat-anthropic-stream",
+            },
+            json={
+                "model": "claude/native",
+                "messages": [{"role": "user", "content": "流式试一下"}],
+                "max_tokens": 128,
+                "stream": True,
+            },
+        ) as response:
+            body = response.read().decode("utf-8")
+
+    assert response.status_code == 200
+    assert captured[0]["url"] == "https://claude.example/v1/messages"
+    assert captured[0]["x_api_key"] == "upstream-secret"
+    assert captured[0]["json"]["cache_control"] == {"type": "ephemeral"}
+    assert "data: [DONE]" in body
+    events = [
+        json.loads(line[5:].strip())
+        for line in body.splitlines()
+        if line.startswith("data:") and line[5:].strip() != "[DONE]"
+    ]
+    assert any(
+        choice.get("delta", {}).get("content") == "he"
+        for event in events
+        for choice in event.get("choices", [])
+    )
+    final_event = next(event for event in events if event.get("usage"))
+    assert final_event["usage"]["prompt_tokens"] == 11
+    assert final_event["usage"]["completion_tokens"] == 2
+    assert final_event["usage"]["prompt_tokens_details"]["cached_tokens"] == 8
+    assert final_event["choices"][0]["finish_reason"] == "stop"
+
+    turns = [
+        turn
+        for turn in state_store.list_recent_conversation_turns(
+            profile_id="haven_xiaoyu",
+            limit=5,
+            hours=1,
+        )
+        if turn.get("session_id") == "sess-chat-anthropic-stream"
+    ]
+    assert turns[0]["assistant_text"] == "hello"
+    usage_rows = state_store.list_upstream_usage(session_id="sess-chat-anthropic-stream", limit=5)
+    assert usage_rows[0]["cache_read_input_tokens"] == 8
 
 
 def test_gateway_routes_multi_upstreams_by_model(monkeypatch, test_config, bucket_mgr):

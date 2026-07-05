@@ -1833,6 +1833,38 @@ class GatewayService:
                     status_code=503,
                 )
 
+        route = self._resolve_upstream_for_model(str(forward_payload.get("model") or ""))
+        if self._upstream_uses_anthropic_protocol(route["upstream"]):
+            upstream_response = await self._forward_anthropic_upstream(forward_payload, route)
+            if 200 <= upstream_response.status_code < 300:
+                upstream_usage = self._log_cache_usage_from_response(
+                    session_id,
+                    forward_payload["model"],
+                    upstream_response,
+                    route="/v1/chat/completions",
+                )
+                assistant_message = self._extract_assistant_message_from_anthropic_response(upstream_response)
+                await self._record_successful_round(
+                    session_id,
+                    recalled_ids,
+                    injection_debug,
+                    user_message=persona_user_message,
+                    assistant_message=assistant_message,
+                    model=forward_payload["model"],
+                    client=client_label,
+                    route="/v1/chat/completions",
+                    upstream_usage=upstream_usage,
+                )
+                await self._update_persona_after_assistant_message(
+                    session_id,
+                    persona_user_message,
+                    assistant_message,
+                    recalled_ids or [],
+                )
+                return self._anthropic_response_to_openai(upstream_response, forward_payload["model"])
+
+            return self._proxy_response(upstream_response)
+
         upstream_response = await self._forward_upstream(forward_payload)
         if 200 <= upstream_response.status_code < 300:
             upstream_response, memory_detail_debug = await self._maybe_retry_with_memory_detail(
@@ -3350,6 +3382,16 @@ class GatewayService:
     ) -> Response:
         model = str(payload.get("model") or "").strip()
         route = self._resolve_upstream_for_model(model)
+        if self._upstream_uses_anthropic_protocol(route["upstream"]):
+            return await self._stream_anthropic_upstream_as_openai(
+                route,
+                payload,
+                session_id,
+                recalled_ids,
+                user_message,
+                client=client,
+                injection_debug=injection_debug,
+            )
         stream_started_at = time.perf_counter()
         upstream_open_started_at = time.perf_counter()
         upstream_response = await self._open_upstream_stream(route, payload)
@@ -5020,6 +5062,76 @@ class GatewayService:
             status_code=upstream_response.status_code,
         )
 
+    def _anthropic_response_to_openai(self, upstream_response: httpx.Response, requested_model: str) -> JSONResponse:
+        try:
+            body = upstream_response.json()
+        except ValueError:
+            return JSONResponse(
+                {"error": {"message": "Upstream response was not valid JSON", "type": "api_error"}},
+                status_code=502,
+            )
+
+        message = self._anthropic_response_body_to_openai_message(body) or {
+            "role": "assistant",
+            "content": "",
+        }
+        raw_id = str(body.get("id") or datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"))
+        response_id = raw_id if raw_id.startswith("chatcmpl") else f"chatcmpl_{raw_id}"
+        usage = self._anthropic_usage_to_openai_usage(
+            body.get("usage") if isinstance(body.get("usage"), dict) else {}
+        )
+
+        return JSONResponse(
+            {
+                "id": response_id,
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": requested_model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": message,
+                        "finish_reason": self._anthropic_stop_reason_to_openai(body.get("stop_reason")),
+                    }
+                ],
+                "usage": usage,
+            },
+            status_code=upstream_response.status_code,
+        )
+
+    def _anthropic_usage_to_openai_usage(self, usage: dict[str, Any]) -> dict[str, Any]:
+        prompt_tokens = self._usage_int(
+            usage.get("prompt_tokens") if usage.get("prompt_tokens") is not None else usage.get("input_tokens")
+        )
+        completion_tokens = self._usage_int(
+            usage.get("completion_tokens")
+            if usage.get("completion_tokens") is not None
+            else usage.get("output_tokens")
+        )
+        openai_usage: dict[str, Any] = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+
+        cache_read = usage.get("cache_read_input_tokens")
+        cache_creation = usage.get("cache_creation_input_tokens")
+        if cache_read is not None:
+            openai_usage["cache_read_input_tokens"] = self._usage_int(cache_read)
+            openai_usage["prompt_tokens_details"] = {
+                "cached_tokens": openai_usage["cache_read_input_tokens"]
+            }
+        if cache_creation is not None:
+            openai_usage["cache_creation_input_tokens"] = self._usage_int(cache_creation)
+        return openai_usage
+
+    @staticmethod
+    def _usage_int(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
     def _openai_message_to_anthropic_content(self, message: dict[str, Any]) -> list[dict[str, Any]]:
         content_blocks: list[dict[str, Any]] = []
         text = self._coerce_message_text(message.get("content"))
@@ -5727,6 +5839,212 @@ class GatewayService:
             },
         )
 
+    async def _stream_anthropic_upstream_as_openai(
+        self,
+        route: dict[str, Any],
+        payload: dict,
+        session_id: str,
+        recalled_ids: list[str] | None,
+        user_message: str,
+        client: str = "",
+        injection_debug: dict[str, Any] | None = None,
+    ) -> Response:
+        model = str(payload.get("model") or "").strip()
+        stream_started_at = time.perf_counter()
+        upstream_open_started_at = time.perf_counter()
+        upstream_response = await self._open_anthropic_upstream_stream(route, payload)
+        upstream_headers_ms = max(0, int((time.perf_counter() - upstream_open_started_at) * 1000))
+        upstream = route["upstream"]
+
+        if not 200 <= upstream_response.status_code < 300:
+            body_read_started_at = time.perf_counter()
+            body = await upstream_response.aread()
+            await upstream_response.aclose()
+            logger.info(
+                "Gateway stream timing | session=%s route=%s upstream=%s model=%s upstream_model=%s "
+                "status=%s error_response=true header_ms=%s body_read_ms=%s total_ms=%s",
+                session_id,
+                "/v1/chat/completions",
+                upstream.get("name"),
+                model,
+                route["upstream_model"],
+                upstream_response.status_code,
+                upstream_headers_ms,
+                max(0, int((time.perf_counter() - body_read_started_at) * 1000)),
+                max(0, int((time.perf_counter() - stream_started_at) * 1000)),
+            )
+            return Response(
+                content=body,
+                status_code=upstream_response.status_code,
+                media_type=upstream_response.headers.get("content-type", "application/json"),
+            )
+
+        async def stream_body():
+            finalized = False
+            stream_state = self._new_stream_capture_state()
+            parser_state = self._new_sse_parse_state()
+            body_started_at = time.perf_counter()
+            first_chunk_ms: int | None = None
+            header_to_first_chunk_ms: int | None = None
+            chunk_count = 0
+            byte_count = 0
+            chunk_id = f"chatcmpl_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
+            created = int(time.time())
+            stop_reason = "stop"
+            final_sent = False
+
+            async def finalize_once() -> None:
+                nonlocal finalized
+                if finalized:
+                    return
+                finalized = True
+                await self._finalize_stream_turn(
+                    session_id=session_id,
+                    model=model,
+                    route="/v1/chat/completions",
+                    stream_state=stream_state,
+                    recalled_ids=recalled_ids,
+                    user_message=user_message,
+                    client=client,
+                    injection_debug=injection_debug,
+                )
+
+            def openai_chunk(delta: dict[str, Any], finish_reason: str | None = None) -> bytes:
+                return self._openai_sse(
+                    {
+                        "id": chunk_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": delta,
+                                "finish_reason": finish_reason,
+                            }
+                        ],
+                    }
+                )
+
+            def final_openai_chunk() -> bytes:
+                return self._openai_sse(
+                    {
+                        "id": chunk_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": stop_reason,
+                            }
+                        ],
+                        "usage": self._anthropic_usage_to_openai_usage(stream_state.get("usage", {})),
+                    }
+                )
+
+            try:
+                yield openai_chunk({"role": "assistant"})
+                async for chunk in upstream_response.aiter_bytes():
+                    if not chunk:
+                        continue
+                    chunk_count += 1
+                    byte_count += len(chunk)
+                    if first_chunk_ms is None:
+                        now = time.perf_counter()
+                        first_chunk_ms = max(0, int((now - stream_started_at) * 1000))
+                        header_to_first_chunk_ms = max(0, int((now - body_started_at) * 1000))
+                        logger.info(
+                            "Gateway stream first chunk | session=%s route=%s upstream=%s "
+                            "model=%s upstream_model=%s status=%s header_ms=%s "
+                            "first_chunk_ms=%s header_to_first_chunk_ms=%s",
+                            session_id,
+                            "/v1/chat/completions",
+                            upstream.get("name"),
+                            model,
+                            route["upstream_model"],
+                            upstream_response.status_code,
+                            upstream_headers_ms,
+                            first_chunk_ms,
+                            header_to_first_chunk_ms,
+                        )
+                    self._consume_anthropic_stream_capture_chunk(stream_state, chunk)
+                    for event in self._anthropic_sse_events_from_chunk(parser_state, chunk):
+                        for outgoing in self._openai_chunks_from_anthropic_event(
+                            event,
+                            chunk_id=chunk_id,
+                            created=created,
+                            model=model,
+                        ):
+                            if outgoing.get("stop_reason"):
+                                stop_reason = self._anthropic_stop_reason_to_openai(outgoing["stop_reason"])
+                                continue
+                            if outgoing.get("final"):
+                                if not final_sent:
+                                    final_sent = True
+                                    yield final_openai_chunk()
+                                    yield b"data: [DONE]\n\n"
+                                continue
+                            yield self._openai_sse(outgoing["chunk"])
+                    if stream_state.get("seen_done"):
+                        await finalize_once()
+
+                self._consume_anthropic_stream_capture_chunk(stream_state, b"", final=True)
+                for event in self._anthropic_sse_events_from_chunk(parser_state, b"", final=True):
+                    for outgoing in self._openai_chunks_from_anthropic_event(
+                        event,
+                        chunk_id=chunk_id,
+                        created=created,
+                        model=model,
+                    ):
+                        if outgoing.get("stop_reason"):
+                            stop_reason = self._anthropic_stop_reason_to_openai(outgoing["stop_reason"])
+                            continue
+                        if outgoing.get("final"):
+                            if not final_sent:
+                                final_sent = True
+                                yield final_openai_chunk()
+                                yield b"data: [DONE]\n\n"
+                            continue
+                        yield self._openai_sse(outgoing["chunk"])
+                await finalize_once()
+                if not final_sent:
+                    yield final_openai_chunk()
+                    yield b"data: [DONE]\n\n"
+            finally:
+                logger.info(
+                    "Gateway stream timing | session=%s route=%s upstream=%s model=%s upstream_model=%s "
+                    "status=%s header_ms=%s first_chunk_ms=%s header_to_first_chunk_ms=%s "
+                    "body_ms=%s total_ms=%s chunks=%s bytes=%s finalized=%s seen_done=%s",
+                    session_id,
+                    "/v1/chat/completions",
+                    upstream.get("name"),
+                    model,
+                    route["upstream_model"],
+                    upstream_response.status_code,
+                    upstream_headers_ms,
+                    first_chunk_ms,
+                    header_to_first_chunk_ms,
+                    max(0, int((time.perf_counter() - body_started_at) * 1000)),
+                    max(0, int((time.perf_counter() - stream_started_at) * 1000)),
+                    chunk_count,
+                    byte_count,
+                    finalized,
+                    bool(stream_state.get("seen_done")),
+                )
+                await upstream_response.aclose()
+
+        return StreamingResponse(
+            stream_body(),
+            status_code=upstream_response.status_code,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     async def _stream_native_anthropic_upstream(
         self,
         route: dict[str, Any],
@@ -5921,6 +6239,180 @@ class GatewayService:
                         events.append({"text": content})
         return events
 
+    def _new_sse_parse_state(self) -> dict[str, Any]:
+        return {
+            "decoder": codecs.getincrementaldecoder("utf-8")(),
+            "buffer": "",
+        }
+
+    def _anthropic_sse_events_from_chunk(
+        self,
+        state: dict[str, Any],
+        chunk: bytes,
+        final: bool = False,
+    ) -> list[dict[str, Any]]:
+        decoder = state["decoder"]
+        if chunk:
+            state["buffer"] += decoder.decode(chunk)
+        if final:
+            state["buffer"] += decoder.decode(b"", final=True)
+
+        buffer = state["buffer"].replace("\r\n", "\n")
+        events: list[dict[str, Any]] = []
+        while "\n\n" in buffer:
+            event_text, buffer = buffer.split("\n\n", 1)
+            event = self._parse_sse_json_event(event_text)
+            if event is not None:
+                events.append(event)
+
+        if final and buffer.strip():
+            event = self._parse_sse_json_event(buffer)
+            if event is not None:
+                events.append(event)
+            buffer = ""
+
+        state["buffer"] = buffer
+        return events
+
+    def _parse_sse_json_event(self, event_text: str) -> dict[str, Any] | None:
+        event_name = ""
+        data_lines = []
+        for raw_line in event_text.split("\n"):
+            line = raw_line.strip()
+            if line.startswith("event:"):
+                event_name = line[6:].strip()
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].strip())
+        if not data_lines:
+            return None
+        try:
+            event = json.loads("\n".join(data_lines).strip())
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(event, dict):
+            return None
+        event.setdefault("_event", event_name)
+        return event
+
+    def _openai_chunks_from_anthropic_event(
+        self,
+        event: dict[str, Any],
+        *,
+        chunk_id: str,
+        created: int,
+        model: str,
+    ) -> list[dict[str, Any]]:
+        event_type = str(event.get("type") or event.get("_event") or "").strip()
+        if event_type == "message_delta":
+            delta = event.get("delta")
+            stop_reason = delta.get("stop_reason") if isinstance(delta, dict) else None
+            return [{"stop_reason": stop_reason or "end_turn"}] if stop_reason else []
+        if event_type == "message_stop":
+            return [{"final": True}]
+        if event_type == "content_block_start":
+            content_block = event.get("content_block")
+            if not isinstance(content_block, dict) or content_block.get("type") != "tool_use":
+                return []
+            index = self._usage_int(event.get("index"))
+            input_value = content_block.get("input")
+            arguments = (
+                json.dumps(input_value, ensure_ascii=False)
+                if isinstance(input_value, dict) and input_value
+                else ""
+            )
+            return [
+                {
+                    "chunk": self._openai_stream_chunk(
+                        chunk_id=chunk_id,
+                        created=created,
+                        model=model,
+                        delta={
+                            "tool_calls": [
+                                {
+                                    "index": index,
+                                    "id": str(content_block.get("id") or f"call_{index}"),
+                                    "type": "function",
+                                    "function": {
+                                        "name": str(content_block.get("name") or ""),
+                                        "arguments": arguments,
+                                    },
+                                }
+                            ]
+                        },
+                    )
+                }
+            ]
+        if event_type != "content_block_delta":
+            return []
+
+        index = self._usage_int(event.get("index"))
+        delta = event.get("delta")
+        if not isinstance(delta, dict):
+            return []
+        if delta.get("type") == "text_delta":
+            text = str(delta.get("text") or "")
+            if not text:
+                return []
+            return [
+                {
+                    "chunk": self._openai_stream_chunk(
+                        chunk_id=chunk_id,
+                        created=created,
+                        model=model,
+                        delta={"content": text},
+                    )
+                }
+            ]
+        if delta.get("type") == "input_json_delta":
+            partial_json = str(delta.get("partial_json") or "")
+            if not partial_json:
+                return []
+            return [
+                {
+                    "chunk": self._openai_stream_chunk(
+                        chunk_id=chunk_id,
+                        created=created,
+                        model=model,
+                        delta={
+                            "tool_calls": [
+                                {
+                                    "index": index,
+                                    "function": {"arguments": partial_json},
+                                }
+                            ]
+                        },
+                    )
+                }
+            ]
+        return []
+
+    def _openai_stream_chunk(
+        self,
+        *,
+        chunk_id: str,
+        created: int,
+        model: str,
+        delta: dict[str, Any],
+        finish_reason: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": delta,
+                    "finish_reason": finish_reason,
+                }
+            ],
+        }
+
+    def _openai_sse(self, data: dict[str, Any]) -> bytes:
+        return f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
+
     def _anthropic_sse(self, event: str, data: dict[str, Any]) -> bytes:
         return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
 
@@ -5933,6 +6425,15 @@ class GatewayService:
             "content_filter": "stop_sequence",
         }
         return mapping.get(str(finish_reason or ""), "end_turn")
+
+    def _anthropic_stop_reason_to_openai(self, stop_reason: Any) -> str:
+        mapping = {
+            "end_turn": "stop",
+            "stop_sequence": "stop",
+            "max_tokens": "length",
+            "tool_use": "tool_calls",
+        }
+        return mapping.get(str(stop_reason or ""), "stop")
 
     def _proxy_anthropic_error_response(self, upstream_response: httpx.Response) -> JSONResponse:
         message = upstream_response.text or "Upstream request failed"

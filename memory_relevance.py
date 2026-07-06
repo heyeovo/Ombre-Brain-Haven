@@ -190,6 +190,20 @@ _FACETS_FOR_TEXT_CACHE: dict[tuple[int, str], tuple[tuple[str, float], ...]] = {
 _FACETS_FOR_TEXT_CACHE_MAX = 512
 _CONTENT_TERMS_CACHE: dict[tuple[int, str], tuple[str, ...]] = {}
 _CONTENT_TERMS_CACHE_MAX = 512
+PROTECTED_PHRASE_MAX_CHARS = 48
+PROTECTED_PHRASE_PAIRS = (
+    ("“", "”"),
+    ('"', '"'),
+    ("「", "」"),
+    ("『", "』"),
+    ("《", "》"),
+    ("（", "）"),
+    ("(", ")"),
+    ("【", "】"),
+    ("[", "]"),
+    ("‘", "’"),
+    ("`", "`"),
+)
 
 TECHNICAL_RECALL_STRONG_TERMS = frozenset(
     {
@@ -564,12 +578,17 @@ def content_terms_for_query(
     cached = _CONTENT_TERMS_CACHE.get(cache_key)
     if cached is not None:
         return list(cached)
+    protected_phrases = extract_protected_phrases(raw_query)
+    unprotected_query = strip_protected_phrases(raw_query) if protected_phrases else raw_query
     focus = recall_focus_query(query, options)
-    topic = recall_topic_query(query, options)
+    topic = recall_topic_query(unprotected_query, options)
     terms: list[str] = []
+    terms.extend(protected_phrases)
     if topic:
         terms.extend(_query_terms(topic, allow_single_cjk=True))
-    if focus and focus != topic:
+    if focus and focus != topic and _normalize_alias(focus) not in {
+        _normalize_alias(phrase) for phrase in protected_phrases
+    }:
         for term in _query_terms(focus):
             stripped = _strip_query_water_terms(term, options, include_context=False)
             if stripped != re.sub(r"[^0-9a-z\u4e00-\u9fff_.:-]+", "", _normalize_alias(term)):
@@ -585,6 +604,43 @@ def content_terms_for_query(
         _CONTENT_TERMS_CACHE.clear()
     _CONTENT_TERMS_CACHE[cache_key] = tuple(result)
     return result
+
+
+def extract_protected_phrases(query: str, *, max_chars: int = PROTECTED_PHRASE_MAX_CHARS) -> list[str]:
+    text = str(query or "")
+    if not text:
+        return []
+    phrases: list[tuple[int, str]] = []
+    seen = set()
+    for opener, closer in PROTECTED_PHRASE_PAIRS:
+        pattern = re.compile(
+            re.escape(opener) + rf"\s*(.{{1,{max_chars}}}?)\s*" + re.escape(closer),
+            flags=re.DOTALL,
+        )
+        for match in pattern.finditer(text):
+            value = _clean_protected_phrase(match.group(1), max_chars=max_chars)
+            key = _normalize_alias(value)
+            if not value or not key or key in seen:
+                continue
+            seen.add(key)
+            phrases.append((match.start(), value))
+    phrases.sort(key=lambda item: item[0])
+    return [value for _start, value in phrases]
+
+
+def strip_protected_phrases(query: str, replacement: str = " ") -> str:
+    text = str(query or "")
+    if not text:
+        return ""
+    for opener, closer in PROTECTED_PHRASE_PAIRS:
+        pattern = re.compile(
+            re.escape(opener)
+            + rf"\s*.{{1,{PROTECTED_PHRASE_MAX_CHARS}}}?\s*"
+            + re.escape(closer),
+            flags=re.DOTALL,
+        )
+        text = pattern.sub(replacement, text)
+    return text
 
 
 def emotional_recall_plan(
@@ -1225,6 +1281,20 @@ def _clean_recall_focus(value: Any) -> str:
     return focus
 
 
+def _clean_protected_phrase(value: Any, *, max_chars: int = PROTECTED_PHRASE_MAX_CHARS) -> str:
+    phrase = re.sub(r"\s+", " ", str(value or "").strip())
+    phrase = re.sub(r"^[，。！？、,.!?:：;；~～（）()\[\]【】「」『』“”\"'`]+", "", phrase)
+    phrase = re.sub(r"[，。！？、,.!?:：;；~～（）()\[\]【】「」『』“”\"'`]+$", "", phrase)
+    if not phrase or "\n" in phrase:
+        return ""
+    if len(phrase) > max_chars:
+        return ""
+    normalized = _normalize_alias(phrase)
+    if normalized in ASSOCIATIVE_PROMPT_VAGUE_FOCUS:
+        return ""
+    return phrase
+
+
 def _role_focus_term(text: str) -> str:
     for pattern in (
         r"(?:当|做|成为|变成|扮成)(?P<focus>[\u4e00-\u9fffA-Za-z0-9_.:-]{2,16})",
@@ -1375,12 +1445,20 @@ def _is_leading_lookup_address_term(term: str, compact_query: str) -> bool:
 
 def _query_terms(query: str, *, allow_single_cjk: bool = False) -> list[str]:
     raw = str(query or "").strip()
-    raw_terms = [part for part in re.split(r"[\s,，。！？!?;；:：/\\|]+", raw) if part]
-    raw_terms.extend(jieba.lcut(raw, cut_all=False))
-    raw_terms.extend(re.findall(r"[A-Za-z0-9_\-]+|[\u4e00-\u9fff]{2,}", raw))
+    protected_terms = extract_protected_phrases(raw)
+    scan_raw = strip_protected_phrases(raw) if protected_terms else raw
+    protected_keys = {_normalize_alias(term) for term in protected_terms if _normalize_alias(term)}
+    raw_terms = list(protected_terms)
+    raw_terms.extend(part for part in re.split(r"[\s,，。！？!?;；:：/\\|]+", scan_raw) if part)
+    raw_terms.extend(jieba.lcut(scan_raw, cut_all=False))
+    raw_terms.extend(re.findall(r"[A-Za-z0-9_\-]+|[\u4e00-\u9fff]{2,}", scan_raw))
     terms = []
     for part in raw_terms:
-        terms.extend(_query_term_variants(part))
+        normalized = _normalize_alias(part)
+        if normalized and normalized in protected_keys:
+            terms.append(part)
+        else:
+            terms.extend(_query_term_variants(part))
     kept = []
     seen = set()
     for term in terms:

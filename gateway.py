@@ -42,8 +42,10 @@ from entity_edges import EntityEdgeStore
 from memory_moments import MemoryMomentStore, parse_bucket_moments
 from memory_relevance import (
     active_facets,
+    content_terms_for_query,
     emotional_recall_plan,
     expanded_terms_for_query,
+    extract_protected_phrases,
     facets_for_node,
     facets_for_text,
     memory_relevance_options_from_config,
@@ -292,6 +294,7 @@ MOMENT_SECTION_LABELS = {
 }
 TASK_ONLY_MOMENT_SECTIONS = {"followup", "followup_log"}
 MOMENT_TEMPERATURE_SECTIONS = CONTEXT_ONLY_SECTIONS - TASK_ONLY_MOMENT_SECTIONS
+DIRECT_AUX_CONTEXT_SECTIONS = MOMENT_TEMPERATURE_SECTIONS - {"comment"}
 PROFILE_CONTEXT_SECTIONS = ("evidence_context", "context", "reflection", "feeling", "comment")
 DEFAULT_AXIS_LITE_TECHNICAL_AXIS_TERMS = (
     "esp32",
@@ -2640,12 +2643,14 @@ class GatewayService:
             ]
             current_diffused_bucket_ids = self._extract_bucket_ids_from_context(related_memory)
             current_diffused_moment_ids = self._extract_moment_ids_from_context(related_memory)
+            shown_date_recall_bucket_ids = date_recall_bucket_ids if date_recall.strip() else []
+            shown_favorite_ids = favorite_ids if favorite_memory.strip() else []
             current_shown_bucket_ids = list(
                 dict.fromkeys(
                     current_direct_bucket_ids
                     + current_diffused_bucket_ids
-                    + favorite_ids
-                    + date_recall_bucket_ids
+                    + shown_favorite_ids
+                    + shown_date_recall_bucket_ids
                 )
             )
             current_shown_moment_ids = list(
@@ -2705,11 +2710,33 @@ class GatewayService:
                         has_reliable_dynamic_context=reliable_dynamic_context,
                     )
             stage_started_at = time.perf_counter()
-            dream_context, dream_context_status = await self._build_dream_context_block(
-                current_user_query,
-                session_id,
-            )
+            if has_handoff_context or needs_handoff_first:
+                dream_context = ""
+                dream_context_status = {"status": "skipped", "reason": "handoff_context"}
+            else:
+                dream_context, dream_context_status = await self._build_dream_context_block(
+                    current_user_query,
+                    session_id,
+                )
             mark_step("dream_context", stage_started_at)
+            shown_dream_source_bucket_ids = [
+                str(bucket_id)
+                for bucket_id in (
+                    dream_context_status.get("source_bucket_ids", [])
+                    if dream_context.strip()
+                    else []
+                )
+                if str(bucket_id or "").strip()
+            ]
+            shown_targeted_detail_bucket_ids = [
+                str(bucket_id)
+                for bucket_id in (
+                    targeted_memory_detail_debug.get("accepted_ids", [])
+                    if targeted_memory_detail.strip()
+                    else []
+                )
+                if str(bucket_id or "").strip()
+            ]
             stage_started_at = time.perf_counter()
             injected_ids = list(
                 dict.fromkeys(
@@ -2718,18 +2745,10 @@ class GatewayService:
                         for moment in recalled_moments
                         if moment.get("bucket_id")
                     ]
-                    + date_recall_bucket_ids
-                    + favorite_ids
-                    + [
-                        str(bucket_id)
-                        for bucket_id in targeted_memory_detail_debug.get("accepted_ids", []) or []
-                        if str(bucket_id or "").strip()
-                    ]
-                    + [
-                        str(bucket_id)
-                        for bucket_id in dream_context_status.get("source_bucket_ids", []) or []
-                        if str(bucket_id or "").strip()
-                    ]
+                    + shown_date_recall_bucket_ids
+                    + shown_favorite_ids
+                    + shown_targeted_detail_bucket_ids
+                    + shown_dream_source_bucket_ids
                 )
             )
             mark_step("injected_id_collection", stage_started_at)
@@ -7200,7 +7219,7 @@ class GatewayService:
             topic_terms,
             match_assistant_text=role_safe_transcript_required,
         )
-        include_buckets = (not role_safe_transcript_required) and (bool(topic_terms) or not turns)
+        include_buckets = (not role_safe_transcript_required) and bool(topic_terms)
         buckets = self._date_recall_buckets_for_date(all_buckets, date_key, topic_terms) if include_buckets else []
         buckets = buckets[: self.date_recall_max_buckets]
         bucket_ids = [str(bucket.get("id") or "") for bucket in buckets if bucket.get("id")]
@@ -7427,9 +7446,7 @@ class GatewayService:
         hint = self._query_date_recall_hint(text)
         if not hint:
             return False
-        if not re.search(r"\d", str(hint.get("label") or "")):
-            return False
-        return bool(self._date_recall_topic_terms(text))
+        return bool(self._date_recall_protected_topic_terms(text))
 
     def _query_requires_role_safe_date_transcript(self, query: str) -> bool:
         compact = self._compact_lookup_key(query)
@@ -7449,6 +7466,9 @@ class GatewayService:
         return target, target + timedelta(days=1)
 
     def _date_recall_topic_terms(self, query: str) -> list[str]:
+        protected_terms = self._date_recall_protected_topic_terms(query)
+        if protected_terms:
+            return protected_terms
         topic_query = self._strip_date_recall_query_shell(query)
         if not topic_query:
             return []
@@ -7461,6 +7481,15 @@ class GatewayService:
                 *[term for term in expanded if not re.search(r"[\u4e00-\u9fff]", str(term or ""))],
             ]
         terms.extend(expanded)
+        return self._dedupe_date_recall_topic_terms(terms)
+
+    def _date_recall_protected_topic_terms(self, query: str) -> list[str]:
+        terms: list[str] = []
+        for phrase in extract_protected_phrases(query):
+            residue = strip_human_date_references(phrase)
+            if not re.search(r"[0-9A-Za-z\u4e00-\u9fff]", residue):
+                continue
+            terms.append(phrase)
         return self._dedupe_date_recall_topic_terms(terms)
 
     def _strip_date_recall_query_shell(self, query: str) -> str:
@@ -9628,8 +9657,24 @@ class GatewayService:
                 budget,
             )
         if self._direct_bucket_should_render_brief(query_text, bucket, moment):
-            return self._format_direct_bucket_brief(bucket, moment, budget, header=header)
+            return self._format_direct_bucket_brief(
+                bucket,
+                moment,
+                grouped_moments,
+                budget,
+                header=header,
+                query_text=query_text,
+            )
         original_block = f"{header} bucket_original\n{original}" if original else f"{header} bucket_original"
+        original_with_year_rings = self._append_attached_year_rings(
+            original_block,
+            query_text,
+            moment,
+            grouped_moments,
+            max_chars=110,
+        )
+        if count_tokens_approx(original_with_year_rings) <= budget:
+            return original_with_year_rings
         if count_tokens_approx(original_block) <= budget:
             return original_block
 
@@ -9648,19 +9693,46 @@ class GatewayService:
                     self._bucket_metadata_for_dehydration(bucket),
                 )
                 block = f"{header} bucket_capsule\n{capsule}\nmatched_moment: {self._moment_text(moment, 220)}"
+                block = self._append_attached_year_rings(
+                    block,
+                    query_text,
+                    moment,
+                    grouped_moments,
+                    max_chars=100,
+                )
                 if count_tokens_approx(block) <= budget:
                     return block
                 compact = (
                     f"{header} bucket_capsule\n{self._clip_text(capsule, 220)}\n"
                     f"matched_moment: {self._moment_text(moment, 140)}"
                 )
+                compact = self._append_attached_year_rings(
+                    compact,
+                    query_text,
+                    moment,
+                    grouped_moments,
+                    max_chars=80,
+                    limit=1,
+                )
                 if count_tokens_approx(compact) <= budget:
                     return compact
-                return self._trim_text(compact, budget)
+                compact_without_year_rings = (
+                    f"{header} bucket_capsule\n{self._clip_text(capsule, 220)}\n"
+                    f"matched_moment: {self._moment_text(moment, 140)}"
+                )
+                if count_tokens_approx(compact_without_year_rings) <= budget:
+                    return compact_without_year_rings
+                return self._trim_text(compact_without_year_rings, budget)
             except Exception as exc:
                 logger.warning("Gateway direct bucket capsule failed for %s: %s", bucket.get("id"), exc)
 
-        return self._format_direct_bucket_window(bucket, moment, grouped_moments, budget)
+        return self._format_direct_bucket_window(
+            bucket,
+            moment,
+            grouped_moments,
+            budget,
+            query_text=query_text,
+        )
 
     def _direct_bucket_should_render_brief(
         self,
@@ -9692,9 +9764,11 @@ class GatewayService:
         self,
         bucket: dict,
         moment: dict,
+        grouped_moments: dict[str, list[dict]],
         budget: int,
         *,
         header: str | None = None,
+        query_text: str = "",
     ) -> str:
         header = self._direct_bucket_brief_header(bucket, moment)
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
@@ -9706,15 +9780,33 @@ class GatewayService:
             brief = title or preview
         parts = [header, f"brief: {brief}" if brief else "brief:"]
         block = "\n".join(parts)
+        block = self._append_attached_year_rings(
+            block,
+            query_text,
+            moment,
+            grouped_moments,
+            max_chars=100,
+        )
         if count_tokens_approx(block) <= budget:
             return block
         compact_parts = [header]
         compact_brief = self._clip_text(brief, 160) if brief else ""
         compact_parts.append(f"brief: {compact_brief}" if compact_brief else "brief:")
         compact = "\n".join(compact_parts)
+        compact = self._append_attached_year_rings(
+            compact,
+            query_text,
+            moment,
+            grouped_moments,
+            max_chars=80,
+            limit=1,
+        )
         if count_tokens_approx(compact) <= budget:
             return compact
-        return self._trim_text(compact, budget)
+        compact_without_year_rings = "\n".join(compact_parts)
+        if count_tokens_approx(compact_without_year_rings) <= budget:
+            return compact_without_year_rings
+        return self._trim_text(compact_without_year_rings, budget)
 
     async def _format_source_record_direct_bucket(
         self,
@@ -9823,6 +9915,8 @@ class GatewayService:
         moment: dict,
         grouped_moments: dict[str, list[dict]],
         budget: int,
+        *,
+        query_text: str = "",
     ) -> str:
         header = self._direct_bucket_header(bucket, moment)
         original = self._rendered_bucket_content(bucket)
@@ -9836,7 +9930,7 @@ class GatewayService:
             parts.append("original_window:\n" + window)
         contexts = [
             item for item in self._context_moments_for_seed(moment, grouped_moments)
-            if item.get("section") in MOMENT_TEMPERATURE_SECTIONS
+            if item.get("section") in DIRECT_AUX_CONTEXT_SECTIONS
         ][:2]
         if contexts:
             context_text = " | ".join(
@@ -9845,6 +9939,13 @@ class GatewayService:
             )
             parts.append("context: " + context_text)
         block = "\n".join(parts)
+        block = self._append_attached_year_rings(
+            block,
+            query_text,
+            moment,
+            grouped_moments,
+            max_chars=100,
+        )
         if count_tokens_approx(block) <= budget:
             return block
         compact_parts = [
@@ -9854,9 +9955,20 @@ class GatewayService:
         if window:
             compact_parts.append("original_window:\n" + self._clip_text(window, 360))
         compact = "\n".join(compact_parts)
+        compact = self._append_attached_year_rings(
+            compact,
+            query_text,
+            moment,
+            grouped_moments,
+            max_chars=80,
+            limit=1,
+        )
         if count_tokens_approx(compact) <= budget:
             return compact
-        return self._trim_text(compact, budget)
+        compact_without_year_rings = "\n".join(compact_parts)
+        if count_tokens_approx(compact_without_year_rings) <= budget:
+            return compact_without_year_rings
+        return self._trim_text(compact_without_year_rings, budget)
 
     def _format_direct_moment(
         self,
@@ -9881,6 +9993,114 @@ class GatewayService:
             for context in contexts
         ]
         return line + "\n  context: " + " | ".join(context_lines)
+
+    def _append_attached_year_rings(
+        self,
+        block: str,
+        query_text: str,
+        seed: dict,
+        grouped_moments: dict[str, list[dict]],
+        *,
+        max_chars: int = 100,
+        limit: int = 2,
+    ) -> str:
+        year_rings = self._attached_year_ring_moments(
+            query_text,
+            seed,
+            grouped_moments,
+            limit=limit,
+        )
+        if not year_rings:
+            return block
+        text = " | ".join(
+            self._format_attached_year_ring_line(year_ring, max_chars=max_chars)
+            for year_ring in year_rings
+        )
+        return f"{block}\nyear_rings: {text}"
+
+    def _format_attached_year_ring_line(self, moment: dict, *, max_chars: int) -> str:
+        moment_id = str(moment.get("moment_id") or "")
+        id_part = f" [moment_id:{moment_id}]" if moment_id else ""
+        return f"[year_ring]{id_part} {self._moment_text(moment, max_chars)}"
+
+    def _attached_year_ring_moments(
+        self,
+        query_text: str,
+        seed: dict,
+        grouped_moments: dict[str, list[dict]],
+        *,
+        limit: int = 2,
+    ) -> list[dict]:
+        if limit <= 0 or not isinstance(seed, dict):
+            return []
+        bucket_id = str(seed.get("bucket_id") or "")
+        seed_id = str(seed.get("moment_id") or "")
+        if not bucket_id:
+            return []
+        year_rings = [
+            moment
+            for moment in grouped_moments.get(bucket_id, [])
+            if moment.get("section") == "comment"
+            and str(moment.get("moment_id") or "") != seed_id
+            and self._moment_text(moment, 120)
+        ]
+        if not year_rings:
+            return []
+
+        query_terms = self._year_ring_match_terms(query_text)
+        seed_terms = self._year_ring_match_terms(str(seed.get("text") or ""))
+        scored: list[tuple[float, int, dict]] = []
+        fallback: list[tuple[float, int, dict]] = []
+        for year_ring in year_rings:
+            text = str(year_ring.get("text") or "").lower()
+            metadata = year_ring.get("metadata", {}) if isinstance(year_ring.get("metadata"), dict) else {}
+            kind = str(metadata.get("comment_kind") or "").strip().lower()
+            ordinal = self._moment_ordinal(year_ring)
+            score = 0.0
+            query_hit = False
+            for term in query_terms:
+                if term and term.lower() in text:
+                    score += 3.0
+                    query_hit = True
+            for term in seed_terms:
+                if term and term.lower() in text:
+                    score += 1.0
+            if kind == "feel":
+                score -= 0.25
+            if score > 0:
+                scored.append((score, ordinal, year_ring))
+            elif not query_terms and kind != "feel":
+                fallback.append((0.0, ordinal, year_ring))
+
+        selected = scored if scored else fallback
+        selected.sort(key=lambda item: (-item[0], -item[1]))
+        return [dict(moment) for _score, _ordinal, moment in selected[:limit]]
+
+    def _year_ring_match_terms(self, text: str) -> list[str]:
+        terms: list[str] = []
+        terms.extend(extract_protected_phrases(text))
+        terms.extend(self.recall_policy.specific_query_terms(text))
+        terms.extend(content_terms_for_query(text, self.relevance_options))
+        kept: list[str] = []
+        seen: set[str] = set()
+        for term in terms:
+            cleaned = " ".join(str(term or "").split()).strip()
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            compact = re.sub(r"\s+", "", key)
+            if len(compact) < 2 or key in seen:
+                continue
+            seen.add(key)
+            kept.append(cleaned)
+        return kept[:12]
+
+    @staticmethod
+    def _moment_ordinal(moment: dict) -> int:
+        try:
+            return int(moment.get("ordinal") or 0)
+        except (TypeError, ValueError):
+            return 0
 
     @staticmethod
     def _normalize_direct_render_mode(value: object) -> str:
@@ -13027,7 +13247,16 @@ class GatewayService:
         early_query_plan = self._recall_query_plan(query)
         if getattr(early_query_plan, "skip_reason", "") == "recall_meta_without_target":
             return [], []
-        if getattr(early_query_plan, "skip_long_term_recall", False) and not str(search_query or "").strip():
+        allow_raw_semantic_for_auto_vague = (
+            getattr(early_query_plan, "skip_reason", "") == "auto_vague_query"
+            and allow_semantic
+            and not self._auto_query_too_vague(query)
+        )
+        if (
+            getattr(early_query_plan, "skip_long_term_recall", False)
+            and not str(search_query or "").strip()
+            and not allow_raw_semantic_for_auto_vague
+        ):
             return [], []
 
         raw_query = query

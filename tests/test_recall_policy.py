@@ -365,6 +365,11 @@ def test_locatable_terms_gate_light_chat_and_generic_status_queries():
     assert meta_plan.long_term_route == "skip"
     assert meta_plan.skip_reason == "recall_meta_without_target"
 
+    protected_meta_plan = policy.plan_query("哇哦，但是单独的“痛痛飞”召回不到！不过这样也够了")
+    assert "痛痛飞" in protected_meta_plan.locatable_terms
+    assert protected_meta_plan.long_term_route == "search"
+    assert protected_meta_plan.skip_reason == ""
+
     for query in ("啊啊啊啊啊", "啊啊啊啊啊一点了！！", "一点了！！", "现在几点了", "啊啊啊好晚了"):
         plan = policy.plan_query(query)
         assert plan.locatable_terms == ()

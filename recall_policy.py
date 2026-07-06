@@ -11,6 +11,7 @@ from memory_relevance import (
     active_facets,
     content_terms_for_query,
     emotional_recall_plan,
+    extract_protected_phrases,
     facets_for_node,
     memory_relevance_options_from_config,
     query_has_facet,
@@ -1541,10 +1542,12 @@ class RecallPolicy:
             return True, "empty_query"
         if self.is_auto_query_too_vague(text):
             return True, "auto_vague_query"
-        if self._query_has_recall_system_meta_terms(text) and not locatable_terms:
+        protected_phrases = tuple(extract_protected_phrases(text))
+        if self._query_has_recall_system_meta_terms(text) and not locatable_terms and not protected_phrases:
             return True, "recall_meta_without_target"
         if (
             not locatable_terms
+            and not protected_phrases
             and self._query_has_low_signal_shell(text)
             and not self.is_emotional_reason_lookup(text)
             and not self.is_detail_read_query(text)
@@ -2102,6 +2105,8 @@ class RecallPolicy:
                 strong_keys.add(key)
             keywords.append(cleaned)
 
+        for phrase in extract_protected_phrases(raw):
+            add(phrase, strong=True)
         for match in ENTITY_QUOTED_RE.finditer(raw):
             add(match.group(1), strong=True)
         for match in ENTITY_VERSION_RE.finditer(raw):
@@ -2272,6 +2277,8 @@ class RecallPolicy:
             seen.add(key)
             output.append(cleaned)
 
+        for phrase in extract_protected_phrases(raw):
+            add(phrase)
         for match in ENTITY_QUOTED_RE.finditer(raw):
             add(match.group(1))
         for match in ENTITY_VERSION_RE.finditer(raw):

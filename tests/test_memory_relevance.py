@@ -3,6 +3,7 @@ from memory_relevance import (
     content_terms_for_query,
     emotional_recall_plan,
     emotional_recall_terms,
+    extract_protected_phrases,
     facets_for_node,
     facets_for_text,
     memory_relevance_options_from_config,
@@ -177,6 +178,17 @@ def test_associative_prompt_uses_quoted_focus_as_query_terms():
     assert recall_focus_query("你会想到什么") == ""
     assert content_terms_for_query("你会想到什么") == []
     assert recall_search_query("你会想到什么") == ""
+
+
+def test_protected_phrases_are_kept_as_whole_query_terms():
+    quoted_terms = content_terms_for_query("单独的“痛痛飞”召回不到")
+    assert extract_protected_phrases("单独的“痛痛飞”召回不到") == ["痛痛飞"]
+    assert quoted_terms[0] == "痛痛飞"
+    assert "痛" not in quoted_terms
+    assert "飞" not in quoted_terms
+
+    bracket_terms = content_terms_for_query("装睡和（手指）")
+    assert bracket_terms[:2] == ["手指", "装睡"]
 
 
 def test_associative_prompt_uses_identity_user_terms_not_hardcoded_names():

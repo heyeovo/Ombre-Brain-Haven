@@ -12945,7 +12945,10 @@ class GatewayService:
 
         if not query or self.inject_max_cards <= 0:
             return [], []
-        if self._auto_query_too_vague(query) and not str(search_query or "").strip():
+        early_query_plan = self._recall_query_plan(query)
+        if getattr(early_query_plan, "skip_reason", "") == "recall_meta_without_target":
+            return [], []
+        if getattr(early_query_plan, "skip_long_term_recall", False) and not str(search_query or "").strip():
             return [], []
 
         raw_query = query
@@ -15881,6 +15884,28 @@ class GatewayService:
                 "recalled_moment_debug": [],
                 "diffused_moment_debug": [],
                 "hook_recall_debug": {"mode": "fast", "skip_reason": "max_cards_zero"},
+            }
+        query_plan = self._recall_query_plan(query)
+        if getattr(query_plan, "skip_reason", "") == "recall_meta_without_target":
+            query_planner_debug["skip_reason"] = "recall_meta_without_target"
+            return [], [], {
+                "query_preview": self._clip_text(query, 500),
+                "domain_sentinel_debug": domain_sentinel_debug,
+                "query_planner_debug": query_planner_debug,
+                "memory_sentinel_debug": memory_sentinel_debug,
+                "recalled_bucket_ids": [],
+                "recalled_bucket_debug": [],
+                "recalled_moment_ids": [],
+                "diffused_bucket_ids": [],
+                "diffused_moment_ids": [],
+                "recalled_moment_debug": [],
+                "diffused_moment_debug": [],
+                "suppressed_bucket_candidates": [],
+                "hook_recall_debug": {
+                    "mode": "fast_bucket",
+                    "skip_reason": query_planner_debug["skip_reason"],
+                    "candidate_count": 0,
+                },
             }
 
         all_buckets = await self._list_gateway_buckets(include_archive=False)

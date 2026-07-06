@@ -338,6 +338,8 @@ def test_topic_evidence_terms_are_filtered_once_in_policy():
 
     assert policy.specific_query_terms("FF14 进度 偏好") == ["FF14"]
     assert policy.specific_query_terms("v2.0 状态") == ["v2.0"]
+    assert "关键词" not in policy.specific_query_terms("这次没靠日期+关键词啦，这次召回的是记忆不是原文")
+    assert "原文" not in policy.specific_query_terms("这次没靠日期+关键词啦，这次召回的是记忆不是原文")
 
 
 def test_locatable_terms_gate_light_chat_and_generic_status_queries():
@@ -356,6 +358,12 @@ def test_locatable_terms_gate_light_chat_and_generic_status_queries():
     assert vague_read.activated_axis_groups == ()
     assert vague_read.long_term_route == "skip"
     assert vague_read.skip_reason == "auto_vague_query"
+
+    meta_query = "这次没靠日期+关键词啦，这次召回的是记忆不是原文>///< 下一条换个别的试试，不行就去修一下"
+    meta_plan = policy.plan_query(meta_query)
+    assert meta_plan.locatable_terms == ()
+    assert meta_plan.long_term_route == "skip"
+    assert meta_plan.skip_reason == "recall_meta_without_target"
 
     for query in ("啊啊啊啊啊", "啊啊啊啊啊一点了！！", "一点了！！", "现在几点了", "啊啊啊好晚了"):
         plan = policy.plan_query(query)

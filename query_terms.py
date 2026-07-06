@@ -142,10 +142,36 @@ LOW_SIGNAL_CHECKIN_TERMS = frozenset(
     }
 )
 
+RECALL_SYSTEM_META_TERMS = frozenset(
+    {
+        "关键词",
+        "关键字",
+        "原文",
+        "原话",
+        "召回",
+        "检索",
+        "查记忆",
+        "记忆",
+        "长记忆",
+        "命中",
+        "注入",
+        "召回哨兵",
+        "主域判官",
+        "recalled",
+        "recall",
+        "retrieval",
+        "memory",
+        "injected",
+        "inject",
+        "diffused",
+        "diffusion",
+    }
+)
+
 QUERY_PLANNER_GENERIC_TERMS = frozenset(
     {
+        *RECALL_SYSTEM_META_TERMS,
         "recent",
-        "memory",
         "context",
         "current",
         "remember",

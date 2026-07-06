@@ -20,6 +20,7 @@ from memory_relevance import (
     recall_topic_query,
 )
 from identity import identity_names
+from query_terms import RECALL_SYSTEM_META_TERMS
 
 
 CONTEXT_ONLY_SECTIONS = frozenset({"affect_anchor", "favorite_reason", "comment", "followup"})
@@ -49,6 +50,7 @@ CONTEXT_ONLY_SECTION_ALIASES = {
 MARKDOWN_HEADING_RE = re.compile(r"^(#{2,6})\s+(.+?)\s*$")
 WEAK_RECALL_TOPIC_TERMS = frozenset(
     {
+        *RECALL_SYSTEM_META_TERMS,
         "进度",
         "偏好",
         "情况",
@@ -1512,6 +1514,8 @@ class RecallPolicy:
             return True, "empty_query"
         if self.is_auto_query_too_vague(text):
             return True, "auto_vague_query"
+        if self._query_has_recall_system_meta_terms(text) and not locatable_terms:
+            return True, "recall_meta_without_target"
         if (
             not locatable_terms
             and self._query_has_low_signal_shell(text)
@@ -1522,6 +1526,16 @@ class RecallPolicy:
         ):
             return True, "no_locatable_terms"
         return False, ""
+
+    def _query_has_recall_system_meta_terms(self, query: str) -> bool:
+        compact = self._compact_entity_keyword(query)
+        if not compact:
+            return False
+        return any(
+            self._compact_entity_keyword(term) in compact
+            for term in RECALL_SYSTEM_META_TERMS
+            if self._compact_entity_keyword(term)
+        )
 
     def build_query_anchor_plan(self, query: str) -> QueryAnchorPlan:
         return build_query_anchor_plan(query, self.options)
@@ -2525,6 +2539,8 @@ class RecallPolicy:
             if key in seen:
                 continue
             if key in WEAK_RECALL_TOPIC_TERMS:
+                continue
+            if key in RECALL_SYSTEM_META_TERMS:
                 continue
             if self._is_recall_context_term(cleaned):
                 continue

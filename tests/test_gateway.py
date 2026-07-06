@@ -1524,6 +1524,99 @@ def test_gateway_deictic_read_action_does_not_use_sentence_fragments_as_locatabl
     assert debug["query_planner_debug"]["recall_query_plan"]["locatable_terms"] == []
 
 
+def test_gateway_recall_meta_terms_do_not_direct_match_without_target(
+    monkeypatch, test_config, bucket_mgr
+):
+    job_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n小雨投了超多岗位没有回复，建议换关键词投递。",
+        name="小雨求职困境",
+        hours_ago=5,
+        domain=["项目"],
+    )
+    growth_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n小雨问不再依赖哥哥算不算长大。",
+        name="不再依赖哥哥算长大吗",
+        hours_ago=4,
+        domain=["关系"],
+    )
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            core_memory_budget=0,
+            recent_context_budget=0,
+            current_inner_state_interval_rounds=0,
+            relationship_weather_interval_rounds=0,
+            favorite_memory_interval_rounds=0,
+            query_planner_enabled=False,
+        ),
+        bucket_mgr,
+        embedding_results=[(job_id, 0.99), (growth_id, 0.98)],
+    )
+    query = "这次没靠日期+关键词啦，这次召回的是记忆不是原文>///< 下一条换个别的试试，不行就去修一下"
+
+    payload, recalled_ids, debug = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": query}]},
+            "sess-recall-meta-without-target",
+            include_debug=True,
+        )
+    )
+
+    injected = _joined_message_content(payload["messages"])
+    assert recalled_ids == []
+    assert "Recalled Memory" not in injected
+    assert "小雨求职困境" not in injected
+    assert "不再依赖哥哥算长大吗" not in injected
+    assert debug["prepare_timing_debug"]["low_signal_auto_recall"] is True
+    assert debug["query_planner_debug"]["recall_query_plan"]["locatable_terms"] == []
+    assert debug["query_planner_debug"]["recall_query_plan"]["skip_reason"] == "recall_meta_without_target"
+
+
+def test_gateway_recall_meta_terms_still_allow_named_target(
+    monkeypatch, test_config, bucket_mgr
+):
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n小雨投了超多岗位没有回复，建议换关键词投递。",
+        name="小雨求职困境",
+        hours_ago=5,
+        domain=["项目"],
+    )
+    _, service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            core_memory_budget=0,
+            recent_context_budget=0,
+            current_inner_state_interval_rounds=0,
+            relationship_weather_interval_rounds=0,
+            favorite_memory_interval_rounds=0,
+            query_planner_enabled=False,
+        ),
+        bucket_mgr,
+        embedding_results=[],
+    )
+    query = "召回小雨求职困境那条"
+
+    payload, recalled_ids, debug = _run(
+        service.prepare_payload(
+            {"messages": [{"role": "user", "content": query}]},
+            "sess-recall-meta-with-target",
+            include_debug=True,
+        )
+    )
+
+    injected = _joined_message_content(payload["messages"])
+    assert bucket_id in recalled_ids
+    assert "小雨求职困境" in injected
+    assert debug["query_planner_debug"]["recall_query_plan"]["route"] == "search"
+    locatable_terms = debug["query_planner_debug"]["recall_query_plan"]["locatable_terms"]
+    assert any(term in locatable_terms for term in ("小雨", "求职", "小雨求职困境"))
+
+
 def test_gateway_current_time_status_reaction_does_not_recall_old_alarm_memory(
     monkeypatch, test_config, bucket_mgr
 ):
@@ -6137,6 +6230,49 @@ def test_gateway_hook_recall_skips_empty_cards(monkeypatch, test_config, bucket_
     assert "confidence:" not in additional_context
     assert "domain:" not in additional_context
     assert "ombre:empty#m2" not in additional_context
+
+
+def test_gateway_hook_recall_meta_terms_need_real_target(monkeypatch, test_config, bucket_mgr):
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n小雨投了超多岗位没有回复，建议换关键词投递。",
+        name="小雨求职困境",
+        hours_ago=5,
+        domain=["项目"],
+    )
+    app, _service, _, _ = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recent_context_budget=0,
+            recalled_memory_budget=500,
+            related_memory_budget=0,
+            current_inner_state_interval_rounds=0,
+            relationship_weather_interval_rounds=0,
+            favorite_memory_interval_rounds=0,
+            query_planner_enabled=False,
+        ),
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.99)],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/hook/recall",
+            headers={"Authorization": "Bearer gateway-secret"},
+            json={
+                "message": "这次没靠日期+关键词啦，这次召回的是记忆不是原文",
+                "session_id": "sess-hook-recall-meta",
+                "max_notes": 1,
+                "include_debug": True,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["cards"] == []
+    assert payload["debug"]["query_planner_debug"]["skip_reason"] == "recall_meta_without_target"
+    assert payload["debug"]["recalled_bucket_ids"] == []
 
 
 def test_gateway_hook_recall_uses_debug_text_for_reading_note_only_card(

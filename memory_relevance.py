@@ -8,6 +8,7 @@ from typing import Any
 import jieba
 
 from identity import identity_names
+from query_terms import RECALL_SYSTEM_META_TERMS
 
 
 DEFAULT_FACET_ALIASES = {
@@ -170,7 +171,7 @@ QUERY_BASE_TOKEN_STOPWORDS = frozenset(
     if not re.fullmatch(r"[\u4e00-\u9fff]", term)
 )
 QUERY_WATER_STOPWORDS = frozenset(
-    (QUERY_BASE_TOKEN_STOPWORDS | QUERY_EXTRA_STOPWORDS)
+    (QUERY_BASE_TOKEN_STOPWORDS | QUERY_EXTRA_STOPWORDS | RECALL_SYSTEM_META_TERMS)
     - QUERY_KEEPWORDS
 )
 QUERY_TERM_STOPWORDS = QUERY_WATER_STOPWORDS

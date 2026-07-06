@@ -2472,6 +2472,34 @@
   .chat-memory-card-body {
     overflow-wrap: anywhere;
   }
+  .chat-memory-edit-field {
+    display: grid;
+    gap: 5px;
+    color: var(--text-light);
+    font-size: 11px;
+  }
+  .chat-memory-edit-field input,
+  .chat-memory-edit-field textarea {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255,255,255,0.42);
+    color: var(--text);
+    font: inherit;
+    line-height: 1.5;
+    padding: 8px 9px;
+  }
+  .chat-memory-edit-field textarea {
+    min-height: 96px;
+    resize: vertical;
+  }
+  .chat-memory-edit-grid {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 8px;
+  }
   .chat-memory-card-meta {
     color: var(--text-light);
     font-size: 11px;
@@ -2484,6 +2512,9 @@
   }
 
   @media (max-width: 768px) {
+    .chat-memory-edit-grid {
+      grid-template-columns: 1fr;
+    }
     .header { padding: 20px; flex-wrap: wrap; }
     .header h1 { font-size: 22px; }
     .darkroom-door {
@@ -7620,7 +7651,7 @@ async function loadConfig() {
     document.getElementById('cfg-reflection-daily-turns').value =
       (cfg.reflection && cfg.reflection.daily_conversation_turn_limit) ?? 12;
     document.getElementById('cfg-reflection-chat-memory-mode').value =
-      (cfg.reflection && cfg.reflection.daily_chat_memory_mode) || 'auto';
+      (cfg.reflection && cfg.reflection.daily_chat_memory_mode) || 'review';
     document.getElementById('cfg-reflection-chat-memory-turns').value =
       (cfg.reflection && cfg.reflection.daily_chat_memory_turn_limit) ?? 0;
     document.getElementById('cfg-reflection-memory-anchor').value =
@@ -7766,7 +7797,7 @@ async function saveConfig(persist, persistEnv) {
       daily_enabled: document.getElementById('cfg-reflection-daily').value === 'true',
       daily_min_memory_items: numberValue('cfg-reflection-daily-min-memory', 5),
       daily_conversation_turn_limit: numberValue('cfg-reflection-daily-turns', 12),
-      daily_chat_memory_mode: document.getElementById('cfg-reflection-chat-memory-mode').value || 'auto',
+      daily_chat_memory_mode: document.getElementById('cfg-reflection-chat-memory-mode').value || 'review',
       daily_chat_memory_turn_limit: numberValue('cfg-reflection-chat-memory-turns', 0),
       memory_affect_anchor_enabled: document.getElementById('cfg-reflection-memory-anchor').value === 'true',
       relationship_weather_affect_anchor_enabled: document.getElementById('cfg-reflection-weather-anchor').value === 'true',

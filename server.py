@@ -11123,6 +11123,7 @@ async def api_daily_chat_memory_confirm(request):
         bucket_mgr,
         embedding_engine=embedding_engine,
         action=action,
+        edits=body.get("edits") if isinstance(body.get("edits"), dict) else None,
     )
     return JSONResponse(result)
 
@@ -11444,9 +11445,9 @@ async def api_config_get(request):
             "daily_chat_memory_mode": str(
                 reflection_cfg.get(
                     "daily_chat_memory_mode",
-                    getattr(reflection_engine, "daily_chat_memory_mode", "auto"),
+                    getattr(reflection_engine, "daily_chat_memory_mode", "review"),
                 )
-                or "auto"
+                or "review"
             ),
             "daily_chat_memory_hour": int(
                 reflection_cfg.get(
@@ -12011,9 +12012,9 @@ async def api_config_update(request):
             )
             updated.append("reflection.daily_activity_summary_max_tokens")
         if "daily_chat_memory_mode" in r:
-            mode = str(r.get("daily_chat_memory_mode") or "auto").strip().lower()
+            mode = str(r.get("daily_chat_memory_mode") or "review").strip().lower()
             if mode not in {"auto", "review", "off"}:
-                mode = "auto"
+                mode = "review"
             reflection_cfg["daily_chat_memory_mode"] = mode
             updated.append("reflection.daily_chat_memory_mode")
         if "daily_chat_memory_hour" in r:
@@ -12468,8 +12469,8 @@ async def api_config_update(request):
                         1000,
                     )
                 if "daily_chat_memory_mode" in body["reflection"]:
-                    mode = str(body["reflection"].get("daily_chat_memory_mode") or "auto").strip().lower()
-                    sc_reflection["daily_chat_memory_mode"] = mode if mode in {"auto", "review", "off"} else "auto"
+                    mode = str(body["reflection"].get("daily_chat_memory_mode") or "review").strip().lower()
+                    sc_reflection["daily_chat_memory_mode"] = mode if mode in {"auto", "review", "off"} else "review"
                 if "daily_chat_memory_hour" in body["reflection"]:
                     sc_reflection["daily_chat_memory_hour"] = _int_between(
                         body["reflection"].get("daily_chat_memory_hour"),
@@ -12908,9 +12909,9 @@ if __name__ == "__main__":
                         80,
                         1000,
                     )
-                    mode = str(reflection_cfg.get("daily_chat_memory_mode") or "auto").strip().lower()
+                    mode = str(reflection_cfg.get("daily_chat_memory_mode") or "review").strip().lower()
                     local_reflection_engine.daily_chat_memory_mode = (
-                        mode if mode in {"auto", "review", "off"} else "auto"
+                        mode if mode in {"auto", "review", "off"} else "review"
                     )
                     local_reflection_engine.daily_chat_memory_hour = _int_between(
                         reflection_cfg.get("daily_chat_memory_hour"),

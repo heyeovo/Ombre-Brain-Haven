@@ -568,6 +568,9 @@ def test_dashboard_exposes_chat_memory_tab_module():
     assert "dailyChatMemoryApiBase() + '/api/daily-chat-memory/run'" not in module
     assert "dailyChatMemoryApiBase() + '/api/daily-chat-memory/pending?limit=20'" in module
     assert "dailyChatMemoryApiBase() + '/api/daily-chat-memory/confirm'" in module
+    assert "data-field=\"title\"" in module
+    assert "data-field=\"content\"" in module
+    assert "body.edits[id] = edits;" in module
 
 
 def test_dockerfile_copies_dashboard_assets():

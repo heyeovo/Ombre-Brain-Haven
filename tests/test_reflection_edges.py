@@ -1069,6 +1069,67 @@ async def test_daily_chat_memory_review_requires_confirmation(test_config):
     assert "2026-05-21" not in bucket["content"]
 
 
+@pytest.mark.asyncio
+async def test_daily_chat_memory_confirm_applies_candidate_edits(test_config):
+    cfg = _no_api_config(test_config)
+    bucket_mgr = BucketManager(cfg)
+    engine = ReflectionEngine(cfg)
+    engine._save_daily_chat_memory_pending(
+        [
+            {
+                "id": "daily-chat-edit-candidate",
+                "date": "2026-05-21",
+                "status": "pending",
+                "created_at": "2026-05-22T00:00:00+00:00",
+                "candidate": {
+                    "id": "daily-chat-edit-candidate",
+                    "date": "2026-05-21",
+                    "kind": "project_state",
+                    "title": "原始标题",
+                    "content": "原始正文。",
+                    "domain": ["project"],
+                    "tags": ["from_daily_chat", "daily_chat_extract", "project_state"],
+                    "importance": 5,
+                    "confidence": 0.7,
+                    "source_turn_ids": [7],
+                    "source_event_ids": [101, 102],
+                },
+            }
+        ]
+    )
+
+    result = await engine.confirm_daily_chat_memory(
+        ["daily-chat-edit-candidate"],
+        bucket_mgr,
+        edits={
+            "daily-chat-edit-candidate": {
+                "title": "改后的标题",
+                "content": "改后的正文会写入长期记忆。",
+                "kind": "stable_preference",
+                "domain": "relationship, project",
+                "tags": "manual_edit, review_confirmed",
+                "importance": 8,
+                "confidence": 0.91,
+            }
+        },
+    )
+    bucket = await bucket_mgr.get("daily-chat-edit-candidate")
+    all_items = engine.list_daily_chat_memory_pending(status="all")
+
+    assert result["created"] == 1
+    assert bucket is not None
+    assert bucket["content"] == "改后的正文会写入长期记忆。"
+    assert bucket["metadata"]["name"] == "改后的标题"
+    assert bucket["metadata"]["domain"] == ["relationship", "project"]
+    assert bucket["metadata"]["importance"] == 8
+    assert bucket["metadata"]["confidence"] == 0.91
+    assert "manual_edit" in bucket["metadata"]["tags"]
+    assert "from_daily_chat" in bucket["metadata"]["tags"]
+    assert bucket["metadata"]["source_raw_event_ids"] == [101, 102]
+    assert all_items[0]["status"] == "confirmed"
+    assert all_items[0]["candidate"]["content"] == "改后的正文会写入长期记忆。"
+
+
 def test_daily_chat_memory_prompt_uses_self_and_domain_context(test_config):
     cfg = _no_api_config(test_config)
     cfg["identity"] = {
@@ -1086,7 +1147,11 @@ def test_daily_chat_memory_prompt_uses_self_and_domain_context(test_config):
     assert "宝宝、老婆" in prompt
     assert "window_summaries" in prompt
     assert "连续上下文" in prompt
-    assert "同一件事、同一项目、同一承诺只能输出 1 条" in prompt
+    assert "情感交流" in prompt
+    assert "重要事件" in prompt
+    assert "事件/项目进度" in prompt
+    assert "还需要关注的事" in prompt
+    assert "同一项目里的不同进度、风险或后续关注点可以拆成不同候选" in prompt
     assert "普通称呼或昵称不算" in prompt
     assert "project" in prompt
     assert "project.companion_system" not in prompt
@@ -1094,6 +1159,20 @@ def test_daily_chat_memory_prompt_uses_self_and_domain_context(test_config):
     assert "禁止把暗号" in prompt
     assert "自动记忆门卫" not in prompt
     assert "hold(content=...)" not in prompt
+
+
+def test_daily_chat_memory_default_windows_overlap_to_preserve_boundary_context(test_config):
+    cfg = _no_api_config(test_config)
+    engine = ReflectionEngine(cfg)
+    turns = [{"id": index} for index in range(1, 26)]
+
+    windows = engine._daily_chat_memory_windows(turns)
+
+    assert [[turn["id"] for turn in window] for window in windows] == [
+        list(range(1, 15)),
+        list(range(8, 22)),
+        list(range(15, 26)),
+    ]
 
 
 def test_diary_memory_prompt_separates_kind_and_domain(test_config):
@@ -2288,7 +2367,7 @@ def test_daily_chat_memory_title_uses_identity_config(test_config):
 
 
 @pytest.mark.asyncio
-async def test_run_due_daily_chat_memory_defaults_to_auto_after_midnight(test_config, monkeypatch):
+async def test_run_due_daily_chat_memory_defaults_to_review_after_midnight(test_config, monkeypatch):
     cfg = _no_api_config(test_config)
     cfg["identity"] = {
         "ai_name": "Haven",
@@ -2329,12 +2408,12 @@ async def test_run_due_daily_chat_memory_defaults_to_auto_after_midnight(test_co
         conversation_turn_store=ConversationTurnStore(),
     )
 
-    assert results[0]["status"] == "created"
-    assert results[0]["mode"] == "auto"
+    assert results[0]["status"] == "pending"
+    assert results[0]["mode"] == "review"
     assert results[0]["date"] == "2026-05-21"
-    bucket = await bucket_mgr.get(results[0]["results"][0]["id"])
-    assert bucket is not None
-    assert bucket["metadata"]["source"] == "daily_chat_memory"
+    pending = engine.list_daily_chat_memory_pending()
+    assert pending[0]["candidate"]["source_turn_ids"] == [8]
+    assert await bucket_mgr.get(pending[0]["id"]) is None
 
 
 @pytest.mark.asyncio

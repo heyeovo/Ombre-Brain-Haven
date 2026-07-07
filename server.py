@@ -419,10 +419,14 @@ async def dream_hook(request):
         candidates = [
             b for b in all_buckets
             if b["metadata"].get("type") not in ("permanent", "feel")
+            and "journey" not in (b["metadata"].get("domain") or [])
             and not b["metadata"].get("pinned", False)
             and not b["metadata"].get("protected", False)
         ]
-        candidates.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+        candidates.sort(
+            key=lambda b: b["metadata"].get("event_time") or b["metadata"].get("created", ""),
+            reverse=True
+        )
         recent = candidates[:10]
 
         if not recent:
@@ -1071,14 +1075,32 @@ async def hold(
     # --- Journey mode: normal bucket with domain=["journey"], excluded from regular surfacing ---
     # --- 轨迹模式：普通桶但 domain=["journey"]，不参与普通浮现和搜索 ---
     if journey:
+        # Auto-tag for title generation (domain stays forced to ["journey"])
+        try:
+            analysis = await dehydrator.analyze(content)
+            suggested_name = analysis.get("suggested_name", "")
+            auto_tags = analysis.get("tags", [])
+            auto_valence = analysis.get("valence", 0.5)
+            auto_arousal = analysis.get("arousal", 0.3)
+        except Exception as e:
+            logger.warning(f"Journey auto-tagging failed, using defaults / 轨迹自动打标失败: {e}")
+            suggested_name = ""
+            auto_tags = []
+            auto_valence = 0.5
+            auto_arousal = 0.3
+
+        all_tags = list(dict.fromkeys(auto_tags + extra_tags))
+        final_valence = valence if 0 <= valence <= 1 else auto_valence
+        final_arousal = arousal if 0 <= arousal <= 1 else auto_arousal
+
         bucket_id = await bucket_mgr.create(
             content=content,
-            tags=extra_tags,
+            tags=all_tags,
             importance=importance,
             domain=["journey"],
-            valence=valence if 0 <= valence <= 1 else 0.5,
-            arousal=arousal if 0 <= arousal <= 1 else 0.3,
-            name=None,
+            valence=final_valence,
+            arousal=final_arousal,
+            name=suggested_name or None,
         )
         try:
             await embedding_engine.generate_and_store(bucket_id, content)
@@ -1474,15 +1496,19 @@ async def dream() -> str:
     candidates = [
         b for b in all_buckets
         if b["metadata"].get("type") not in ("permanent", "feel")
-        and not b["metadata"].get("resolved", False)   
-        and not b["metadata"].get("digested", False)   
+        and "journey" not in (b["metadata"].get("domain") or [])
+        and not b["metadata"].get("resolved", False)
+        and not b["metadata"].get("digested", False)
         and not b["metadata"].get("pinned", False)
         and not b["metadata"].get("protected", False)
         and not _recently_surfaced(b["metadata"])
     ]
 
-    # --- Sort by creation time desc, take top 10 ---
-    candidates.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+    # --- Sort by event_time desc, fallback to created, take top 10 ---
+    candidates.sort(
+        key=lambda b: b["metadata"].get("event_time") or b["metadata"].get("created", ""),
+        reverse=True
+    )
     recent = candidates[:10]
 
     if not recent:

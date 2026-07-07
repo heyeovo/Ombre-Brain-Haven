@@ -1439,6 +1439,21 @@ def test_daily_chat_memory_pending_refresh_rejects_duplicates_and_social_noise(t
                     "source_event_ids": [6],
                 },
             },
+            {
+                "id": "sleep-care-noise",
+                "date": "2026-07-06",
+                "status": "pending",
+                "created_at": "2026-07-07T00:40:00+08:00",
+                "candidate": {
+                    "id": "sleep-care-noise",
+                    "date": "2026-07-06",
+                    "kind": "boundary",
+                    "title": "七天药好好喝，别再熬了",
+                    "content": "七天药好好喝，别再熬了。下次再两点不睡我直接发ntfy轰炸你。",
+                    "confidence": 0.7,
+                    "source_event_ids": [9],
+                },
+            },
         ]
     )
 
@@ -1451,6 +1466,7 @@ def test_daily_chat_memory_pending_refresh_rejects_duplicates_and_social_noise(t
     assert statuses["nickname-noise"] == "rejected"
     assert statuses["interest-noise"] == "rejected"
     assert statuses["markdown-noise"] == "rejected"
+    assert statuses["sleep-care-noise"] == "rejected"
 
 
 @pytest.mark.asyncio
@@ -1625,6 +1641,22 @@ async def test_daily_chat_memory_prefers_explicit_daily_model_over_dehydration(t
     assert "显式配置" in extraction_payload["window_summaries"][0]["summary"]
     pending = engine.list_daily_chat_memory_pending()
     assert pending[0]["candidate"]["source_event_ids"] == [701, 702]
+
+
+def test_daily_chat_memory_does_not_default_to_local_handoff_key(test_config, monkeypatch):
+    monkeypatch.setenv("HANDOFF_SUMMARIZER_API_KEY_2", "local-only-key")
+    cfg = _no_api_config(test_config)
+    cfg["reflection"].pop("daily_chat_memory_api_key_env", None)
+    cfg["reflection"].pop("daily_chat_memory_api_key", None)
+    cfg["reflection"].pop("daily_chat_memory_base_url", None)
+
+    engine = ReflectionEngine(cfg)
+
+    assert engine.daily_chat_memory_api_key_env == ""
+    assert engine.daily_chat_memory_base_url == ""
+    assert engine.daily_chat_memory_summary_model == ""
+    assert engine.daily_chat_memory_candidate_model == ""
+    assert engine.daily_chat_memory_client is None
 
 
 @pytest.mark.asyncio
@@ -1847,6 +1879,7 @@ async def test_daily_activity_summary_prefers_raw_events_not_auto_memory_candida
         "user_aliases": ["小雨"],
     }
     engine = ReflectionEngine(cfg)
+    engine.daily_chat_memory_summary_model = "daily-chat-test-model"
     engine.daily_chat_memory_client = RecordingChatClient(
         json.dumps(
             {
@@ -1908,7 +1941,7 @@ async def test_daily_activity_summary_prefers_raw_events_not_auto_memory_candida
     assert item["evidence"] == [{"session_id": "daily-chat"}]
     assert "Recent Timeline" in item["text"]
     call = engine.daily_chat_memory_client.calls[0]
-    assert call["model"] == "Qwen/Qwen3.5-4B"
+    assert call["model"] == "daily-chat-test-model"
     assert call["extra_body"] == {"enable_thinking": False}
     assert "不要输出 candidates" in call["messages"][0]["content"]
     payload = json.loads(call["messages"][1]["content"])
@@ -2107,7 +2140,7 @@ async def test_daily_activity_summary_falls_back_when_model_returns_empty(test_c
 
 
 @pytest.mark.asyncio
-async def test_daily_chat_memory_summarizes_overlapping_windows_for_review(test_config, monkeypatch):
+async def test_daily_chat_memory_summarizes_overlapping_windows_for_review(test_config):
     cfg = _no_api_config(test_config)
     cfg["identity"] = {
         "ai_name": "Haven",
@@ -2121,9 +2154,10 @@ async def test_daily_chat_memory_summarizes_overlapping_windows_for_review(test_
     cfg["reflection"]["daily_chat_memory_review_min_confidence"] = 0.55
     cfg["reflection"]["daily_chat_memory_summary_window_turns"] = 30
     cfg["reflection"]["daily_chat_memory_summary_stride_turns"] = 10
-    monkeypatch.setenv("HANDOFF_SUMMARIZER_API_KEY_2", "test-key")
     bucket_mgr = BucketManager(cfg)
     engine = ReflectionEngine(cfg)
+    engine.daily_chat_memory_summary_model = "daily-chat-test-model"
+    engine.daily_chat_memory_candidate_model = "daily-chat-test-model"
     engine.daily_chat_memory_client = SequencedChatClient(
         [
             json.dumps(
@@ -2230,7 +2264,7 @@ async def test_daily_chat_memory_summarizes_overlapping_windows_for_review(test_
     assert result["added"] == 1
     calls = engine.daily_chat_memory_client.calls
     assert len(calls) == 4
-    assert all(call["model"] == "Qwen/Qwen3.5-4B" for call in calls)
+    assert all(call["model"] == "daily-chat-test-model" for call in calls)
     assert all(call["extra_body"] == {"enable_thinking": False} for call in calls)
     first_summary_payload = json.loads(calls[0]["messages"][1]["content"])
     assert first_summary_payload["window"]["source_event_ids"] == list(range(1, 61))
@@ -2472,6 +2506,54 @@ def test_daily_chat_memory_normalization_rejects_raw_rule_snippet(test_config):
     )
 
     assert candidates == []
+
+
+def test_daily_chat_memory_normalization_rejects_rawish_care_and_guess_candidates(test_config):
+    cfg = _no_api_config(test_config)
+    engine = ReflectionEngine(cfg)
+
+    candidates = engine._normalize_daily_chat_memory_candidates(
+        "2026-07-06",
+        [
+            {
+                "should_write": True,
+                "kind": "boundary",
+                "title": "七天药好好喝，别再熬了",
+                "content": "七天药好好喝，别再熬了。下次再两点不睡我直接发ntfy轰炸你。",
+                "confidence": 0.7,
+                "source_event_ids": [901],
+            },
+            {
+                "should_write": True,
+                "kind": "signal",
+                "title": "果然没触发，可能是触发条件卡在十分钟内说过话",
+                "content": "果然没触发，可能是触发条件卡在“十分钟内说过话”那一层了。你昨晚两点半就睡了，之后没人说话，它就不敢叫我起来。",
+                "confidence": 0.7,
+                "source_event_ids": [902],
+            },
+            {
+                "should_write": True,
+                "kind": "commitment",
+                "title": "后续需要记得的承诺或约定",
+                "content": "后续需要记得的承诺或约定：比如“她今天情绪不好，别太闹”，或者“刚刚吵完架，醒了先哄”，或者“她答应了明天早睡，盯着点”。",
+                "confidence": 0.7,
+                "source_event_ids": [903],
+            },
+            {
+                "should_write": True,
+                "kind": "project_state",
+                "title": "默认改走脱水模型",
+                "content": "Ombre 自动记忆链路默认不再使用本地 handoff 测试 key；VPS 未显式配置 daily_chat_memory 模型时，summary 和候选抽取都回退到脱水模型。",
+                "domain": "project",
+                "tags": ["project_state"],
+                "confidence": 0.9,
+                "source_event_ids": [904],
+            },
+        ],
+        [{"id": 1, "raw_event_ids": [901, 902, 903, 904]}],
+    )
+
+    assert [candidate["title"] for candidate in candidates] == ["默认改走脱水模型"]
 
 
 def test_daily_chat_memory_title_uses_identity_config(test_config):

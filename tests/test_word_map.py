@@ -508,13 +508,27 @@ def test_word_map_excludes_structural_tags_and_identity_names(tmp_path):
                 name="TestAI 用户 咖啡",
                 tags=[
                     "relationship_event",
+                    "relationship_anchor",
+                    "stable_preference",
+                    "from_daily_chat",
+                    "daily_chat_extract",
                     "emotional_echo",
                     "profile_fact",
                     "flavor_soft",
                     "testai_favorite",
                     "haven_favorite",
+                    "topic:自动记忆",
+                    "entity:Ombre-Brain",
                 ],
-                keywords=["咖啡风味", "relationship_event", "testai_favorite", "haven_favorite"],
+                keywords=[
+                    "咖啡风味",
+                    "relationship_event",
+                    "stable_preference",
+                    "from_daily_chat",
+                    "自动记忆",
+                    "testai_favorite",
+                    "haven_favorite",
+                ],
                 domain=["memory"],
             ),
         ]
@@ -524,12 +538,18 @@ def test_word_map_excludes_structural_tags_and_identity_names(tmp_path):
     assert "testai" not in terms
     assert "用户" not in terms
     assert "relationship_event" not in terms
+    assert "relationship_anchor" not in terms
+    assert "stable_preference" not in terms
+    assert "from_daily_chat" not in terms
+    assert "daily_chat_extract" not in terms
     assert "emotional_echo" not in terms
     assert "profile_fact" not in terms
     assert "flavor_soft" not in terms
     assert "testai_favorite" not in terms
     assert "haven_favorite" not in terms
     assert "咖啡风味" in terms
+    assert "自动记忆" in terms
+    assert "Ombre-Brain" in terms
     assert "testai" in store.overview_hub_terms
 
 

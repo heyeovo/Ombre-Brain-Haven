@@ -21,6 +21,45 @@ logger = logging.getLogger("ombre_brain.reflection")
 
 DEFAULT_DAILY_REFLECTION_MIN_BUCKETS = 5
 DAILY_CHAT_MEMORY_MODES = {"auto", "review", "off"}
+DAILY_CHAT_MEMORY_STRUCTURAL_TAGS = {
+    "boundary",
+    "boundary_setting",
+    "communication_preference",
+    "daily_chat_extract",
+    "daily_chat_memory",
+    "from_daily_chat",
+    "key_event",
+    "project_event",
+    "project_state",
+    "relationship_anchor",
+    "relationship_event",
+    "relationship_signal",
+    "signal",
+    "stable_preference",
+}
+DAILY_CHAT_MEMORY_ENTITY_HINTS = [
+    ("Ombre-Brain", ["ombre-brain", "ombre brain", "ombre_brain", "ombre 自动记忆", "Ombre 自动记忆"]),
+    ("Haven Bridge", ["haven_bridge", "haven bridge", "bridge 记忆", "bridge 注入"]),
+    ("Gateway", ["gateway", "网关"]),
+    ("MCP", ["mcp"]),
+    ("Codex", ["codex"]),
+    ("VPS", ["vps"]),
+    ("DeepSeek", ["deepseek"]),
+    ("SiliconFlow", ["siliconflow", "硅基流动", "硅基"]),
+    ("Darkroom", ["darkroom", "暗房"]),
+]
+DAILY_CHAT_MEMORY_TOPIC_HINTS = [
+    ("自动记忆", ["自动记忆", "daily_chat_memory", "记忆候选", "候选记忆"]),
+    ("脱水模型", ["脱水模型", "dehydration", "脱水"]),
+    ("词图", ["词图", "word map", "word_map"]),
+    ("换窗连续性", ["换窗", "连续性", "下个窗口"]),
+    ("日印象", ["日印象", "daily impression", "daily_impression"]),
+    ("唤醒保活", ["唤醒", "保活", "future_wake"]),
+    ("raw_events", ["raw_events", "raw events", "原文"]),
+    ("召回", ["召回", "recall"]),
+    ("缓存", ["缓存", "cache"]),
+    ("提示词", ["提示词", "prompt"]),
+]
 
 
 CLASSIFY_PROMPT = """你是 Ombre-Brain 的记忆关系整理器。
@@ -3049,6 +3088,103 @@ class ReflectionEngine:
             text = self._kind_label(kind)
         return text
 
+    @staticmethod
+    def _daily_chat_memory_tag_is_structural(value: Any) -> bool:
+        term = re.sub(r"\s+", " ", str(value or "").strip()).lower()
+        if not term:
+            return True
+        match = re.match(r"^([a-z_][a-z0-9_-]*)\s*[:：]\s*(.+)$", term)
+        if match:
+            term = match.group(2).strip().lower()
+        return term in DAILY_CHAT_MEMORY_STRUCTURAL_TAGS
+
+    @staticmethod
+    def _daily_chat_memory_contains(text: str, needle: str) -> bool:
+        if not needle:
+            return False
+        if re.fullmatch(r"[A-Za-z0-9_.:/ -]+", needle):
+            return needle.lower() in text.lower()
+        return needle in text
+
+    def _daily_chat_memory_semantic_tags_and_keywords(
+        self,
+        *,
+        title: str,
+        content: str,
+        tags: list[str],
+    ) -> tuple[list[str], list[str]]:
+        text = " ".join([str(title or ""), str(content or ""), " ".join(tags)])
+        semantic_tags: list[str] = []
+        keywords: list[str] = []
+
+        def add_tag(prefix: str, term: str) -> None:
+            term = re.sub(r"\s+", " ", str(term or "").strip())
+            if not term or self._daily_chat_memory_tag_is_structural(term):
+                return
+            semantic_tags.append(f"{prefix}:{term}")
+            keywords.append(term)
+
+        for raw in tags:
+            tag = re.sub(r"\s+", " ", str(raw or "").strip())
+            if not tag or self._daily_chat_memory_tag_is_structural(tag):
+                continue
+            match = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*)\s*[:：]\s*(.+)$", tag)
+            if match and match.group(1).strip().lower() in {"axis", "content", "entity", "topic"}:
+                add_tag(match.group(1).strip().lower(), match.group(2))
+            else:
+                keywords.append(tag)
+
+        for term, needles in DAILY_CHAT_MEMORY_ENTITY_HINTS:
+            if any(self._daily_chat_memory_contains(text, needle) for needle in needles):
+                add_tag("entity", term)
+        for term, needles in DAILY_CHAT_MEMORY_TOPIC_HINTS:
+            if any(self._daily_chat_memory_contains(text, needle) for needle in needles):
+                add_tag("topic", term)
+
+        title_term = re.sub(r"\s+", " ", str(title or "").strip(" ：:，,。"))
+        if (
+            4 <= len(title_term) <= 18
+            and not self._daily_chat_memory_title_is_generic(title_term)
+            and not self._daily_chat_memory_tag_is_structural(title_term)
+        ):
+            keywords.append(title_term)
+
+        semantic_tags = list(dict.fromkeys(semantic_tags))[:6]
+        keywords = list(
+            dict.fromkeys(
+                keyword
+                for keyword in keywords
+                if keyword and not self._daily_chat_memory_tag_is_structural(keyword)
+            )
+        )[:10]
+        return semantic_tags, keywords
+
+    def _daily_chat_memory_enrich_candidate_terms(self, candidate: dict) -> dict:
+        updated = dict(candidate)
+        kind = str(updated.get("kind") or "key_event").strip()
+        raw_tags = self._string_list(updated.get("tags"), limit=16)
+        semantic_tags, keywords = self._daily_chat_memory_semantic_tags_and_keywords(
+            title=str(updated.get("title") or ""),
+            content=str(updated.get("content") or ""),
+            tags=raw_tags,
+        )
+        preserved_tags = [tag for tag in raw_tags if not self._daily_chat_memory_tag_is_structural(tag)]
+        updated["tags"] = list(
+            dict.fromkeys(
+                [
+                    "from_daily_chat",
+                    "daily_chat_extract",
+                    kind,
+                    self._kind_tag(kind),
+                    *semantic_tags,
+                    *preserved_tags,
+                ]
+            )
+        )[:12]
+        existing_keywords = self._string_list(updated.get("keywords"), limit=12)
+        updated["keywords"] = list(dict.fromkeys([*keywords, *existing_keywords]))[:12]
+        return updated
+
     def _normalize_daily_chat_memory_candidates(
         self,
         key: str,
@@ -3104,23 +3240,14 @@ class ReflectionEngine:
                 for event_id in self._string_list(candidate.get("source_event_ids"), limit=80)
                 if str(event_id).isdigit()
             ] or [int(event_id) for event_id in fallback_raw_event_ids[:80] if str(event_id).isdigit()]
-            item = {
+            item = self._daily_chat_memory_enrich_candidate_terms({
                 "id": self._daily_chat_memory_candidate_id(key, kind, content),
                 "date": key,
                 "kind": kind,
                 "title": title[:40],
                 "content": content,
-                "tags": list(
-                    dict.fromkeys(
-                        [
-                            "from_daily_chat",
-                            "daily_chat_extract",
-                            kind,
-                            self._kind_tag(kind),
-                            *candidate_tags,
-                        ]
-                    )
-                )[:12],
+                "tags": candidate_tags,
+                "keywords": self._string_list(candidate.get("keywords"), limit=12),
                 "domain": domain,
                 "importance": max(5, min(6, self._int_between(candidate.get("importance"), 5))),
                 "valence": self._clamp(candidate.get("valence", 0.55)),
@@ -3129,7 +3256,7 @@ class ReflectionEngine:
                 "source_turn_ids": source_turn_ids,
                 "source_event_ids": source_event_ids,
                 "reason": str(candidate.get("reason") or "").strip()[:160],
-            }
+            })
             if self._daily_chat_memory_duplicate_candidate(item, normalized):
                 continue
             normalized.append(item)
@@ -3184,7 +3311,7 @@ class ReflectionEngine:
             updated["confidence"] = self._clamp(edit.get("confidence"))
         if "reason" in edit:
             updated["reason"] = re.sub(r"\s+", " ", str(edit.get("reason") or "").strip())[:160]
-        return updated
+        return self._daily_chat_memory_enrich_candidate_terms(updated)
 
     @staticmethod
     def _daily_chat_memory_edit_string_list(value: Any, *, limit: int) -> list[str]:
@@ -3246,6 +3373,7 @@ class ReflectionEngine:
                         "event_date": key,
                         "source_conversation_turn_ids": candidate.get("source_turn_ids") or [],
                         "source_raw_event_ids": candidate.get("source_event_ids") or [],
+                        "keywords": candidate.get("keywords") or [],
                         "daily_chat_memory_candidate_id": bucket_id,
                         "daily_chat_memory_reason": str(candidate.get("reason") or "")[:160],
                     },
@@ -3386,7 +3514,8 @@ class ReflectionEngine:
             title = self._daily_chat_memory_title(content, kind, key)
         cleaned["content"] = content
         cleaned["title"] = title[:40] if title else self._daily_chat_memory_title(content, kind, key)[:40]
-        return cleaned
+        cleaned["kind"] = kind
+        return self._daily_chat_memory_enrich_candidate_terms(cleaned)
 
     def _daily_chat_memory_target(self, key: str = "", now: datetime | None = None) -> datetime:
         if key:

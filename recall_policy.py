@@ -22,7 +22,8 @@ from memory_relevance import (
     recall_topic_query,
 )
 from identity import identity_names
-from query_terms import RECALL_SYSTEM_META_TERMS, identity_address_terms
+from query_terms import GENERIC_LEXICAL_STOPWORDS, RECALL_SYSTEM_META_TERMS, identity_address_terms
+from query_understanding import query_intent_terms
 
 
 CONTEXT_ONLY_SECTIONS = frozenset({"affect_anchor", "favorite_reason", "comment", "followup"})
@@ -404,6 +405,8 @@ SHORT_CASUAL_ONLY_TERMS = frozenset(
         "太短",
         "写一个",
         "嘿嘿",
+        "好久没聊",
+        "好久不见",
     }
 )
 SHORT_TASTE_QUERY_TERMS = ("不好吃", "不好喝", "难吃", "难喝", "好吃", "好喝")
@@ -630,6 +633,7 @@ LOCATABLE_GENERIC_TERMS = frozenset(
     {
         *WEAK_RECALL_TOPIC_TERMS,
         *GENERIC_RECALL_CONTEXT_TERMS,
+        *GENERIC_LEXICAL_STOPWORDS,
         *AFFECT_ONLY_QUERY_TERMS,
         *AFFECTION_ONLY_SIGNAL_TERMS,
         "代码",
@@ -1554,6 +1558,7 @@ class RecallPolicy:
         if (
             not locatable_terms
             and not protected_phrases
+            and not self._query_has_explicit_recall_marker(text)
             and self._query_has_low_signal_shell(text)
             and not self.is_emotional_reason_lookup(text)
             and not self.is_detail_read_query(text)
@@ -1562,6 +1567,18 @@ class RecallPolicy:
         ):
             return True, "no_locatable_terms"
         return False, ""
+
+    @staticmethod
+    def _query_has_explicit_recall_marker(query: str) -> bool:
+        text = str(query or "").strip().lower()
+        return bool(
+            text
+            and any(
+                str(marker or "").strip().lower() in text
+                for marker in query_intent_terms("memory_sentinel.explicit_recall_markers")
+                if str(marker or "").strip()
+            )
+        )
 
     def _query_has_recall_system_meta_terms(self, query: str) -> bool:
         compact = self._compact_entity_keyword(query)

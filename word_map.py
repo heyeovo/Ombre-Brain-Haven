@@ -11,6 +11,7 @@ import jieba.analyse
 
 from favorite_tags import favorite_memory_aliases
 from identity import identity_names
+from query_terms import GENERIC_LEXICAL_STOPWORDS
 from utils import now_iso, strip_affect_anchor, strip_wikilinks
 
 
@@ -292,6 +293,7 @@ class WordMapStore:
             _normalize_term(item)
             for item in itertools.chain(
                 DEFAULT_WORD_MAP_STOPWORDS,
+                GENERIC_LEXICAL_STOPWORDS,
                 self.identity_stopwords,
                 _favorite_tag_stopwords(config),
                 cfg.get("stopwords", []) or [],

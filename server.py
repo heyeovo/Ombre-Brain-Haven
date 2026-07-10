@@ -11248,6 +11248,19 @@ async def api_dreams(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@mcp.custom_route("/api/dreams/{dream_id}", methods=["GET"])
+async def api_dream_detail(request):
+    """Return one retained dream body for an authenticated dashboard reader."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    record = dream_engine.dashboard_record(request.path_params.get("dream_id", ""))
+    if not record:
+        return JSONResponse({"error": "dream body unavailable"}, status_code=404)
+    return JSONResponse(record)
+
+
 @mcp.custom_route("/api/config", methods=["GET"])
 async def api_config_get(request):
     """Get current runtime config (safe fields only, API key masked)."""
@@ -11412,7 +11425,7 @@ async def api_config_get(request):
             "auto_enabled": dream_engine.auto_enabled,
             "surface_enabled": dream_engine.surface_enabled,
             "inject_enabled": _bool_value(dream_cfg.get("inject_enabled"), False),
-            "retain_after_inject": _bool_value(dream_cfg.get("retain_after_inject"), False),
+            "retain_after_inject": _bool_value(dream_cfg.get("retain_after_inject"), True),
             "model": dream_engine.model,
             "base_url": dream_engine.base_url,
             "api_key_masked": _mask_key(dream_engine.api_key),

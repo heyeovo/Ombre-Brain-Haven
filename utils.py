@@ -456,7 +456,7 @@ def load_config(config_path: str = None) -> dict:
             "auto_enabled": True,
             "surface_enabled": True,
             "inject_enabled": False,
-            "retain_after_inject": False,
+            "retain_after_inject": True,
             "base_url": "https://api.deepseek.com",
             "model": "deepseek-v4-flash",
             "api_key": "",

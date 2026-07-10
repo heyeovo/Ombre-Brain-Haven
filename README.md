@@ -730,7 +730,7 @@ dream:
 不吃 last_active，避免只是被召回过的旧记忆挤进梦里
 ```
 
-梦正文写在 `${state_dir}/dreams/dream_*.md`，Docker/VPS 常见路径是 `/state/dreams/dream_*.md`。Dashboard 只显示“某天某 AI 做了一个梦”。
+梦正文写在 `${state_dir}/dreams/dream_*.md`，Docker/VPS 常见路径是 `/state/dreams/dream_*.md`。Dashboard 列表只返回“某天某 AI 做了一个梦”等元数据；点开一条保留中的记录时，才会在 Dashboard 鉴权后读取正文。已按旧的一次性策略消散的历史梦只保留发生记录。
 
 梦浮现还要满足这些条件：
 

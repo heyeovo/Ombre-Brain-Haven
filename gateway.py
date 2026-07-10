@@ -500,7 +500,7 @@ class GatewayService:
         self.dream_engine = dream_engine or DreamEngine(config)
         self.dream_cfg = config.get("dream", {}) if isinstance(config.get("dream", {}), dict) else {}
         self.dream_inject_enabled = bool(self.dream_cfg.get("inject_enabled", False))
-        self.dream_retain_after_inject = bool(self.dream_cfg.get("retain_after_inject", False))
+        self.dream_retain_after_inject = bool(self.dream_cfg.get("retain_after_inject", True))
         self.gateway_token = os.environ.get("OMBRE_GATEWAY_TOKEN", "")
         self.upstream_api_key = os.environ.get("OMBRE_GATEWAY_UPSTREAM_API_KEY", "")
         self.upstream_base_url = self.gateway_cfg.get("upstream_base_url", "").rstrip("/")
@@ -1687,7 +1687,7 @@ class GatewayService:
         if updated:
             self.dream_cfg = dream_cfg
             self.dream_inject_enabled = bool(dream_cfg.get("inject_enabled", False))
-            self.dream_retain_after_inject = bool(dream_cfg.get("retain_after_inject", False))
+            self.dream_retain_after_inject = bool(dream_cfg.get("retain_after_inject", True))
             self.dream_engine = DreamEngine(self.config)
         return updated
 

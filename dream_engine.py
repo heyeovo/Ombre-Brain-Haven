@@ -112,6 +112,7 @@ class DreamEngine:
         self.enabled = _bool_env("OMBRE_DREAM_ENABLED", bool(cfg.get("enabled", True)))
         self.auto_enabled = bool(cfg.get("auto_enabled", True))
         self.surface_enabled = bool(cfg.get("surface_enabled", True))
+        self.retain_after_surface = bool(cfg.get("retain_after_inject", True))
         self.base_url = (
             os.environ.get("OMBRE_DREAM_BASE_URL", "")
             or str(cfg.get("base_url") or "https://api.deepseek.com")
@@ -955,6 +956,7 @@ class DreamEngine:
         is_session_start: bool = False,
         embedding_engine=None,
         now: datetime | None = None,
+        retain_after_surface: bool | None = None,
     ) -> str | None:
         result = await self.surface_with_status(
             query=query,
@@ -963,6 +965,7 @@ class DreamEngine:
             is_session_start=is_session_start,
             embedding_engine=embedding_engine,
             now=now,
+            retain_after_surface=retain_after_surface,
         )
         return str(result.get("text") or "") or None
 
@@ -974,12 +977,14 @@ class DreamEngine:
         is_session_start: bool = False,
         embedding_engine=None,
         now: datetime | None = None,
-        retain_after_surface: bool = False,
+        retain_after_surface: bool | None = None,
     ) -> dict:
         if not self.enabled or not self.surface_enabled:
             return {"status": "skipped", "reason": "disabled"}
         if not self._eligible_context(query, valence, arousal, is_session_start):
             return {"status": "skipped", "reason": "ineligible_context"}
+        if retain_after_surface is None:
+            retain_after_surface = self.retain_after_surface
         now_local = self._now(now)
         pending = [
             record
@@ -1087,6 +1092,7 @@ class DreamEngine:
                     "local_date": event.get("local_date", ""),
                     "ai_name": event.get("ai_name") or self.identity.get("ai_name") or "AI",
                     "status": "latent",
+                    "has_body": False,
                 },
             )
             if event.get("event") == "surfaced":
@@ -1100,11 +1106,30 @@ class DreamEngine:
                 "generated_at": meta.get("generated_at", ""),
                 "local_date": meta.get("local_date", ""),
                 "ai_name": meta.get("ai_name") or self.identity.get("ai_name") or "AI",
-                "status": "latent",
+                "status": "surfaced" if record.surfaced else "latent",
+                "has_body": True,
             }
         result = list(entries.values())
         result.sort(key=lambda item: item.get("generated_at") or "", reverse=True)
         return result[:limit]
+
+    def dashboard_record(self, dream_id: str) -> dict | None:
+        target_id = str(dream_id or "").strip()
+        if not target_id:
+            return None
+        for record in self.list_records():
+            if record.dream_id != target_id:
+                continue
+            meta = record.metadata
+            return {
+                "dream_id": record.dream_id,
+                "generated_at": meta.get("generated_at", ""),
+                "local_date": meta.get("local_date", ""),
+                "ai_name": meta.get("ai_name") or self.identity.get("ai_name") or "AI",
+                "status": "surfaced" if record.surfaced else "latent",
+                "body": record.body,
+            }
+        return None
 
     def dashboard_payload(self, limit: int = 30) -> dict:
         return {

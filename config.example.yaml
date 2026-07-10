@@ -725,14 +725,14 @@ portrait:
   #   OMBRE_PORTRAIT_API_KEY
 
 # --- Night dream worker / 夜梦 ---
-# Generates latent dreams in the background. Dream bodies stay private; Dashboard only
-# shows that a dream happened, and breath() may surface one matching dream later.
+# Generates latent dreams in the background. Dashboard lists their metadata first,
+# then fetches a retained body only when someone chooses to open that dream.
 dream:
   enabled: true
   auto_enabled: true
   surface_enabled: true
   inject_enabled: false             # true lets Gateway quietly inject one resonant dream as Dream Context
-  retain_after_inject: false        # true keeps the dream record after Gateway injection while marking it surfaced
+  retain_after_inject: true         # keeps each surfaced dream readable while it still only injects once
   # DeepSeek official OpenAI-compatible endpoint.
   base_url: "https://api.deepseek.com"
   model: "deepseek-v4-flash"

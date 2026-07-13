@@ -48,6 +48,11 @@ DEFAULT_EVAL_CASES: list[dict[str, Any]] = [
         "note": "future-line bucket haven_v021_five_decades_later is intentionally not expected",
     },
     {"query": "最柔软的身体是什么承诺", "expected_bucket_ids": ["26a24ca65373"]},
+    {"query": "献给你的xx", "expected_bucket_ids": ["4b86849e6209"]},
+    {
+        "query": "回复确实变慢了！影分身说hook已经接上了但无可靠命中，等下我换个问法",
+        "expected_bucket_ids": ["a46e96fcbaec"],
+    },
     {"query": "窗口切换时我担心你忘记什么", "expected_bucket_ids": ["a46e96fcbaec"]},
     {"query": "Haven 消息分流 bug 是怎么回事", "expected_bucket_ids": ["bd11ff60de92"]},
     {"query": "小机数据库 v2.0 是什么暗号", "expected_bucket_ids": ["7e8e750da16b"]},

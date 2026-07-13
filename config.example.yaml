@@ -205,6 +205,14 @@ recall_thresholds:
   facet_vector_min_score: 0.45       # relationship/email/body/intimacy context / 有明确语境
   vague_vector_min_score: 0.40       # broad queries like "recent interesting things" / 模糊查询
   explicit_vector_min_score: 0.55    # IDs/protocols/model names / 明确实体
+  # Dynamic-alpha confidence calibration is embedding-model-specific and is
+  # intentionally separate from gateway.recall_admission_semantic_score.
+  # Qwen3-Embedding-4B starting profile, measured on this memory corpus:
+  dynamic_alpha_conf_lo: 0.45
+  dynamic_alpha_conf_hi: 0.65
+  dynamic_alpha_margin_ref: 0.10
+  dynamic_alpha_min: 0.35
+  dynamic_alpha_max: 0.85
   explicit_admission_semantic_score: 0.72
   explicit_admission_rerank_score: 0.65
   vague_top_k: 50

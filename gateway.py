@@ -10460,29 +10460,62 @@ class GatewayService:
         recall_thresholds = self.config.get("recall_thresholds", {})
         if not isinstance(recall_thresholds, dict):
             recall_thresholds = {}
-        conf_lo = self._clamp(self._safe_float(recall_thresholds.get("vector_min_score"), 0.50))
-        conf_hi = self._clamp(self.high_confidence_semantic_score)
+        conf_lo = self._clamp(
+            self._safe_float(
+                recall_thresholds.get(
+                    "dynamic_alpha_conf_lo",
+                    recall_thresholds.get("vector_min_score", 0.50),
+                ),
+                0.50,
+            )
+        )
+        conf_hi = self._clamp(
+            self._safe_float(
+                recall_thresholds.get(
+                    "dynamic_alpha_conf_hi",
+                    self.high_confidence_semantic_score,
+                ),
+                self.high_confidence_semantic_score,
+            )
+        )
         if conf_hi <= conf_lo:
             conf_hi = min(1.0, conf_lo + 0.01)
+        margin_ref = max(
+            0.001,
+            self._safe_float(recall_thresholds.get("dynamic_alpha_margin_ref"), 0.08),
+        )
+        alpha_min = self._clamp(
+            self._safe_float(recall_thresholds.get("dynamic_alpha_min"), 0.35)
+        )
+        alpha_max = self._clamp(
+            self._safe_float(recall_thresholds.get("dynamic_alpha_max"), 0.85)
+        )
+        if alpha_max < alpha_min:
+            alpha_min, alpha_max = alpha_max, alpha_min
         sorted_scores = sorted(
             (self._clamp(self._safe_float(score, 0.0)) for score in (semantic_scores or {}).values()),
             reverse=True,
         )
         top1 = sorted_scores[0] if sorted_scores else 0.0
         top2 = sorted_scores[1] if len(sorted_scores) > 1 else 0.0
-        margin = max(0.0, top1 - top2)
-        margin_ref = 0.08
-        alpha_min = 0.35
-        alpha_max = 0.85
+        reference_scores = sorted_scores[1:6]
+        reference_score = (
+            sum(reference_scores) / len(reference_scores)
+            if reference_scores
+            else 0.0
+        )
+        margin = max(0.0, top1 - reference_score)
         confidence_component = self._clamp((top1 - conf_lo) / (conf_hi - conf_lo))
         margin_component = self._clamp(margin / margin_ref)
-        confidence = self._clamp((confidence_component * 0.7) + (margin_component * 0.3))
+        confidence = self._clamp(confidence_component * margin_component)
         alpha = round(alpha_min + (alpha_max - alpha_min) * confidence, 4)
         return {
             "alpha": alpha,
             "confidence": round(confidence, 4),
             "top1": round(top1, 4),
             "top2": round(top2, 4),
+            "reference_score": round(reference_score, 4),
+            "reference_count": len(reference_scores),
             "margin": round(margin, 4),
             "conf_lo": round(conf_lo, 4),
             "conf_hi": round(conf_hi, 4),

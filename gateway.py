@@ -5038,7 +5038,9 @@ class GatewayService:
                         }
                     )
                     continue
-                raise ValueError(f"messages[{index}].content[{block_index}] unsupported assistant block type")
+                if block_type in ("thinking", "redacted_thinking"):
+                    continue
+                raise ValueError(f"messages[{index}].content[{block_index}] unsupported assistant block type: {block_type}")
 
             assistant_message: dict[str, Any] = {
                 "role": "assistant",

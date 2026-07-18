@@ -24,6 +24,7 @@
 #                存储单条记忆
 #       grow   — Long-note memory digest, auto-split selected content into buckets
 #                长内容摘记，筛选后拆分多桶
+
 #       trace  — Modify metadata / resolved / delete
 #                修改元数据 / resolved 标记 / 删除
 #       pulse  — System status + bucket listing
@@ -32,6 +33,7 @@
 #                 日关系天气
 #       introspection — Read recent memories for waking self-reflection
 #                       读取最近记忆供清醒自省
+
 #
 # Startup:
 # 启动方式：
@@ -41,6 +43,7 @@
 # ============================================================
 
 import os
+import re
 import sys
 import random
 import logging
@@ -56,6 +59,8 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlencode, urlparse
 from zoneinfo import ZoneInfo
+
+import secrets
 import httpx
 
 
@@ -160,13 +165,76 @@ def _coerce_memory_id(value) -> str:
         return ""
     return str(value).strip()
 
+
+# --- In-memory caches for hot endpoints / 内存级缓存 ---
+# 日记/桶列表每次都是 walk + frontmatter.load 全量文件, 100+ 条就很慢。
+# 加 TTL 缓存: 命中的时候不用读盘, 写操作主动 invalidate。
+_JOURNAL_CACHE = {"ts": 0.0, "payload": None}
+_BUCKETS_CACHE = {"ts": 0.0, "payload": None}
+_CACHE_TTL = 60.0  # 秒
+
+def _invalidate_cache(key: str):
+    globals()[f"_{key}_CACHE"]["ts"] = 0.0
+    globals()[f"_{key}_CACHE"]["payload"] = None
+
+# --- Runtime env vars (port + webhook) / 运行时环境变量 ---
+# OMBRE_PORT: HTTP/SSE 监听端口，默认 8000
+try:
+    OMBRE_PORT = int(os.environ.get("OMBRE_PORT", "8000") or "8000")
+except ValueError:
+    logger.warning("OMBRE_PORT 不是合法整数，回退到 8000")
+    OMBRE_PORT = 8000
+
+# OMBRE_HOOK_URL: 在 breath/dream 被调用后推送事件到该 URL（POST JSON）。
+# OMBRE_HOOK_SKIP: 设为 true/1/yes 跳过推送。
+# 详见 ENV_VARS.md。
+OMBRE_HOOK_URL = os.environ.get("OMBRE_HOOK_URL", "").strip()
+OMBRE_HOOK_SKIP = os.environ.get("OMBRE_HOOK_SKIP", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+async def _fire_webhook(event: str, payload: dict) -> None:
+    """
+    Fire-and-forget POST to OMBRE_HOOK_URL with the given event payload.
+    Failures are logged at WARNING level only — never propagated to the caller.
+    """
+    if OMBRE_HOOK_SKIP or not OMBRE_HOOK_URL:
+        return
+    try:
+        body = {
+            "event": event,
+            "timestamp": time.time(),
+            "payload": payload,
+        }
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(OMBRE_HOOK_URL, json=body)
+    except Exception as e:
+        logger.warning(f"Webhook push failed ({event} → {OMBRE_HOOK_URL}): {e}")
+
+
 # --- Initialize core components / 初始化核心组件 ---
-bucket_mgr = BucketManager(config)                  # Bucket manager / 记忆桶管理器
+embedding_engine = EmbeddingEngine(config)            # Embedding engine first (BucketManager depends on it)
+bucket_mgr = BucketManager(config, embedding_engine=embedding_engine)  # Bucket manager / 记忆桶管理器
+
+# --- Load runtime scoring overrides from runtime_config.json ---
+# --- 从 runtime_config.json 加载运行时评分覆盖 ---
+_runtime_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runtime_config.json")
+if os.path.exists(_runtime_path):
+    try:
+        with open(_runtime_path, "r", encoding="utf-8") as _f:
+            _rt = json.loads(_f.read()) or {}
+        _scoring_ov = _rt.get("scoring", {})
+        if _scoring_ov:
+            bucket_mgr.apply_runtime_scoring_overrides(_scoring_ov)
+            logger.info(f"Loaded runtime scoring overrides: {list(_scoring_ov.keys())}")
+    except Exception:
+        pass
+
 dehydrator = Dehydrator(config)                      # Dehydrator / 脱水器
 decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引擎
 embedding_engine = EmbeddingEngine(config)            # Embedding engine / 向量化引擎
 reranker_engine = RerankerEngine(config)              # Reranker / 召回重排序
 recall_diagnostics = RecallDiagnosticsLogger(config)  # Recall diagnostics / 召回诊断
+
 import_engine = ImportEngine(config, bucket_mgr, dehydrator, embedding_engine)  # Import engine / 导入引擎
 persona_engine = PersonaStateEngine(config)           # Persona state engine / 人格状态引擎
 memory_edge_store = MemoryEdgeStore(config)            # Explicit memory relationship edges / 显式记忆关系边
@@ -184,13 +252,17 @@ gateway_state_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gat
 raw_event_store = RawEventStore(config)                  # Raw dialogue archive / 原文保险箱
 reminder_store = ReminderStore(config)                    # Standalone care memos / 独立照顾备忘
 
+# --- event_time migration: backfill missing event_time for existing buckets ---
+# See bucket_manager.py __init__ — runs sync at import time, no await needed
+# --- event_time 存量迁移：在 bucket_mgr 初始化时同步完成，无需 await ---
+
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
 # stdio mode ignores host (no network)
 mcp = FastMCP(
     "Ombre Brain",
     host="0.0.0.0",
-    port=8000,
+    port=OMBRE_PORT,
 )
 
 
@@ -2297,6 +2369,7 @@ def _bucket_read_payload(bucket: dict) -> dict:
         "period",
         "date",
         "event_date",
+        "event_time",
         "created",
         "updated_at",
         "last_active",
@@ -2349,6 +2422,8 @@ def _bucket_summary_payload(bucket: dict) -> dict:
         "created": meta.get("created", ""),
         "updated_at": meta.get("updated_at", ""),
         "last_active": meta.get("last_active", ""),
+        "event_time": meta.get("event_time", meta.get("created", "")),
+        "event_date": meta.get("event_time", meta.get("date", "")),
         "content_preview": strip_wikilinks(bucket.get("content", ""))[:200],
     }
 
@@ -2378,6 +2453,8 @@ def _bucket_light_payload(bucket: dict) -> dict:
         "created": _metadata_text(meta.get("created")),
         "updated_at": _metadata_text(meta.get("updated_at")),
         "last_active": _metadata_text(meta.get("last_active")),
+        "event_time": _metadata_text(meta.get("event_time", meta.get("created"))),
+        "event_date": _metadata_text(meta.get("event_time", meta.get("date", ""))),
         "resolved": bool(meta.get("resolved", False)),
         "digested": bool(meta.get("digested", False)),
         "pinned": bool(meta.get("pinned", False)),
@@ -3038,6 +3115,65 @@ async def _refresh_bucket_embedding_async(bucket_id: str) -> None:
 
 
 # =============================================================
+# Dashboard Auth — simple cookie-based session auth
+# Dashboard 认证 —— 基于 Cookie 的会话认证
+#
+# Env var OMBRE_DASHBOARD_PASSWORD overrides file-stored password.
+# First visit with no password set → forced setup wizard.
+# Sessions stored in memory (lost on restart, 7-day expiry).
+# =============================================================
+
+
+def _get_auth_file() -> str:
+    return os.path.join(config["buckets_dir"], ".dashboard_auth.json")
+
+
+def _load_password_hash() -> str | None:
+    try:
+        auth_file = _get_auth_file()
+        if os.path.exists(auth_file):
+            with open(auth_file, "r", encoding="utf-8") as f:
+                return _json_lib.load(f).get("password_hash")
+    except Exception:
+        pass
+    return None
+
+
+def _save_password_hash(password: str) -> None:
+    salt = secrets.token_hex(16)
+    h = hashlib.sha256(f"{salt}:{password}".encode()).hexdigest()
+    auth_file = _get_auth_file()
+    os.makedirs(os.path.dirname(auth_file), exist_ok=True)
+    with open(auth_file, "w", encoding="utf-8") as f:
+        _json_lib.dump({"password_hash": f"{salt}:{h}"}, f)
+
+
+def _verify_password_hash(password: str, stored: str) -> bool:
+    if ":" not in stored:
+        return False
+    salt, h = stored.split(":", 1)
+    return hmac.compare_digest(
+        h, hashlib.sha256(f"{salt}:{password}".encode()).hexdigest()
+    )
+
+
+
+def _verify_any_password(password: str) -> bool:
+    """Check password against env var (first) or stored hash."""
+    env_pwd = os.environ.get("OMBRE_DASHBOARD_PASSWORD", "")
+    if env_pwd:
+        return hmac.compare_digest(password, env_pwd)
+    stored = _load_password_hash()
+    if not stored:
+        return False
+    return _verify_password_hash(password, stored)
+
+
+
+
+
+
+# =============================================================
 # /health endpoint: lightweight keepalive
 # 轻量保活接口
 # For Cloudflare Tunnel or reverse proxy to ping, preventing idle timeout
@@ -3104,6 +3240,7 @@ async def auth_logout(request):
     return response
 
 
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request):
     from starlette.responses import JSONResponse
@@ -3168,6 +3305,7 @@ async def breath_hook(request):
                       and not b["metadata"].get("resolved", False)
                       and b["metadata"].get("type") not in ("permanent", "feel")
                       and not b["metadata"].get("anchor", False)
+                      and "journey" not in (b["metadata"].get("domain") or [])
                       and not b["metadata"].get("pinned")
                       and not b["metadata"].get("protected")]
         scored = sorted(unresolved, key=lambda b: decay_engine.calculate_score(b["metadata"]), reverse=True)
@@ -3212,8 +3350,11 @@ async def breath_hook(request):
             token_budget -= summary_tokens
 
         if not parts:
+            await _fire_webhook("breath_hook", {"surfaced": 0})
             return PlainTextResponse("")
-        return PlainTextResponse("[Ombre Brain - 记忆浮现]\n" + "\n---\n".join(parts))
+        body_text = "[Ombre Brain - 记忆浮现]\n" + "\n---\n".join(parts)
+        await _fire_webhook("breath_hook", {"surfaced": len(parts), "chars": len(body_text)})
+        return PlainTextResponse(body_text)
     except Exception as e:
         logger.warning(f"Breath hook failed: {e}")
         return PlainTextResponse("")
@@ -3232,10 +3373,14 @@ async def dream_hook(request):
         candidates = [
             b for b in all_buckets
             if b["metadata"].get("type") not in ("permanent", "feel")
+            and "journey" not in (b["metadata"].get("domain") or [])
             and not b["metadata"].get("pinned", False)
             and not b["metadata"].get("protected", False)
         ]
-        candidates.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+        candidates.sort(
+            key=lambda b: b["metadata"].get("event_time") or b["metadata"].get("created", ""),
+            reverse=True
+        )
         recent = candidates[:10]
 
         if not recent:
@@ -3252,6 +3397,7 @@ async def dream_hook(request):
             )
 
         return PlainTextResponse("[Ombre Brain - Introspection]\n" + "\n---\n".join(parts))
+
     except Exception as e:
         logger.warning(f"Introspection hook failed: {e}")
         return PlainTextResponse("")
@@ -3957,19 +4103,15 @@ async def _merge_or_create(
     arousal: float,
     name: str = "",
     *,
+    wish: bool = False,
+    todo: str = "",
+    todo_done: bool = False,
+    author: str = "",
+    locked: bool = False,
+    unlock_hint: str = "",
+    event_time: str = "",
     allow_merge: bool = True,
-    memory_subject: str = "",
-    memory_layer: str = "",
-    memory_classification_source: str = "",
-    date: str = "",
-) -> tuple[str, str, bool, dict | None]:
-    """
-    Check if a similar bucket exists for merging; merge if so, create if not.
-    Returns (bucket_id, display_name, is_merged).
-    检查是否有相似桶可合并，有则合并，无则新建。
-    返回 (桶ID, 显示名称, 是否合并)。
-    """
-    content = _normalize_memory_sections_for_write(content)
+) -> tuple[str, bool]:
     try:
         existing = await bucket_mgr.search(
             content,
@@ -4000,8 +4142,7 @@ async def _merge_or_create(
                 old_a = bucket["metadata"].get("arousal", 0.3)
                 merged_valence = round((old_v + valence) / 2, 2)
                 merged_arousal = round((old_a + arousal) / 2, 2)
-                await bucket_mgr.update(
-                    bucket["id"],
+                update_kwargs = dict(
                     content=merged,
                     tags=list(set(bucket["metadata"].get("tags", []) + tags)),
                     importance=max(bucket["metadata"].get("importance", 5), importance),
@@ -4011,6 +4152,20 @@ async def _merge_or_create(
                 )
                 _queue_embedding_refresh(bucket["id"])
                 return bucket["id"], bucket["metadata"].get("name", bucket["id"]), True, related_bucket
+
+                if wish:
+                    update_kwargs["wish"] = True
+                if todo:
+                    update_kwargs["todo"] = todo
+                    update_kwargs["todo_done"] = todo_done
+                await bucket_mgr.update(bucket["id"], **update_kwargs)
+                # --- Update embedding after merge ---
+                try:
+                    await embedding_engine.generate_and_store(bucket["id"], merged)
+                except Exception:
+                    pass
+                return bucket["metadata"].get("name", bucket["id"]), True
+
             except Exception as e:
                 logger.warning(f"Merge failed, creating new / 合并失败，新建: {e}")
 
@@ -4022,12 +4177,13 @@ async def _merge_or_create(
         valence=valence,
         arousal=arousal,
         name=name or None,
-        date=date or None,
-        extra_metadata=_memory_classification_metadata(
-            memory_subject,
-            memory_layer,
-            memory_classification_source,
-        ),
+        wish=wish,
+        todo=todo,
+        todo_done=todo_done,
+        author=author,
+        locked=locked,
+        unlock_hint=unlock_hint,
+        event_time=event_time
     )
     _queue_embedding_refresh(bucket_id)
     return bucket_id, name or bucket_id, False, related_bucket
@@ -7037,8 +7193,8 @@ async def breath(
     retrieval_mode: str = "graph",
     mode: str = "",
     session_id: str = "",
+    importance_min: int = -1,
 ) -> str:
-    """只读检索记忆。查主题用 query；新窗口轻交接用 mode="handoff"；date 或 query 里的日期可查当天普通记忆；domain="feel"/"whisper" 读私密通道，domain="daily_impression" 才读日印象。日期支持 2026-06-15、2026.06.15、2026年6月15日、25年6月15日、6月15日。"""
     await decay_engine.ensure_started()
     max_results = _int_between(max_results, 20, 1, 50)
     max_tokens = _int_between(max_tokens, 10000, 0, 20000)
@@ -7143,6 +7299,146 @@ async def breath(
             domain_filter=domain_filter,
         )
 
+    # --- importance_min mode: bulk fetch by importance threshold ---
+    # --- 重要度批量拉取模式：跳过语义搜索，按 importance 降序返回 ---
+    if importance_min >= 1:
+        try:
+            all_buckets = await bucket_mgr.list_all(include_archive=False)
+        except Exception as e:
+            return f"记忆系统暂时无法访问: {e}"
+        filtered = [
+            b for b in all_buckets
+            if int(b["metadata"].get("importance", 0)) >= importance_min
+            and b["metadata"].get("type") not in ("feel",)
+            and "journey" not in (b["metadata"].get("domain") or [])
+        ]
+        filtered.sort(key=lambda b: int(b["metadata"].get("importance", 0)), reverse=True)
+        filtered = filtered[:20]
+        if not filtered:
+            return f"没有重要度 >= {importance_min} 的记忆。"
+        results = []
+        token_used = 0
+        for b in filtered:
+            if token_used >= max_tokens:
+                break
+            try:
+                clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
+                summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
+                t = count_tokens_approx(summary)
+                if token_used + t > max_tokens:
+                    break
+                imp = b["metadata"].get("importance", 0)
+                results.append(f"[importance:{imp}] [bucket_id:{b['id']}] {summary}")
+                token_used += t
+            except Exception as e:
+                logger.warning(f"importance_min dehydrate failed: {e}")
+        return "\n---\n".join(results) if results else "没有可以展示的记忆。"
+
+    # --- Journey retrieval: domain="journey" — 轨迹桶独立通道 ---
+    # --- 轨迹检索：按 event_time 倒序，不受常规浮现限制 ---
+    if domain.strip().lower() == "journey":
+        try:
+            all_buckets = await bucket_mgr.list_all(include_archive=False)
+            journeys = [
+                b for b in all_buckets
+                if "journey" in (b["metadata"].get("domain") or [])
+                and b["metadata"].get("type") not in ("feel", "archived")
+            ]
+            journeys.sort(
+                key=lambda b: b["metadata"].get("event_time", b["metadata"].get("created", "")),
+                reverse=True,
+            )
+            journeys = journeys[:max_results]
+            if not journeys:
+                return "还没有轨迹桶。"
+            results = []
+            token_used = 0
+            for j in journeys:
+                meta = j["metadata"]
+                event_time = meta.get("event_time", meta.get("created", ""))
+                name = meta.get("name", j["id"])
+                try:
+                    clean_meta = {k: v for k, v in meta.items() if k != "tags"}
+                    summary = await dehydrator.dehydrate(strip_wikilinks(j["content"]), clean_meta)
+                    t = count_tokens_approx(summary)
+                    if token_used + t > max_tokens:
+                        break
+                    results.append(f"[{event_time}] [bucket_id:{j['id']}] {name}\n{summary}")
+                    token_used += t
+                except Exception as e:
+                    logger.warning(f"Journey dehydrate failed / 轨迹脱水失败: {e}")
+            return "\n---\n".join(results) if results else "轨迹桶内容无法展示。"
+        except Exception as e:
+            logger.error(f"Journey retrieval failed / 轨迹检索失败: {e}")
+            return "读取轨迹桶失败。"
+
+    # --- Feel retrieval: domain="feel" is a special channel ---
+    # --- Feel 检索：domain="feel" 是独立入口 ---
+    if domain.strip().lower() == "feel":
+        try:
+            all_buckets = await bucket_mgr.list_all(include_archive=False)
+            feels = [b for b in all_buckets if b["metadata"].get("type") == "feel"]
+            feels.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+            feels = feels[:max_results]
+            if not feels:
+                return "没有留下过 feel。"
+            results = []
+            for f in feels:
+                created = f["metadata"].get("created", "")
+                entry = f"[{created}] [bucket_id:{f['id']}]\n{strip_wikilinks(f['content'])}"
+                results.append(entry)
+                if count_tokens_approx("\n---\n".join(results)) > max_tokens:
+                    break
+            return "\n---\n".join(results)
+        except Exception as e:
+            logger.error(f"Feel retrieval failed: {e}")
+            return "读取 feel 失败。"
+
+    # --- Journal retrieval: domain="journal" is a fully independent channel ---
+    # --- 日记检索：domain="journal" 完全独立通道，不与普通breath/search混 ---
+    if domain.strip().lower() == "journal":
+        try:
+            journal_entries = await bucket_mgr.list_journal()
+            journal_entries.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+            journal_entries = journal_entries[:max_results]
+            if not journal_entries:
+                return "日记本是空的。"
+            results = []
+            for j in journal_entries:
+                meta = j["metadata"]
+                name = meta.get("name", j["id"])
+                author = meta.get("author", "共同")
+                created = meta.get("created", "")
+                if meta.get("locked"):
+                    hint = meta.get("unlock_hint", "")
+                    # --- 日期形式的 hint：到点自动解锁；非日期形式视为密码，保持锁定 ---
+                    auto_unlocked = False
+                    try:
+                        unlock_date = datetime.fromisoformat(str(hint))
+                        auto_unlocked = datetime.now() >= unlock_date
+                    except (ValueError, TypeError):
+                        auto_unlocked = False
+                    if not auto_unlocked:
+                        entry = (
+                            f"🔒 [{name}] [作者:{author}] [bucket_id:{j['id']}]\n"
+                            f"（已上锁，提示：{hint or '无'}）"
+                        )
+                        results.append(entry)
+                        if count_tokens_approx("\n---\n".join(results)) > max_tokens:
+                            break
+                        continue
+                entry = (
+                    f"[{created}] [{name}] [作者:{author}] [bucket_id:{j['id']}]\n"
+                    f"{strip_wikilinks(j['content'])}"
+                )
+                results.append(entry)
+                if count_tokens_approx("\n---\n".join(results)) > max_tokens:
+                    break
+            return "=== 日记本 ===\n" + "\n---\n".join(results)
+        except Exception as e:
+            logger.error(f"Journal retrieval failed: {e}")
+            return "读取日记失败。"
+
     # --- No args or empty query: surfacing mode (weight pool active push) ---
     # --- 无参数或空query：浮现模式（权重池主动推送）---
     if not query or not query.strip():
@@ -7190,6 +7486,7 @@ async def breath(
             b for b in all_buckets
             if not is_self_anchor_bucket(b)
             and not b["metadata"].get("resolved", False)
+            and not b["metadata"].get("digested", False)
             and b["metadata"].get("type") not in ("permanent", "feel")
             and not b["metadata"].get("anchor", False)
             and not b["metadata"].get("pinned", False)
@@ -7210,6 +7507,18 @@ async def breath(
         if scored:
             top_scores = [(b["metadata"].get("name", b["id"]), decay_engine.calculate_score(b["metadata"])) for b in scored[:5]]
             logger.info(f"Top unresolved scores: {top_scores}")
+
+        # --- Cold-start detection: never-seen important buckets surface first ---
+        # --- 冷启动检测：从未被访问过且重要度>=8的桶优先插入最前面（最多2个）---
+        cold_start = [
+            b for b in unresolved
+            if int(b["metadata"].get("activation_count", 0)) == 0
+            and int(b["metadata"].get("importance", 0)) >= 8
+        ][:2]
+        cold_start_ids = {b["id"] for b in cold_start}
+        # Merge: cold_start first, then scored (excluding duplicates)
+        scored_deduped = [b for b in scored if b["id"] not in cold_start_ids]
+        scored_with_cold = cold_start + scored_deduped
 
         # --- Token-budgeted surfacing with diversity + hard cap ---
         # --- 按 token 预算浮现，带多样性 + 硬上限 ---
@@ -7255,13 +7564,17 @@ async def breath(
                 logger.warning(f"Failed to dehydrate anchor bucket / anchor 桶脱水失败: {e}")
                 continue
 
-        candidates = list(scored)
+        candidates = list(scored_with_cold)
         if len(candidates) > 1:
-            # Ensure highest-score bucket is first, shuffle rest from top-20
-            top1 = [candidates[0]]
-            pool = candidates[1:min(20, len(candidates))]
-            random.shuffle(pool)
-            candidates = top1 + pool + candidates[min(20, len(candidates)):]
+            # Cold-start buckets stay at front; shuffle rest from top-20
+            n_cold = len(cold_start)
+            non_cold = candidates[n_cold:]
+            if len(non_cold) > 1:
+                top1 = [non_cold[0]]
+                pool = non_cold[1:min(20, len(non_cold))]
+                random.shuffle(pool)
+                non_cold = top1 + pool + non_cold[min(20, len(non_cold)):]
+            candidates = cold_start + non_cold
         # Hard cap: never surface more than max_results buckets
         candidates = candidates[:max_results]
 
@@ -7279,9 +7592,11 @@ async def breath(
                 if entry_tokens > token_budget:
                     break
                 # NOTE: no touch() here — surfacing should NOT reset decay timer
-                dynamic_results.append(entry)
-                surfaced_buckets.append(b)
-                token_budget -= entry_tokens
+                score = decay_engine.calculate_score(b["metadata"])
+                dynamic_results.append(f"[权重:{score:.2f}] [bucket_id:{b['id']}] {summary}")
+                token_budget -= summary_tokens
+                # dream() 去重用：标记"刚被 breath 浮现过"，不影响衰减打分
+                await bucket_mgr.mark_surfaced(b["id"])
             except Exception as e:
                 logger.warning(f"Failed to dehydrate surfaced bucket / 浮现脱水失败: {e}")
                 continue
@@ -7298,6 +7613,28 @@ async def breath(
                 edge_min_confidence,
                 "",
             )
+
+        # --- wish 低概率随机浮现：长期悬念，不受 max_results 常规限制 ---
+        # --- 不是每次都出，约15%概率从已浮现内容之外随机挑一个 wish 桶 ---
+        wish_result = None
+        WISH_SURFACE_PROBABILITY = 0.15
+        if random.random() < WISH_SURFACE_PROBABILITY:
+            surfaced_ids = {b["id"] for b in candidates} | {b["id"] for b in pinned_buckets}
+            wish_candidates = [
+                b for b in all_buckets
+                if b["metadata"].get("wish")
+                and b["id"] not in surfaced_ids
+                and not b["metadata"].get("resolved", False)
+                and not b["metadata"].get("digested", False)
+            ]
+            if wish_candidates:
+                b = random.choice(wish_candidates)
+                try:
+                    clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
+                    summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
+                    wish_result = f"🌙 [bucket_id:{b['id']}] {summary}"
+                except Exception as e:
+                    logger.warning(f"Failed to dehydrate wish bucket / wish桶脱水失败: {e}")
 
         parts = []
         if core_results:
@@ -7322,6 +7659,12 @@ async def breath(
         if not parts:
             return "权重池平静，没有需要处理的记忆。"
         return "\n\n".join(parts)
+
+        if wish_result:
+            parts.append("=== 还记得这个吗 ===\n" + wish_result)
+        return "\n\n".join(parts)
+
+
 
     # --- With args: search mode (keyword + vector dual channel) ---
     # --- 有参数：检索模式（关键词 + 向量双通道）---
@@ -7383,6 +7726,47 @@ async def breath(
                     matched_ids.add(bucket_id)
     except Exception as e:
         logger.warning(f"Vector search failed, using keyword only / 向量搜索失败: {e}")
+
+
+    # --- Vector similarity channel: hybrid retrieval, threshold-triggered ---
+    # --- 向量相似度通道：混合检索，按关键词最高分置信度决定是否启用向量 ---
+    # --- (而非 len(matches)==0 一刀切) ---
+    top_score = max((b.get("score", 0) for b in matches), default=0)
+    VECTOR_TRIGGER_THRESHOLD = 50  # 阈值可调
+    if top_score < VECTOR_TRIGGER_THRESHOLD:
+        matched_ids = {b["id"] for b in matches}
+        try:
+            vector_results = await embedding_engine.search_similar(
+                query, top_k=max_results
+            )
+            for bucket_id, sim_score in vector_results:
+                if bucket_id not in matched_ids and sim_score > 0.7:
+                    bucket = await bucket_mgr.get(bucket_id)
+                    if bucket:
+                        meta = bucket.get("metadata", {})
+                        if (meta.get("type") == "archived" 
+                                or meta.get("digested", False)):
+                            continue
+                        # 向量结果降权，不允许排到高质量关键词结果前面
+                        bucket["score"] = round(sim_score * 100 * 0.4, 2)
+                        bucket["vector_match"] = True
+                        matches.append(bucket)
+                        matched_ids.add(bucket_id)
+        except Exception as e:
+            logger.warning(f"Vector search failed / 向量搜索失败: {e}")
+
+        # 关键词+向量合并后重新排序，统一受 max_results 管控
+        matches.sort(key=lambda b: b.get("score", 0), reverse=True)
+        matches = matches[:max_results]
+
+    # --- Exclude journey domain from normal search / 排除轨迹桶 ---
+    # Only include journey when explicitly requested via domain="journey"
+    if domain.strip().lower() != "journey":
+        matches = [
+            b for b in matches
+            if "journey" not in (b.get("metadata", {}).get("domain") or [])
+        ]
+
 
     explicit_lookup = _query_explicitly_requests_archive_memory(query)
     try:
@@ -7639,6 +8023,7 @@ async def breath(
     for moment in returned_moments:
         if len(direct_results) >= direct_display_limit:
             break
+
         if token_used >= max_tokens:
             break
         bucket_id = str(moment.get("bucket_id") or "")
@@ -8160,6 +8545,7 @@ async def api_bucket_comment_delete(request):
     })
 
 
+
 # =============================================================
 # Tool 2: hold — Hold on to this
 # 工具 2：hold — 握住，留下来
@@ -8178,8 +8564,16 @@ async def hold(
     title: str = "",
     date: str = "",
     domain: str = "",
+    journey: bool = False,
+    wish: bool = False,
+    todo: str = "",
+    todo_done: bool = False,
+    journal: bool = False,
+    author: str = "",
+    locked: bool = False,
+    unlock_hint: str = "",
+    event_time: str = "",
 ) -> str:
-    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；title 可选，传了就用给定标题，不传则自动生成。普通记忆不用填写 domain，系统会自动判断；维护自我锚点等特殊桶时可显式传 domain。显式 valence/arousal 会覆盖自动情绪。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection。需要之后轻轻提醒/照顾备忘的事项用 reminder_create，不写进长期记忆。feel=True/whisper=True 时 content 只写第一人称感受，不写分段标题。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -8197,6 +8591,33 @@ async def hold(
         whisper_valence = requested_valence if requested_valence is not None else 0.5
         whisper_arousal = requested_arousal if requested_arousal is not None else 0.3
         whisper_tags = list(dict.fromkeys(extra_tags + ["whisper"]))
+
+
+    # --- Journal mode: independent channel, bypasses merge entirely ---
+    # --- 日记模式：独立通道，完全不走合并 ---
+    if journal:
+        bucket_id = await bucket_mgr.create(
+            content=content,
+            tags=extra_tags,
+            importance=importance,
+            domain=[],
+            valence=valence if 0 <= valence <= 1 else 0.5,
+            arousal=arousal if 0 <= arousal <= 1 else 0.3,
+            name=None,
+            bucket_type="journal",
+            author=author or "共同",
+            locked=locked,
+            unlock_hint=unlock_hint,
+        )
+        return f"📔日记→{bucket_id} [作者:{author or '共同'}]" + ("[已上锁]" if locked else "")
+
+    # --- Feel mode: store as feel type, minimal metadata ---
+    # --- Feel 模式：存为 feel 类型，最少元数据 ---
+    if feel:
+        # Feel valence/arousal = model's own perspective
+        feel_valence = valence if 0 <= valence <= 1 else 0.5
+        feel_arousal = arousal if 0 <= arousal <= 1 else 0.3
+
         bucket_id = await bucket_mgr.create(
             content=content,
             tags=whisper_tags,
@@ -8250,6 +8671,42 @@ async def hold(
 
     content = _normalize_memory_sections_for_write(content)
 
+    # --- Journey mode: normal bucket with domain=["journey"], excluded from regular surfacing ---
+    # --- 轨迹模式：普通桶但 domain=["journey"]，不参与普通浮现和搜索 ---
+    if journey:
+        # Auto-tag for title generation (domain stays forced to ["journey"])
+        try:
+            analysis = await dehydrator.analyze(content)
+            suggested_name = analysis.get("suggested_name", "")
+            auto_tags = analysis.get("tags", [])
+            auto_valence = analysis.get("valence", 0.5)
+            auto_arousal = analysis.get("arousal", 0.3)
+        except Exception as e:
+            logger.warning(f"Journey auto-tagging failed, using defaults / 轨迹自动打标失败: {e}")
+            suggested_name = ""
+            auto_tags = []
+            auto_valence = 0.5
+            auto_arousal = 0.3
+
+        all_tags = list(dict.fromkeys(auto_tags + extra_tags))
+        final_valence = valence if 0 <= valence <= 1 else auto_valence
+        final_arousal = arousal if 0 <= arousal <= 1 else auto_arousal
+
+        bucket_id = await bucket_mgr.create(
+            content=content,
+            tags=all_tags,
+            importance=importance,
+            domain=["journey"],
+            valence=final_valence,
+            arousal=final_arousal,
+            name=suggested_name or None,
+        )
+        try:
+            await embedding_engine.generate_and_store(bucket_id, content)
+        except Exception:
+            pass
+        return f"🗺️轨迹→{bucket_id} (breath(domain=\"journey\") 读取)"
+
     # --- Step 1: auto-tagging / 自动打标 ---
     try:
         analysis = await dehydrator.analyze(content)
@@ -8265,6 +8722,11 @@ async def hold(
     arousal = requested_arousal if requested_arousal is not None else analysis["arousal"]
     auto_tags = analysis["tags"]
     suggested_name = title.strip() or analysis.get("suggested_name", "")
+
+    # --- User-supplied valence/arousal takes priority over analyze() result ---
+    # --- 用户显式传入的 valence/arousal 优先，analyze() 结果作为 fallback ---
+    final_valence = valence if 0 <= valence <= 1 else auto_valence
+    final_arousal = arousal if 0 <= arousal <= 1 else auto_arousal
 
     all_tags = list(dict.fromkeys(auto_tags + extra_tags))
     content = await _auto_generate_write_moment_if_needed(content, all_tags, domain=domain)
@@ -8286,17 +8748,18 @@ async def hold(
             tags=all_tags,
             importance=10,
             domain=domain,
-            valence=valence,
-            arousal=arousal,
+            valence=final_valence,
+            arousal=final_arousal,
             name=suggested_name or None,
             bucket_type="permanent",
             pinned=True,
-            date=event_date or None,
-            extra_metadata=_memory_classification_metadata(
-                classification["memory_subject"],
-                classification["memory_layer"],
-                classification["memory_classification_source"],
-            ),
+            wish=wish,
+            todo=todo,
+            todo_done=todo_done,
+            author=author,
+            locked=locked,
+            unlock_hint=unlock_hint,
+            event_time=event_time or event_date or ""
         )
         _queue_embedding_refresh(bucket_id)
         _queue_memory_enrichment(bucket_id)
@@ -8309,14 +8772,17 @@ async def hold(
         tags=all_tags,
         importance=importance,
         domain=domain,
-        valence=valence,
-        arousal=arousal,
+        valence=final_valence,
+        arousal=final_arousal,
         name=suggested_name,
-        allow_merge=False,
-        memory_subject=classification["memory_subject"],
-        memory_layer=classification["memory_layer"],
-        memory_classification_source=classification["memory_classification_source"],
-        date=event_date,
+            allow_merge=False,
+            wish=wish,
+            todo=todo,
+            todo_done=todo_done,
+            author=author,
+            locked=locked,
+            unlock_hint=unlock_hint,
+            event_time=event_time or event_date or ""
     )
     _queue_memory_enrichment(bucket_id)
 
@@ -8766,13 +9232,32 @@ async def trace(
     content: str = "",
     date: str = "",
     delete: bool = False,
+    touch: bool = False,      # 新增：轻触激活
+    ripple: bool = False,     # 新增：完整激活+涟漪（仅 touch=True 时有效）
+    wish: int = -1,           # 1=打上wish标签(长期悬念),0=取消
+    todo: str = "",           # 附着在桶上的待办内容
+    todo_done: int = -1,      # 1=待办已完成,0=未完成
+    author: str = "",         # 日记作者:言之/小羊/共同
+    locked: int = -1,         # 日记上锁:1=锁,0=解锁
+    unlock_hint: str = "",    # 解锁提示(日期或密码)
+    related: str = "",        # 关联桶id,逗号分隔
 ) -> str:
     """修改已有记忆，不创建新桶。tags/domain/content 是替换；date 可改事件日期；改前先 read_bucket。resolved/digested 让旧事沉底。只改元数据/date 不重建 embedding，改 content/name 才重建。"""
+
 
     bucket_id = _coerce_memory_id(bucket_id)
     if not bucket_id:
         return "请提供有效的 bucket_id。"
 
+    # --- Touch / activate ---
+    if touch:
+        if ripple:
+            await bucket_mgr.touch(bucket_id)
+            return f"已完整激活记忆桶 {bucket_id}（含涟漪）"
+        else:
+            await bucket_mgr.soft_touch(bucket_id)
+            return f"已轻触激活记忆桶 {bucket_id}"
+        
     # --- Delete mode / 删除模式 ---
     if delete:
         result = await _delete_bucket_and_indexes(bucket_id)
@@ -8818,8 +9303,33 @@ async def trace(
         updates["content"] = content
     event_date = str(date or "").strip()
     if event_date:
-        updates["date"] = event_date
+        updates["event_time"] = event_date
 
+    if wish in (0, 1):
+        updates["wish"] = bool(wish)
+    if todo:
+        updates["todo"] = todo
+    if todo_done in (0, 1):
+        updates["todo_done"] = bool(todo_done)
+    if author:
+        updates["author"] = author
+    if locked in (0, 1):
+        updates["locked"] = bool(locked)
+    if unlock_hint:
+        updates["unlock_hint"] = unlock_hint
+    if related:
+        updates["related"] = [r.strip() for r in related.split(",") if r.strip()]
+
+
+    # --- Touch / activate ---
+    if touch:
+        if ripple:
+            await bucket_mgr.touch(bucket_id)
+            return f"已完整激活记忆桶 {bucket_id}（含涟漪）"
+        else:
+            await bucket_mgr.soft_touch(bucket_id)
+            return f"已轻触激活记忆桶 {bucket_id}"
+        
     if not updates:
         return "没有任何字段需要修改。"
 
@@ -8968,11 +9478,30 @@ async def introspection(
         return "记忆系统暂时无法访问。"
 
     # --- Filter: recent surface-level dynamic buckets (not permanent/pinned/feel) ---
+    # --- dream 去重：breath() 浮现窗口刚出现过的桶跳过，不重复返回全文 ---
+    # --- (10分钟窗口，覆盖"开窗三件套" breath→dream→breath(feel) 连续调用场景) ---
+    DREAM_DEDUPE_WINDOW_MINUTES = 10
+    now = datetime.now()
+
+    def _recently_surfaced(meta: dict) -> bool:
+        ts = meta.get("last_breath_surfaced")
+        if not ts:
+            return False
+        try:
+            surfaced_at = datetime.fromisoformat(str(ts))
+        except (ValueError, TypeError):
+            return False
+        return (now - surfaced_at).total_seconds() / 60 < DREAM_DEDUPE_WINDOW_MINUTES
+
     candidates = [
         b for b in all_buckets
         if b["metadata"].get("type") not in ("permanent", "feel")
+        and "journey" not in (b["metadata"].get("domain") or [])
+        and not b["metadata"].get("resolved", False)
+        and not b["metadata"].get("digested", False)
         and not b["metadata"].get("pinned", False)
         and not b["metadata"].get("protected", False)
+        and not _recently_surfaced(b["metadata"])
     ]
 
     candidates, date_filter_label = _filter_by_created_date(
@@ -8982,9 +9511,13 @@ async def introspection(
         created_to=created_to,
     )
 
-    # --- Sort by creation time desc, take requested page ---
-    candidates.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+    # --- Sort by event_time desc, fallback to created, take requested page ---
+    candidates.sort(
+        key=lambda b: b["metadata"].get("event_time") or b["metadata"].get("created", ""),
+        reverse=True,
+    )
     recent = candidates[offset : offset + limit]
+
 
     if not recent:
         if date_filter_label:
@@ -8999,12 +9532,17 @@ async def introspection(
         val = meta.get("valence", 0.5)
         aro = meta.get("arousal", 0.3)
         created = meta.get("created", "")
+        todo_line = ""
+        if meta.get("todo"):
+            done_tag = "✅" if meta.get("todo_done") else "⬜"
+            todo_line = f"{done_tag} 待办: {meta['todo']}\n"
         parts.append(
             f"[{meta.get('name', b['id'])}]{resolved_tag} "
             f"主题:{domains} V{val:.1f}/A{aro:.1f} "
             f"创建:{created}\n"
             f"ID: {b['id']}\n"
-            f"{_bucket_text_for_embedding(b)[:500]}"
+            f"{_bucket_text_for_embedding(b)[:500]}\n"
+            f"{todo_line}"
         )
 
     header = (
@@ -9339,6 +9877,7 @@ async def portrait_state() -> dict:
     return await _portrait_state_payload()
 
 
+
 # =============================================================
 # Dashboard API endpoints (for lightweight Web UI)
 # 仪表板 API（轻量 Web UI 用）
@@ -9475,17 +10014,20 @@ async def api_create_memory(request):
 
 @mcp.custom_route("/api/buckets", methods=["GET"])
 async def api_buckets(request):
-    """List all buckets with metadata (no content for efficiency)."""
+    """List all buckets with metadata. ?full=1 returns full content."""
     from starlette.responses import JSONResponse
     err = _require_dashboard_auth(request)
     if err:
         return err
+
     try:
+        full = request.query_params.get("full", "").lower() in ("1", "true")
         all_buckets = await bucket_mgr.list_all(include_archive=True)
         result = []
         for b in all_buckets:
             meta = b.get("metadata", {})
             metadata_view = normalize_memory_metadata(b)
+
             result.append({
                 "id": b["id"],
                 "name": meta.get("name", b["id"]),
@@ -9518,7 +10060,16 @@ async def api_buckets(request):
                 "activation_count": meta.get("activation_count", 0),
                 "comment_count": meta.get("comment_count", 0),
                 "score": decay_engine.calculate_score(meta),
-                "content_preview": strip_wikilinks(b.get("content", ""))[:200],
+                "content": b.get("content", ""),
+                "content_preview": (b.get("content", "") or "")[:200] if not full else (b.get("content", "") or ""),
+                "wish": meta.get("wish", False),
+                "todo": meta.get("todo", ""),
+                "todo_done": meta.get("todo_done", False),
+                "related": meta.get("related", []),
+                # Noise = resolved + importance==1 (user-marked soft-delete)
+                # 噪声 = 已解决 + importance为1（用户标记的软删除）
+                "noise": bool(meta.get("resolved", False) and meta.get("importance") == 1),
+                "event_time": meta.get("event_time", meta.get("created", "")),
             })
         result.sort(key=_bucket_dashboard_sort_key, reverse=True)
         return JSONResponse(result)
@@ -10526,6 +11077,7 @@ async def api_bucket_detail(request):
     err = _require_dashboard_auth(request)
     if err:
         return err
+
     bucket_id = request.path_params["bucket_id"]
     bucket = await bucket_mgr.get(bucket_id)
     if not bucket:
@@ -10784,8 +11336,491 @@ async def api_bucket_update(request):
         "embedding_refreshed": False,
         "embedding_queued": embedding_queued,
         **_bucket_read_payload(bucket),
+
     })
 
+@mcp.custom_route("/api/archive/{bucket_id}", methods=["POST"])
+async def api_archive_bucket(request):
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    bucket_id = request.path_params["bucket_id"]
+    success = await bucket_mgr.archive(bucket_id)
+    if not success:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+@mcp.custom_route("/api/unarchive/{bucket_id}", methods=["POST"])
+async def api_unarchive_bucket(request):
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    bucket_id = request.path_params["bucket_id"]
+    success = await bucket_mgr.unarchive(bucket_id)
+    if not success:
+        return JSONResponse({"error": "not found or not archived"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+@mcp.custom_route("/api/touch/{bucket_id}", methods=["POST"])
+async def api_touch_bucket(request):
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    bucket_id = request.path_params["bucket_id"]
+    ripple = request.query_params.get("ripple", "").lower() in ("1", "true")
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if ripple:
+        await bucket_mgr.touch(bucket_id)
+    else:
+        await bucket_mgr.soft_touch(bucket_id)
+    return JSONResponse({"ok": True, "ripple": ripple})
+
+@mcp.custom_route("/api/bucket/{bucket_id}", methods=["PATCH", "POST"])
+async def api_update_bucket(request):
+    """
+    通用桶元数据更新端点——前端编辑面板(wish开关/todo/related连线/日记锁)
+    都走这个接口。只更新body里实际传的字段，其余不动。
+    Generic metadata update endpoint for the dashboard. Accepts any subset
+    of: name, domain(list), valence, arousal, importance, tags(list),
+    resolved, pinned, digested, content, wish, todo, todo_done, author,
+    locked, unlock_hint, related(list of bucket ids).
+    """
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    bucket_id = request.path_params["bucket_id"]
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+
+    allowed_fields = {
+        "name", "domain", "valence", "arousal", "importance", "tags",
+        "resolved", "pinned", "digested", "content",
+        "wish", "todo", "todo_done", "author", "locked", "unlock_hint", "related",
+        "model_valence", "event_time",
+    }
+    updates = {k: v for k, v in body.items() if k in allowed_fields}
+    if not updates:
+        return JSONResponse({"error": "no recognized fields in body"}, status_code=400)
+
+    success = await bucket_mgr.update(bucket_id, **updates)
+    if not success:
+        return JSONResponse({"error": "update failed"}, status_code=500)
+
+    if "content" in updates:
+        try:
+            await embedding_engine.generate_and_store(bucket_id, updates["content"])
+        except Exception:
+            pass
+
+    return JSONResponse({"ok": True, "updated": list(updates.keys())})
+
+@mcp.custom_route("/api/bucket/{bucket_id}", methods=["DELETE"])
+async def api_delete_bucket(request):
+    """软删除桶——移入回收站。前端编辑面板的"抹除此记忆"按钮用。可恢复。"""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    bucket_id = request.path_params["bucket_id"]
+    success = await bucket_mgr.delete(bucket_id)
+    if not success:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+@mcp.custom_route("/api/bucket/{bucket_id}/to-journal", methods=["POST"])
+async def api_convert_to_journal(request):
+    """
+    把一个已有桶(动态/永久/feel)转为日记桶——前端编辑面板"设为日记"按钮用。
+    物理移动文件到journal目录，转换后脱离常规update/delete查找范围，
+    只能通过 /api/journal 系列接口编辑。不可逆，前端应有二次确认。
+    """
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    bucket_id = request.path_params["bucket_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    success = await bucket_mgr.convert_to_journal(
+        bucket_id,
+        author=body.get("author", "共同"),
+        locked=bool(body.get("locked", False)),
+        unlock_hint=body.get("unlock_hint", ""),
+    )
+    if not success:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+@mcp.custom_route("/api/bucket", methods=["POST"])
+async def api_create_bucket(request):
+    """
+    通用桶创建端点(前端"新建记忆"用)。取代 add-bucket route.ts 里的 MCP hold 调用。
+    """
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    content = body.get("content", "")
+    if not content or not content.strip():
+        return JSONResponse({"error": "content required"}, status_code=400)
+    raw_tags = body.get("tags", [])
+    if isinstance(raw_tags, str):
+        tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
+    else:
+        tags = raw_tags
+
+    # --- Auto-tagging (same as MCP hold tool) / 自动打标 ---
+    domain = body.get("domain", None)
+    name = body.get("name") or None
+    try:
+        analysis = await dehydrator.analyze(content)
+        if not domain:
+            domain = analysis.get("domain", None)
+        if not name:
+            name = analysis.get("suggested_name") or None
+        auto_tags = analysis.get("tags", [])
+        all_tags = list(dict.fromkeys(auto_tags + tags))  # API tags first, user tags appended
+    except Exception:
+        all_tags = tags
+
+    bucket_id = await bucket_mgr.create(
+        content=content,
+        tags=all_tags,
+        importance=int(body.get("importance", 5)),
+        domain=domain,
+        valence=float(body.get("valence", 0.5)),
+        arousal=float(body.get("arousal", 0.3)),
+        name=name,
+        pinned=bool(body.get("pinned", False)),
+    )
+    return JSONResponse({"ok": True, "id": bucket_id})
+
+
+# --- Trash / Soft Delete / 回收站 ---
+@mcp.custom_route("/api/bucket/{bucket_id}/restore", methods=["POST"])
+async def api_restore_bucket(request):
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    bucket_id = request.path_params["bucket_id"]
+    success = await bucket_mgr.restore(bucket_id)
+    if not success:
+        return JSONResponse({"error": "not found in trash"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
+@mcp.custom_route("/api/bucket/{bucket_id}/purge", methods=["POST"])
+async def api_purge_bucket(request):
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    bucket_id = request.path_params["bucket_id"]
+    success = await bucket_mgr.purge(bucket_id)
+    if not success:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
+@mcp.custom_route("/api/trash", methods=["GET"])
+async def api_list_trash(request):
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    try:
+        items = await bucket_mgr.list_trash()
+        result = []
+        for b in items:
+            meta = b.get("metadata", {})
+            result.append({
+                "id": b["id"],
+                "name": meta.get("name", b["id"]),
+                "domain": meta.get("domain", []),
+                "type": meta.get("original_type", meta.get("type", "dynamic")),
+                "trashed_at": meta.get("trashed_at", ""),
+                "importance": meta.get("importance", 5),
+                "content_preview": b.get("content", "")[:150],
+            })
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/trash/empty", methods=["POST"])
+async def api_empty_trash(request):
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    count = await bucket_mgr.empty_trash()
+    return JSONResponse({"ok": True, "count": count})
+
+
+# --- Merge Preview / 合并预览 ---
+@mcp.custom_route("/api/bucket/{bucket_id}/similar", methods=["GET"])
+async def api_similar_buckets(request):
+    """Find similar buckets via embedding engine."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    bucket_id = request.path_params["bucket_id"]
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        n = int(request.query_params.get("n", "5"))
+        content = bucket.get("content", "")
+        if embedding_engine and embedding_engine.enabled:
+            results = await embedding_engine.search_similar(content, top_k=n + 1)
+            # Exclude self
+            similar = [(bid, sim) for bid, sim in results if bid != bucket_id][:n]
+            emb_enabled = True
+            emb_count = len(results)
+        else:
+            similar = []
+            emb_enabled = False
+            emb_count = 0
+        result = []
+        for bid, sim in similar:
+            b = await bucket_mgr.get(bid)
+            if b:
+                meta = b.get("metadata", {})
+                result.append({
+                    "id": bid,
+                    "name": meta.get("name", bid),
+                    "similarity": round(sim, 4),
+                    "content_preview": b.get("content", "")[:150],
+                    "domain": meta.get("domain", []),
+                    "importance": meta.get("importance", 5),
+                })
+        return JSONResponse({
+            "items": result,
+            "embedding_enabled": emb_enabled,
+            "total_scanned": emb_count,
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/bucket/{bucket_id}/merge-preview", methods=["POST"])
+async def api_merge_preview(request):
+    """Generate LLM merge preview between two buckets. ?into={target_id}"""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    bucket_id = request.path_params["bucket_id"]
+    into_id = request.query_params.get("into", "")
+    if not into_id:
+        return JSONResponse({"error": "missing `into` query param"}, status_code=400)
+    if bucket_id == into_id:
+        return JSONResponse({"error": "cannot merge a bucket into itself"}, status_code=400)
+
+    bucket_a = await bucket_mgr.get(bucket_id)
+    bucket_b = await bucket_mgr.get(into_id)
+    if not bucket_a or not bucket_b:
+        return JSONResponse({"error": "one or both buckets not found"}, status_code=404)
+
+    # Check preconditions
+    b_meta = bucket_b.get("metadata", {})
+    if b_meta.get("pinned") or b_meta.get("protected"):
+        return JSONResponse({
+            "error": "目标桶已钉选/保护，拒绝合并",
+            "hint": "请先取消目标桶的保护标记",
+        }, status_code=409)
+
+    try:
+        merged_content = await dehydrator.merge(bucket_b["content"], bucket_a["content"])
+
+        # Cost estimate
+        cost = {}
+        usage = getattr(dehydrator.__class__, "_last_merge_usage", None)
+        if usage:
+            from utils import estimate_llm_cost
+            cost = estimate_llm_cost(
+                usage.get("model", dehydrator.model),
+                usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0),
+            )
+
+        meta_a = bucket_a["metadata"]
+        meta_b = bucket_b["metadata"]
+        a_content = bucket_a.get("content", "") or ""
+        b_content = bucket_b.get("content", "") or ""
+
+        return JSONResponse({
+            "ok": True,
+            "preview": True,
+            "a": {"id": bucket_id, "name": meta_a.get("name", bucket_id)},
+            "b": {"id": into_id, "name": meta_b.get("name", into_id)},
+            "merged_content": merged_content,
+            "a_content": a_content,
+            "b_content": b_content,
+            # Word counts
+            "a_chars": len(a_content),
+            "b_chars": len(b_content),
+            "merged_chars": len(merged_content),
+            # Merged metadata
+            "importance": max(meta_a.get("importance", 5), meta_b.get("importance", 5)),
+            "tags": list(set(meta_a.get("tags", []) + meta_b.get("tags", []))),
+            "domain": list(set(meta_a.get("domain", []) + meta_b.get("domain", []))),
+            "valence": round((meta_a.get("valence", 0.5) + meta_b.get("valence", 0.5)) / 2, 2),
+            "arousal": round((meta_a.get("arousal", 0.3) + meta_b.get("arousal", 0.3)) / 2, 2),
+            "cost": cost,
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/bucket/{bucket_id}/merge-commit", methods=["POST"])
+async def api_merge_commit(request):
+    """Apply confirmed merge: update target, delete source."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    bucket_id = request.path_params["bucket_id"]
+    into_id = request.query_params.get("into", "")
+    if bucket_id == into_id:
+        return JSONResponse({"error": "cannot merge into itself"}, status_code=400)
+
+    try:
+        body = await request.json()
+        merged_content = body.get("merged_content", "")
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+
+    if not merged_content:
+        return JSONResponse({"error": "missing merged_content"}, status_code=400)
+
+    bucket_b = await bucket_mgr.get(into_id)
+    if not bucket_b:
+        return JSONResponse({"error": "target bucket not found"}, status_code=404)
+
+    try:
+        meta_a = (await bucket_mgr.get(bucket_id) or {}).get("metadata", {})
+        meta_b = bucket_b["metadata"]
+        merged_tags = list(set(meta_a.get("tags", []) + meta_b.get("tags", [])))
+        merged_domain = list(set(meta_a.get("domain", []) + meta_b.get("domain", [])))
+        merged_imp = max(meta_a.get("importance", 5), meta_b.get("importance", 5))
+        merged_v = round((meta_a.get("valence", 0.5) + meta_b.get("valence", 0.5)) / 2, 2)
+        merged_a = round((meta_a.get("arousal", 0.3) + meta_b.get("arousal", 0.3)) / 2, 2)
+
+        await bucket_mgr.update(into_id, content=merged_content,
+                                tags=merged_tags, domain=merged_domain,
+                                importance=merged_imp, valence=merged_v, arousal=merged_a)
+        # Update embedding
+        try:
+            await embedding_engine.generate_and_store(into_id, merged_content)
+        except Exception:
+            pass
+
+        # Delete source bucket (hard delete, bypass trash)
+        src_path = bucket_mgr._find_bucket_file(bucket_id)
+        if src_path:
+            try:
+                os.remove(src_path)
+            except OSError:
+                pass
+        logger.info(f"Merge committed: {bucket_id} → {into_id}")
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/journal", methods=["GET"])
+async def api_list_journal(request):
+    """
+    日记列表(前端日记页用)。锁着的条目只返回标题+hint,不返回正文。
+    60s 内存缓存，写日记主动 invalidate。
+    """
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    # Cache hit
+    if _JOURNAL_CACHE["payload"] is not None and time.time() - _JOURNAL_CACHE["ts"] < _CACHE_TTL:
+        return JSONResponse(_JOURNAL_CACHE["payload"])
+    try:
+        entries = await bucket_mgr.list_journal()
+        entries.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+        result = []
+        for j in entries:
+            meta = j["metadata"]
+            item = {
+                "id": j["id"],
+                "name": meta.get("name", j["id"]),
+                "author": meta.get("author", "共同"),
+                "created": meta.get("created", ""),
+                "locked": bool(meta.get("locked", False)),
+            }
+            if meta.get("locked"):
+                hint = meta.get("unlock_hint", "")
+                auto_unlocked = False
+                try:
+                    unlock_date = datetime.fromisoformat(str(hint))
+                    auto_unlocked = datetime.now() >= unlock_date
+                except (ValueError, TypeError):
+                    auto_unlocked = False
+                if not auto_unlocked:
+                    item["unlock_hint"] = hint
+                    item["content"] = None
+                    result.append(item)
+                    continue
+            item["content"] = strip_wikilinks(j.get("content", ""))
+            result.append(item)
+        _JOURNAL_CACHE["payload"] = result
+        _JOURNAL_CACHE["ts"] = time.time()
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@mcp.custom_route("/api/journal", methods=["POST"])
+async def api_create_journal(request):
+    """新建日记条目(前端日记页的写入按钮用)。"""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    content = body.get("content", "")
+    if not content or not content.strip():
+        return JSONResponse({"error": "content required"}, status_code=400)
+    bucket_id = await bucket_mgr.create(
+        content=content,
+        tags=body.get("tags", []),
+        importance=int(body.get("importance", 5)),
+        domain=[],
+        valence=float(body.get("valence", 0.5)),
+        arousal=float(body.get("arousal", 0.3)),
+        name=body.get("name") or None,
+        bucket_type="journal",
+        author=body.get("author", "共同"),
+        locked=bool(body.get("locked", False)),
+        unlock_hint=body.get("unlock_hint", ""),
+    )
+    _invalidate_cache("JOURNAL")
+    return JSONResponse({"ok": True, "id": bucket_id})
+
+@mcp.custom_route("/api/journal/{journal_id}", methods=["DELETE"])
+async def api_delete_journal(request):
+    """删除日记条目(前端日记弹窗的抹除按钮用)。"""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    journal_id = request.path_params["journal_id"]
+    success = await bucket_mgr.delete_journal(journal_id)
+    if not success:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    _invalidate_cache("JOURNAL")
+    return JSONResponse({"ok": True})
 
 @mcp.custom_route("/api/darkroom/status", methods=["GET"])
 async def api_darkroom_status(request):
@@ -10804,15 +11839,42 @@ async def api_search(request):
     err = _require_dashboard_auth(request)
     if err:
         return err
+
     query = request.query_params.get("q", "")
     if not query:
         return JSONResponse({"error": "missing q parameter"}, status_code=400)
+    
+    # 1. 在这里解析参数
+    include_archive = request.query_params.get("include_archive", "false").lower() in ("1", "true")
+    
     try:
-        matches = await bucket_mgr.search(query, limit=10)
+        # 2. 将 include_archive 传入 search 方法
+        limit = int(request.query_params.get("limit", bucket_mgr.max_results))
+        show_all = request.query_params.get("show_all", "false").lower() in ("1", "true")
+        include_noise = request.query_params.get("include_noise", "false").lower() in ("1", "true")
+        simulate = request.query_params.get("simulate", "false").lower() in ("1", "true")
+        include_vector = request.query_params.get("include_vector", "false").lower() in ("1", "true")
+        matches = await bucket_mgr.search(query, limit=limit, include_archive=include_archive,
+                                          show_all=show_all, include_noise=include_noise,
+                                          record_stats=not simulate)  # 即时模拟不记统计
+
+        # --- Simulate mode: enrich with vector similarity ---
+        vector_map = {}
+        if simulate and include_vector:
+            try:
+                if embedding_engine and embedding_engine.enabled:
+                    vr = await embedding_engine.search_similar(query, top_k=200)
+                    vector_map = {bid: round(score, 4) for bid, score in vr}
+            except Exception:
+                pass
+
         result = []
+        seen_ids = set()
         for b in matches:
             meta = b.get("metadata", {})
-            result.append({
+            seen_ids.add(b["id"])
+            vec_sim = vector_map.get(b["id"], 0)
+            item = {
                 "id": b["id"],
                 "name": meta.get("name", b["id"]),
                 "type": meta.get("type", "dynamic"),
@@ -10827,8 +11889,55 @@ async def api_search(request):
                 "last_active": meta.get("last_active", ""),
                 "created": meta.get("created", ""),
                 "content_preview": strip_wikilinks(b.get("content", ""))[:200],
-            })
-        return JSONResponse(result)
+            }
+            if simulate:
+                match_in = b.get("matched_in", [])
+                field_scores = b.get("field_scores", {})
+                item["matched_fields"] = {
+                    "name": round(field_scores.get("name", 0), 1),
+                    "domain": round(field_scores.get("domain", 0), 1),
+                    "tags": round(field_scores.get("tags", 0), 1),
+                    "content": round(field_scores.get("content", 0), 1),
+                    "matched_in": match_in,
+                }
+                if include_vector and vec_sim > 0:
+                    item["vector_similarity"] = vec_sim
+            result.append(item)
+
+        # --- Add vector-only matches (vec >= 0.5, not in keyword results) ---
+        vector_only = []
+        VEC_MIN_SCORE = 0.5
+        if simulate and include_vector and vector_map:
+            keyword_ids = seen_ids
+            for bid, sim in vector_map.items():
+                if sim < VEC_MIN_SCORE:
+                    continue
+                if bid not in keyword_ids:
+                    b = await bucket_mgr.get(bid)
+                    if b:
+                        meta = b.get("metadata", {})
+                        vector_only.append({
+                            "id": bid,
+                            "name": meta.get("name", bid),
+                            "score": 0,
+                            "domain": meta.get("domain", []),
+                            "content_preview": strip_wikilinks(b.get("content", ""))[:200],
+                            "vector_similarity": round(sim, 4),
+                            "matched_fields": None,
+                            "_vector_only": True,
+                        })
+            vector_only.sort(key=lambda x: x["vector_similarity"], reverse=True)
+            vector_only = vector_only[:limit]
+
+        if simulate:
+            return JSONResponse({"items": result, "vector_only": vector_only})
+        else:
+            # Strip extra fields for backward compat
+            return JSONResponse([{
+                "id": it["id"], "name": it["name"], "score": it["score"],
+                "domain": it.get("domain", []), "valence": it.get("valence", 0.5),
+                "arousal": it.get("arousal", 0.3), "content_preview": it.get("content_preview", ""),
+            } for it in result])
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -10941,6 +12050,7 @@ async def api_network(request):
     err = _require_dashboard_auth(request)
     if err:
         return err
+
     try:
         all_buckets = await bucket_mgr.list_all(include_archive=False)
         nodes = []
@@ -11018,12 +12128,15 @@ async def api_breath_debug(request):
     err = _require_dashboard_auth(request)
     if err:
         return err
+
     query = request.query_params.get("q", "")
     q_valence = request.query_params.get("valence")
     q_arousal = request.query_params.get("arousal")
     q_valence = float(q_valence) if q_valence else None
     q_arousal = float(q_arousal) if q_arousal else None
     rerank_requested = _bool_value(request.query_params.get("rerank"), False)
+    threshold_param = request.query_params.get("threshold")
+    threshold = int(threshold_param) if threshold_param else bucket_mgr.fuzzy_threshold
 
     try:
         all_buckets = await bucket_mgr.list_all(include_archive=False)
@@ -11042,11 +12155,21 @@ async def api_breath_debug(request):
             else {}
         )
 
+ # 在 for bucket in all_buckets 循环之前加
+        vector_map = {}
+        if query:
+            try:
+                vr = await embedding_engine.search_similar(query, top_k=200)
+                vector_map = {bid: round(score, 4) for bid, score in vr}
+            except Exception:
+                pass
+            
         for bucket in all_buckets:
             meta = bucket.get("metadata", {})
             bid = bucket["id"]
             try:
                 topic = topic_scores.get(str(bid), 0.0) if query else 0.0
+                topic_match = bucket_mgr._calc_topic_match(query, bucket) if query else {"score": 0.0, "field_scores": {}, "matched_in": []}
                 emotion = bucket_mgr._calc_emotion_score(q_valence, q_arousal, meta)
                 time_s = bucket_mgr._calc_time_score(meta)
                 imp = max(1, min(10, int(meta.get("importance", 5)))) / 10.0
@@ -11092,7 +12215,8 @@ async def api_breath_debug(request):
                     "weights": w,
                     "raw_total": round(raw_total, 4),
                     "normalized": round(normalized, 2),
-                    "passed_threshold": normalized >= bucket_mgr.fuzzy_threshold,
+                    "passed_threshold": normalized >= threshold,
+                    "vector_score": vector_map.get(bid, 0.0),
                 })
             except Exception:
                 continue
@@ -11100,12 +12224,13 @@ async def api_breath_debug(request):
         results.sort(key=lambda x: x["normalized"], reverse=True)
         passed = [r for r in results if r["passed_threshold"]]
         payload = {
+
             "query": query,
             "valence": q_valence,
             "arousal": q_arousal,
             "weights": w,
-            "lexical_terms": lexical_terms,
-            "threshold": bucket_mgr.fuzzy_threshold,
+        "lexical_terms": lexical_terms,
+        "threshold": threshold,
             "total_candidates": len(results),
             "passed_count": len(passed),
             "results": results[:50],  # top 50 for debug
@@ -11410,6 +12535,71 @@ async def api_daily_chat_memory_confirm(request):
     err = _require_dashboard_auth(request)
     if err:
         return err
+
+
+# --- Hit stats & search tracing / 命中统计 & 检索追溯 ---
+@mcp.custom_route("/api/hit-stats", methods=["GET"])
+async def api_hit_stats(request):
+    """Return per-bucket hit counts and search statistics."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    try:
+        limit = int(request.query_params.get("limit", 50))
+        include_zero = request.query_params.get("include_zero", "false").lower() in ("1", "true")
+        order = request.query_params.get("order", "desc")
+        exclude_gated = request.query_params.get("exclude_gated", "true").lower() not in ("0", "false")
+        stats = bucket_mgr.get_hit_stats(limit=limit, include_zero=include_zero,
+                                         order=order, exclude_gated=exclude_gated)
+        return JSONResponse(stats)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/hit-stats/reset", methods=["POST"])
+async def api_reset_hit_stats(request):
+    """Clear all hit stats."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    bucket_mgr.reset_hit_stats()
+    return JSONResponse({"ok": True})
+
+
+@mcp.custom_route("/api/recent-searches", methods=["GET"])
+async def api_recent_searches(request):
+    """Return recent search and surface traces."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    try:
+        limit = int(request.query_params.get("limit", 20))
+        result = bucket_mgr.get_recent_searches(limit=limit)
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# --- Scoring knobs / 检索评分旋钮 ---
+@mcp.custom_route("/api/scoring-config", methods=["GET"])
+async def api_get_scoring_config(request):
+    """Return current scoring knob values + defaults schema."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    return JSONResponse({
+        "current": bucket_mgr.current_scoring_overrides(),
+        "defaults": dict(bucket_mgr.SCORING_OVERRIDE_DEFAULTS),
+    })
+
+
+@mcp.custom_route("/api/scoring-config", methods=["POST"])
+async def api_set_scoring_config(request):
+    """Update scoring knobs. Only whitelisted keys accepted."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+
     try:
         body = await request.json()
     except Exception:
@@ -11431,6 +12621,149 @@ async def api_daily_chat_memory_confirm(request):
         edits=body.get("edits") if isinstance(body.get("edits"), dict) else None,
     )
     return JSONResponse(result)
+
+
+
+
+    # Persist to runtime_config.json
+    import json as _json
+    import os as _os
+    rt_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "runtime_config.json")
+    rt = {}
+    try:
+        if _os.path.exists(rt_path):
+            with open(rt_path, "r", encoding="utf-8") as f:
+                rt = _json.load(f) or {}
+    except Exception:
+        pass
+    rt["scoring"] = dict(rt.get("scoring", {}))
+    for k, v in body.items():
+        if k in bucket_mgr.SCORING_OVERRIDE_DEFAULTS:
+            rt["scoring"][k] = v
+    try:
+        with open(rt_path, "w", encoding="utf-8") as f:
+            _json.dump(rt, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    bucket_mgr.apply_runtime_scoring_overrides(body)
+    return JSONResponse({"ok": True, "current": bucket_mgr.current_scoring_overrides()})
+
+
+@mcp.custom_route("/api/scoring-config/reset", methods=["POST"])
+async def api_reset_scoring_config(request):
+    """Reset scoring knobs to defaults."""
+    from starlette.responses import JSONResponse
+    import json as _json
+    import os as _os
+    err = _require_dashboard_auth(request)
+    if err: return err
+    rt_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "runtime_config.json")
+    try:
+        if _os.path.exists(rt_path):
+            rt = {}
+            try:
+                with open(rt_path, "r", encoding="utf-8") as f:
+                    rt = _json.load(f) or {}
+            except Exception:
+                pass
+            rt.pop("scoring", None)
+            with open(rt_path, "w", encoding="utf-8") as f:
+                _json.dump(rt, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    bucket_mgr.apply_runtime_scoring_overrides(dict(bucket_mgr.SCORING_OVERRIDE_DEFAULTS))
+    return JSONResponse({"ok": True, "current": bucket_mgr.current_scoring_overrides()})
+
+
+@mcp.custom_route("/api/config", methods=["GET"])
+async def api_get_config(request):
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    return JSONResponse({
+        "fuzzy_threshold": bucket_mgr.fuzzy_threshold,
+        "max_results": bucket_mgr.max_results,
+    })
+
+@mcp.custom_route("/api/config", methods=["POST"])
+async def api_update_config(request):
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    try:
+        body = await request.json()
+        if "fuzzy_threshold" in body:
+            val = int(body["fuzzy_threshold"])
+            if 0 <= val <= 100:
+                bucket_mgr.fuzzy_threshold = val
+        return JSONResponse({"ok": True, "fuzzy_threshold": bucket_mgr.fuzzy_threshold})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@mcp.custom_route("/api/prompts", methods=["GET"])
+async def api_get_prompts(request):
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    return JSONResponse({
+        "dehydrate": dehydrator.dehydrate_prompt,
+        "analyze": dehydrator.analyze_prompt,
+    })
+
+@mcp.custom_route("/api/prompts", methods=["POST"])
+async def api_update_prompts(request):
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    try:
+        body = await request.json()
+        name = body.get("name")
+        content = body.get("content", "").strip()
+        if not name or not content:
+            return JSONResponse({"error": "missing fields"}, status_code=400)
+        if name == "dehydrate":
+            dehydrator.dehydrate_prompt = content
+        elif name == "analyze":
+            dehydrator.analyze_prompt = content
+        else:
+            return JSONResponse({"error": "unknown prompt"}, status_code=400)
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    
+@mcp.custom_route("/api/prompts/test", methods=["POST"])
+async def api_test_prompt(request):
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    try:
+        body = await request.json()
+        name = body.get("name")
+        content = body.get("content", "")
+        prompt_override = body.get("prompt_override", "").strip()
+
+        if name == "dehydrate":
+            original = dehydrator.dehydrate_prompt
+            if prompt_override:
+                dehydrator.dehydrate_prompt = prompt_override
+            try:
+                result = await dehydrator._api_dehydrate(content)
+            finally:
+                dehydrator.dehydrate_prompt = original
+        elif name == "analyze":
+            original = dehydrator.analyze_prompt
+            if prompt_override:
+                dehydrator.analyze_prompt = prompt_override
+            try:
+                result = await dehydrator._api_analyze(content)
+            finally:
+                dehydrator.analyze_prompt = original
+        else:
+            return JSONResponse({"error": "unknown"}, status_code=400)
+
+        return JSONResponse({"ok": True, "result": result})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @mcp.custom_route("/dashboard", methods=["GET"])
@@ -11528,6 +12861,7 @@ async def api_config_get(request):
 
     def _mask_key(api_key: str) -> str:
         return f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) > 8 else ("***" if api_key else "")
+
 
     dehy = config.get("dehydration", {})
     emb = config.get("embedding", {})
@@ -11837,6 +13171,7 @@ async def api_config_update(request):
     err = _require_dashboard_auth(request)
     if err:
         return err
+
     try:
         body = await request.json()
     except Exception:
@@ -12965,6 +14300,122 @@ async def api_status(request):
 
 
 # =============================================================
+# /api/host-vault — read/write the host-side OMBRE_HOST_VAULT_DIR
+# 用于在 Dashboard 设置 docker-compose 挂载的宿主机记忆桶目录。
+# 写入项目根目录的 .env 文件，需 docker compose down/up 才能生效。
+# =============================================================
+
+def _project_env_path() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+
+
+def _read_env_var(name: str) -> str:
+    """Return current value of `name` from process env first, then .env file (best-effort)."""
+    val = os.environ.get(name, "").strip()
+    if val:
+        return val
+    env_path = _project_env_path()
+    if not os.path.exists(env_path):
+        return ""
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                if k.strip() == name:
+                    return v.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return ""
+
+
+def _write_env_var(name: str, value: str) -> None:
+    """
+    Idempotent upsert of `NAME=value` in project .env. Creates the file if missing.
+    Preserves other entries verbatim. Quotes values containing spaces.
+    """
+    env_path = _project_env_path()
+    quoted = f'"{value}"' if value and (" " in value or "#" in value) else value
+    new_line = f"{name}={quoted}\n"
+
+    lines: list[str] = []
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+    replaced = False
+    for i, raw in enumerate(lines):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        k, _, _v = stripped.partition("=")
+        if k.strip() == name:
+            lines[i] = new_line
+            replaced = True
+            break
+    if not replaced:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(new_line)
+
+    with open(env_path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+
+@mcp.custom_route("/api/host-vault", methods=["GET"])
+async def api_host_vault_get(request):
+    """Read the current OMBRE_HOST_VAULT_DIR (process env > project .env)."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    value = _read_env_var("OMBRE_HOST_VAULT_DIR")
+    return JSONResponse({
+        "value": value,
+        "source": "env" if os.environ.get("OMBRE_HOST_VAULT_DIR", "").strip() else ("file" if value else ""),
+        "env_file": _project_env_path(),
+    })
+
+
+@mcp.custom_route("/api/host-vault", methods=["POST"])
+async def api_host_vault_set(request):
+    """
+    Persist OMBRE_HOST_VAULT_DIR to the project .env file.
+    Body: {"value": "/path/to/vault"}  (empty string clears the entry)
+    Note: container restart is required for docker-compose to pick up the new mount.
+    """
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+
+    raw = body.get("value", "")
+    if not isinstance(raw, str):
+        return JSONResponse({"error": "value must be a string"}, status_code=400)
+    value = raw.strip()
+
+    # Reject characters that would break .env / shell parsing
+    if "\n" in value or "\r" in value or '"' in value or "'" in value:
+        return JSONResponse({"error": "value must not contain quotes or newlines"}, status_code=400)
+
+    try:
+        _write_env_var("OMBRE_HOST_VAULT_DIR", value)
+    except Exception as e:
+        return JSONResponse({"error": f"failed to write .env: {e}"}, status_code=500)
+
+    return JSONResponse({
+        "ok": True,
+        "value": value,
+        "env_file": _project_env_path(),
+        "note": "已写入 .env；需在宿主机执行 `docker compose down && docker compose up -d` 让新挂载生效。",
+    })
+
+
+# =============================================================
 # Import API — conversation history import
 # 导入 API — 对话历史导入
 # =============================================================
@@ -12976,6 +14427,7 @@ async def api_import_upload(request):
     err = _require_dashboard_auth(request)
     if err:
         return err
+
 
     if import_engine.is_running:
         return JSONResponse({"error": "Import already running"}, status_code=409)
@@ -13003,6 +14455,8 @@ async def api_import_upload(request):
 
         preserve_raw = request.query_params.get("preserve_raw", "").lower() in ("1", "true")
         resume = request.query_params.get("resume", "").lower() in ("1", "true")
+        max_chunks = int(request.query_params.get("max_chunks", "0") or "0")
+        mode = request.query_params.get("mode", "large")  # "large" or "small"
 
     except Exception as e:
         return JSONResponse({"error": f"Failed to read upload: {e}"}, status_code=400)
@@ -13010,7 +14464,8 @@ async def api_import_upload(request):
     # Start import in background
     async def _run_import():
         try:
-            await import_engine.start(raw_content, filename, preserve_raw, resume)
+            await import_engine.start(raw_content, filename, preserve_raw, resume,
+                                      max_chunks=max_chunks, mode=mode)
         except Exception as e:
             logger.error(f"Import failed: {e}")
 
@@ -13030,6 +14485,7 @@ async def api_import_status(request):
     err = _require_dashboard_auth(request)
     if err:
         return err
+
     return JSONResponse(import_engine.get_status())
 
 
@@ -13040,6 +14496,7 @@ async def api_import_pause(request):
     err = _require_dashboard_auth(request)
     if err:
         return err
+
     if not import_engine.is_running:
         return JSONResponse({"error": "No import running"}, status_code=400)
     import_engine.pause()
@@ -13053,6 +14510,7 @@ async def api_import_patterns(request):
     err = _require_dashboard_auth(request)
     if err:
         return err
+
     try:
         patterns = await import_engine.detect_patterns()
         return JSONResponse({"patterns": patterns})
@@ -13067,6 +14525,7 @@ async def api_import_results(request):
     err = _require_dashboard_auth(request)
     if err:
         return err
+
     try:
         limit = int(request.query_params.get("limit", "50"))
         all_buckets = await bucket_mgr.list_all(include_archive=False)
@@ -13096,6 +14555,7 @@ async def api_import_review(request):
     err = _require_dashboard_auth(request)
     if err:
         return err
+
     try:
         body = await request.json()
     except Exception:
@@ -13139,6 +14599,46 @@ async def api_import_review(request):
     return JSONResponse({"applied": applied, "errors": errors})
 
 
+# =============================================================
+# /api/status — system status for Dashboard settings tab
+# /api/status — Dashboard 设置页用系统状态
+# =============================================================
+@mcp.custom_route("/api/status", methods=["GET"])
+async def api_system_status(request):
+    """Return detailed system status for the settings panel."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    try:
+        stats = await bucket_mgr.get_stats()
+        return JSONResponse({
+            "decay_engine": "running" if decay_engine.is_running else "stopped",
+            "embedding_enabled": embedding_engine.enabled,
+            "buckets": {
+                "permanent": stats.get("permanent_count", 0),
+                "dynamic": stats.get("dynamic_count", 0),
+                "archive": stats.get("archive_count", 0),
+                "total": stats.get("permanent_count", 0) + stats.get("dynamic_count", 0),
+            },
+            "using_env_password": bool(os.environ.get("OMBRE_DASHBOARD_PASSWORD", "")),
+            "version": "1.3.0",
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@mcp.custom_route("/admin/backfill", methods=["POST"])
+async def admin_backfill(request):
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    try:
+        import asyncio
+        from backfill_embeddings import backfill
+        asyncio.create_task(backfill(batch_size=20))
+        return JSONResponse({"status": "started"})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 # --- Entry point / 启动入口 ---
 if __name__ == "__main__":
     transport = config.get("transport", "stdio")
@@ -13163,7 +14663,7 @@ if __name__ == "__main__":
             async with httpx.AsyncClient() as client:
                 while True:
                     try:
-                        await client.get("http://localhost:8000/health", timeout=5)
+                        await client.get(f"http://localhost:{OMBRE_PORT}/health", timeout=5)
                         logger.debug("Keepalive ping OK / 保活 ping 成功")
                     except Exception as e:
                         logger.warning(f"Keepalive ping failed / 保活 ping 失败: {e}")
@@ -13428,10 +14928,13 @@ if __name__ == "__main__":
             _app.add_event_handler("startup", _start_decay_engine_on_app_startup)
         _app.add_middleware(
             CORSMiddleware,
-            allow_origins=["*"],
+            allow_origins=[
+                "https://ob-dashboard2.vercel.app",
+                "http://localhost:3000",
+            ],
+            allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
-            expose_headers=["*"],
         )
         _app.add_middleware(
             OmbreChatGptOAuthMiddleware,
@@ -13445,5 +14948,9 @@ if __name__ == "__main__":
                 sorted(OMBRE_CHATGPT_OAUTH_PROTECTED_HOSTS),
             )
         uvicorn.run(_app, host="0.0.0.0", port=8000)
+
+
+        uvicorn.run(_app, host="0.0.0.0", port=OMBRE_PORT)
+
     else:
         mcp.run(transport=transport)

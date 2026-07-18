@@ -13,7 +13,6 @@ Free tier: 1500 requests/day, so ~75 batches of 20.
 import asyncio
 import argparse
 import sys
-import time
 
 sys.path.insert(0, ".")
 from utils import bucket_text_for_embedding, load_config
@@ -80,7 +79,7 @@ async def backfill(batch_size: int = 20, dry_run: bool = False, refresh_all: boo
                 print(f"  ERROR: {b['id'][:12]} ({name[:30]}): {e}")
 
         if i + batch_size < total:
-            print(f"  Waiting 2s before next batch...")
+            print("  Waiting 2s before next batch...")
             await asyncio.sleep(2)
 
     print(f"\n=== Done: {success} success, {failed} failed, {total - success - failed} skipped ===")

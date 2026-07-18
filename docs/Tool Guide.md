@@ -19,6 +19,7 @@
 - 如果只出现 `[moment_id:...]`，优先使用同一段上下文里已有的 bucket_id；没有 bucket_id 时不要硬猜。
 - `[memory_detail ids="..."]` 只给 Gateway 内部二次取细节用，不是普通 MCP 工具。
 - 旧独立感受：breath(domain="feel")。domain="feel" 不包含日印象；domain="whisper" 只读悄悄话。某条旧记忆的新年轮要 read_bucket(bucket_id)。
+- 日记：breath(domain="journal")（含上锁检测）；轨迹桶：breath(domain="journey")。
 - 自我锚点总入口：breath(domain="self_anchor")；domain="自我" / domain="self_identity" 兼容。
 - 查自我锚点分段：breath(domain="self_anchor", query="关键词")。
 - 管理/调试所有自我桶完整内容：breath(query="tag:self_anchor") 或 breath(query="tag:自我")。
@@ -32,6 +33,10 @@
 - 稳定画像事实：先有证据 bucket，再 profile_fact(fact, evidence_bucket_id, ...)。
 - 不确定是否重复：先 breath/read_bucket，再写。
 - 碎碎念、突然的念头可以写 whisper：hold(content="...", whisper=True, ...)
+- 私人日记，不想进普通浮现：hold(journal=True, author="言之"或"小羊"或"共同")；可加 locked=True, unlock_hint="2026-08-01" 上锁
+- 长期悬念标签（低概率浮现）：hold(wish=True) 或 trace(bucket_id, wish=1)
+- 给记忆附上待办：hold(todo="内容", todo_done=False)；标记完成用 trace(bucket_id, todo_done=1)
+- 手动关联桶：trace(bucket_id, related="id1,id2")
 - content 分段格式：### moment（事件事实）/ ### original（原话证据）/ ### reflection（你的理解和回应规则）/ ### followup（后续待办）/ ### affect_anchor（只放和弦温度线，不放事实）。旧 ### assistant_reflection 兼容，但新写入用 ### reflection。没有的部分不写。
 
 暗房：

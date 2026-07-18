@@ -2842,6 +2842,7 @@
   <div class="tab" data-tab="model-config">模型配置</div>
   <div class="tab" data-tab="memory-config">记忆浮现</div>
   <div class="tab" data-tab="import">导入</div>
+  <div class="tab" data-tab="settings">设置</div>
 </div>
 
 <div class="content" id="list-view">
@@ -3961,6 +3962,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (target === 'upstream-config') loadConfig();
     if (target === 'model-config') loadConfig();
     if (target === 'import') { pollImportStatus(); loadImportResults(); }
+    if (target === 'settings') loadSettingsStatus();
   });
 });
 
@@ -4356,6 +4358,7 @@ function parseLocalDate(value) {
 }
 
 function getBucketDate(bucket) {
+  if (bucket.event_time) return String(bucket.event_time).slice(0, 10);
   if (bucket.date) return String(bucket.date).slice(0, 10);
   var idMatch = String(bucket.id || '').match(/^reflection_daily_(\d{4}-\d{2}-\d{2})$/);
   if (idMatch) return idMatch[1];
@@ -4364,6 +4367,7 @@ function getBucketDate(bucket) {
 
 function getBucketEventDate(bucket) {
   if (!bucket) return '';
+  if (bucket.event_time) return String(bucket.event_time).slice(0, 10);
   if (bucket.date) return String(bucket.date).slice(0, 10);
   if (bucket.event_date) return String(bucket.event_date).slice(0, 10);
   var meta = bucketMetadataView(bucket);
@@ -8699,6 +8703,7 @@ function updateImportUI(s) {
   document.getElementById('import-status-text').textContent = statusMap[s.status] || s.status;
   document.getElementById('import-pause-btn').style.display = s.status === 'running' ? '' : 'none';
   if (s.status !== 'running') clearInterval(importPollTimer);
+  if (s.status === 'completed') loadImportResults();
   const errDiv = document.getElementById('import-errors');
   if (s.errors && s.errors.length) {
     errDiv.style.display = '';

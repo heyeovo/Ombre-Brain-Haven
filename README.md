@@ -528,6 +528,51 @@ Python 直跑时对应端口为 `8000/8010`。
 
 更细的行为边界见 [`docs/memory-layer-contract.md`](docs/memory-layer-contract.md)，部署补充见 [`docs/deploy-zeabur.md`](docs/deploy-zeabur.md)。
 
+## 测试 / Testing
+
+测试套件覆盖规格书所有场景（场景 01–11），以及 B-01 至 B-10 全部 bug 修复的回归测试。
+
+The test suite covers all spec scenarios (01–11) and regression tests for every bug fix (B-01 to B-10).
+
+### 快速运行 / Quick Start
+
+```bash
+pip install pytest pytest-asyncio
+pytest tests/                          # 全部测试
+pytest tests/unit/                     # 单元测试
+pytest tests/integration/             # 集成测试（场景全流程）
+pytest tests/regression/              # 回归测试（B-01..B-10）
+pytest tests/ -k "B01"               # 单个回归测试
+pytest tests/ -v                       # 详细输出
+```
+
+### 测试层级 / Test Layers
+
+| 目录 Directory | 内容 Contents |
+|---|---|
+| `tests/unit/` | 单独测试 calculate_score、topic_score、时间得分、CRUD 等核心函数 |
+| `tests/integration/` | 场景全流程：冷启动、hold、search、trace、decay、feel 等 11 个场景 |
+| `tests/regression/` | 每个 bug（B-01 至 B-10）独立回归测试，含边界条件 |
+
+### 回归测试覆盖 / Regression Coverage
+
+| 文件 | Bug | 核心断言 |
+|---|---|---|
+| `test_issue_B01.py` | resolved 桶不再自动归档 | `update(resolved=True)` 后桶留在 `dynamic/`，搜索仍可命中，得分 ×0.05 |
+| `test_issue_B03.py` | float activation_count 不被 int() 截断 | 1.3 > 1.0 得分，`_time_ripple` 写入 0.3 增量 |
+| `test_issue_B04.py` | create() 初始 activation_count=0 | 新建桶满足冷启动条件，touch() 后变 1 |
+| `test_issue_B05.py` | 时间衰减系数 0.02（原 0.1）| 30天 ≈ 0.549，非旧值 0.049 |
+| `test_issue_B06.py` | w_time 默认 1.5（原 2.5）| `BucketManager.w_time == 1.5` |
+| `test_issue_B07.py` | content_weight 默认 1.0（原 3.0）| 名字完全匹配得分 > 内容模糊匹配 |
+| `test_issue_B08.py` | auto_resolve 同轮应用降权因子 | stale meta 修复后 score ×0.05 立即生效 |
+| `test_issue_B09.py` | hold() 保留用户传入的 valence/arousal | 用户值优先于 analyze() 结果 |
+| `test_issue_B10.py` | feel 桶 domain=[] 不被填充 | feel 桶保持 `[]`；dynamic 桶正确填 `["未分类"]` |
+
+> **测试隔离**：所有测试运行在 `tmp_path` 临时目录，绝不触碰真实记忆数据。
+> **Test isolation**: All tests run in `tmp_path` — your real memory data is never touched.
+
+---
+
 ## License
 
 原项目代码遵循原仓库的 MIT License。本 fork 新增内容的个人学习、自用、非商业二改与商业使用边界见 [`NOTICE.md`](NOTICE.md) 和 [`LICENSE`](LICENSE)。

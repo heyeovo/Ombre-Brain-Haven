@@ -16,8 +16,6 @@ import json
 import math
 import sqlite3
 import logging
-import asyncio
-from pathlib import Path
 
 from openai import AsyncOpenAI
 

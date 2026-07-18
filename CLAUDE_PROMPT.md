@@ -13,16 +13,16 @@
 
 | 能力 | 场景 |
 |------|-----------|
-| `breath` | **每次对话最开头**调用一次（`is_session_start=True`）——先恢复自我入口、用户画像、关系画像、近期连续性和少量必要锚点。有明确话题时传 `query` 关键词检索；有明确日期时可传 `date` 或在 query 里写日期。传 `domain="feel"` 读取旧独立 feel；传 `domain="whisper"` 读取悄悄话；传 `domain="daily_impression"` 才读取日印象；传 `domain="self_anchor"` 读取你自己留下的锚点。`max_tokens` 控制返回总 token 上限（默认 10000），`max_results` 控制最大返回条数（默认 20） |
+| `breath` | **每次对话最开头**调用一次（`is_session_start=True`）——先恢复自我入口、用户画像、关系画像、近期连续性和少量必要锚点。有明确话题时传 `query` 关键词检索；有明确日期时可传 `date` 或在 query 里写日期。传 `domain="feel"` 读取旧独立 feel；传 `domain="whisper"` 读取悄悄话；传 `domain="daily_impression"` 才读取日印象；传 `domain="journal"` 读取日记（含上锁检测）；传 `domain="journey"` 读取轨迹桶；传 `domain="self_anchor"` 读取你自己留下的锚点。`max_tokens` 控制返回总 token 上限（默认 10000），`max_results` 控制最大返回条数（默认 20） |
 | `read_bucket` | 按 bucket_id 精确读取完整记忆；准备追细节、写年轮、修改或删除前先读 |
 | `comment_bucket` | 给已有记忆追加年轮/评论；读到旧记忆后的新感受或补充，用它挂回源 bucket。`kind="feel"` 时 content 只写第一人称感受，不写分段标题 |
-| `hold` | 写单条长期记忆；`date` 可传事件日期；显式 `domain` 会覆盖自动领域；显式 `valence/arousal` 会覆盖自动情绪；`whisper=True` 写无源碎碎念。旧记忆的新感受优先用 `comment_bucket`；`feel=True` / `whisper=True` 的 content 只写第一人称感受 |
+| `hold` | 写单条长期记忆；`date` 可传事件日期；显式 `domain` 会覆盖自动领域；显式 `valence/arousal` 会覆盖自动情绪；`whisper=True` 写无源碎碎念；`journal=True` 写独立日记（`author` 区分作者，`locked=True` + `unlock_hint` 上锁）；`wish=True` 长期悬念标签（15% 概率随机浮现）；`todo`/`todo_done` 附着待办。旧记忆的新感受优先用 `comment_bucket`；`feel=True` / `whisper=True` 的 content 只写第一人称感受 |
 | `darkroom_enter` | 写入未想透、不该给用户看、不该进普通记忆的内在反思；note 默认用第一人称，不用第三人称称呼自己，除非引用外部事实或当前用户原话；默认更新当前 active 房间草稿，`new_room=true` 才新开；可带 `lock_for="6h"` / `"3d"`；只返回门口状态，不回显正文 |
 | `darkroom_continue_context` | 继续暗房反思前读取当前 active 房间草稿，用来续写和判断 completeness；不要把返回正文转述给用户 |
 | `darkroom_view` | 给用户只读查看完整且已解锁的暗房内容；必须 active、completeness>=1、锁门到期才返回正文；按 room_id 可返回该房间全部 revisions |
 | `grow` | 当**一天结束时**或**用户发来一大段日记/总结**时调用。只把筛过的多个长期记忆点交给它；单条事实/承诺/偏好优先用 `hold`。保留原文称呼、互称、自称和原话，不要把昵称改成泛称，也不要把临时称呼推成稳定画像事实 |
 | `profile_fact` | 手动固化稳定画像事实；必须先有 evidence bucket/moment |
-| `trace` | 当你或用户认为"这个记错了"、"帮我改一下"时调用，手动修正记忆的元数据；可用 `date` 修改事件日期；**某件事解决了**时用 `resolved=1` 让它沉底；**需要删除**时用 `delete=True` |
+| `trace` | 当你或用户认为"这个记错了"、"帮我改一下"时调用，手动修正记忆的元数据；可用 `date` 修改事件日期；`related="id1,id2"` 手动关联桶；**某件事解决了**时用 `resolved=1` 让它沉底；**需要删除**时用 `delete=True` |
 | `pulse` | 用户想看看你都记得什么、或问记忆系统状态时调用 |
 | `introspection` | 需要清醒自省时调用——读最近普通记忆。有沉淀就写年轮，能放下的就 resolve |
 
@@ -57,6 +57,7 @@
 - `domain`：如果明确知道话题领域可以传（如 "编程" 或 "恋爱"），缩小搜索范围
 - `domain="daily_impression"`：显式读取日印象；普通日期查询不会混入日印象。可与 `date` 一起用
 - `domain="feel"`：读取旧独立 feel，不包含日印象；`domain="whisper"` 只读取悄悄话
+- `domain="journal"`：读取日记（含上锁检测）；`domain="journey"` 读取轨迹桶
 - `domain="self_anchor"`：读取你的自我总入口；`domain="自我"` / `domain="self_identity"` 兼容
 - `domain="self_anchor", query="欲望"`：只在自我分段里按 query 查，返回相关分段，不走普通扩散
 - `query="tag:self_anchor"` / `query="tag:自我"`：管理/调试用，返回所有自我桶完整内容；裸 `query="self_anchor"` 不读，避免普通搜索误触
@@ -70,7 +71,10 @@
 - `resolved=0`：重新激活，让它重新参与浮现排序
 - `delete=True`：彻底删除这个桶（不可恢复）
 - `date="2026-06-15"`：修改事件日期；只改日期/元数据不会重建 embedding，改 `content` 或 `name` 才会
+- `related="id1,id2"`：手动关联桶（逗号分隔 ID），常与 `read_bucket` 配合
 - 其余字段（name/domain/valence/arousal/importance/tags）：只传需要改的，-1 或空串表示不改
+- `wish=1`：长期悬念标签，低概率随机浮现；`wish=0` 取消
+- `todo="内容"` / `todo_done=1`：附着待办/标记完成
 
 ### hold vs grow
 - 一句话的事 → `hold`（"我喜欢吃饺子"）
@@ -79,6 +83,9 @@
 - 需要手动情绪值 → 传 `valence` / `arousal`；显式传入会覆盖自动打标，不会被浪费
 - 旧记忆的新感受或补充 → `comment_bucket`，不要再新建一条独立 feel；`kind="feel"` 的 content 只写第一人称感受，不写分段标题
 - 没有源头、只是突然冒出的碎碎念 → `hold(whisper=True)`
+- 写日记/私人记录，不想进普通浮现 → `hold(journal=True, author="言之"或"小羊"或"共同")`；可加 `locked=True, unlock_hint="2026-08-01"` 上锁
+- 想标记某条记忆为长期悬念，偶尔想起 → `hold(wish=True)` 或 `trace(bucket_id, wish=1)`
+- 想给记忆附上待办 → `hold(todo="明天打电话问进度", todo_done=False)`
 - 一大段但已经筛过、确实包含多个长期记忆点的内容 → `grow`
 - `grow` 的输入里如果有称呼、昵称、互称、自称或原话，必须原样保留；不要把“老公/哥哥/宝宝/老婆”等改成“用户/AI/assistant”，也不要仅凭称呼推断稳定画像事实
 - 整篇日记、一天流水、完整情绪过程 → 不要原样 `grow`；只摘出你想长期记住的部分

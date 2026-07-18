@@ -22,3 +22,7 @@ backup_*/
 *.db
 import_state.json
 .codex
+data/
+tests/integration/
+tests/regression/
+tests/unit/

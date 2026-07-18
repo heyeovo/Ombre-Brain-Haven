@@ -12702,6 +12702,31 @@ async def api_get_config(request):
     from starlette.responses import JSONResponse
     err = _require_dashboard_auth(request)
     if err: return err
+    # Return full Gateway config when available (dashboard.html config tabs)
+    gws = _resolve_gateway_config_service()
+    if gws:
+        cfg = gws.config
+        return JSONResponse({
+            "gateway": gws._gateway_memory_config_payload(),
+            "memory_diffusion": gws._memory_diffusion_config_payload(),
+            "reranker": gws._reranker_config_payload(),
+            "persona": gws._persona_config_payload(),
+            "dream": gws._dream_config_payload(),
+            "dehydration": {
+                **{k: v for k, v in cfg.get("dehydration", {}).items() if k != "api_key"},
+                "api_key_masked": "***" if cfg.get("dehydration", {}).get("api_key") else "",
+            },
+            "embedding": {
+                "enabled": bool(cfg.get("embedding", {}).get("enabled")),
+                "model": cfg.get("embedding", {}).get("model", ""),
+                "base_url": cfg.get("embedding", {}).get("base_url", ""),
+                "has_own_api_key": bool(cfg.get("embedding", {}).get("api_key")),
+                "api_key_masked": "***" if cfg.get("embedding", {}).get("api_key") else "",
+            },
+            "merge_threshold": cfg.get("merge_threshold", 90),
+            "fuzzy_threshold": bucket_mgr.fuzzy_threshold,
+            "max_results": bucket_mgr.max_results,
+        })
     return JSONResponse({
         "fuzzy_threshold": bucket_mgr.fuzzy_threshold,
         "max_results": bucket_mgr.max_results,
@@ -12712,6 +12737,41 @@ async def api_update_config(request):
     from starlette.responses import JSONResponse
     err = _require_dashboard_auth(request)
     if err: return err
+    gws = _resolve_gateway_config_service()
+    if gws:
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid config"}, status_code=400)
+        # Apply each config section through gateway service
+        updated: list[str] = []
+        if isinstance(body.get("dehydration"), dict):
+            updated.extend(gws._apply_dehydration_config(body["dehydration"]))
+        if isinstance(body.get("reranker"), dict):
+            updated.extend(gws._apply_reranker_config(body["reranker"]))
+        if isinstance(body.get("memory_diffusion"), dict):
+            updated.extend(gws._apply_memory_diffusion_config(body["memory_diffusion"]))
+        if isinstance(body.get("persona"), dict):
+            updated.extend(gws._apply_persona_config(body["persona"]))
+        if isinstance(body.get("dream"), dict):
+            updated.extend(gws._apply_dream_config(body["dream"]))
+        if isinstance(body.get("gateway"), dict):
+            updated.extend(gws._apply_gateway_memory_config(body["gateway"]))
+        if updated:
+            gws._save_gateway_runtime_config()
+        return JSONResponse({
+            "ok": True,
+            "updated": updated,
+            "gateway": gws._gateway_memory_config_payload(),
+            "dehydration": gws.config.get("dehydration", {}),
+            "reranker": gws.config.get("reranker", {}),
+            "memory_diffusion": gws.config.get("memory_diffusion", {}),
+            "persona": gws.config.get("persona", {}),
+            "dream": gws.config.get("dream", {}),
+        })
+    # Fallback: simple config (fuzzy_threshold only)
     try:
         body = await request.json()
         if "fuzzy_threshold" in body:
@@ -12721,6 +12781,12 @@ async def api_update_config(request):
         return JSONResponse({"ok": True, "fuzzy_threshold": bucket_mgr.fuzzy_threshold})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+def _resolve_gateway_config_service():
+    try:
+        return _gw_service
+    except NameError:
+        return None
 
 @mcp.custom_route("/api/prompts", methods=["GET"])
 async def api_get_prompts(request):

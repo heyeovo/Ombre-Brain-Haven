@@ -498,6 +498,13 @@ class GatewayService:
             "technical_domain_terms",
             DEFAULT_AXIS_LITE_TECHNICAL_DOMAIN_TERMS,
         )
+        # Resolve state_dir (shared path with RawEventStore)
+        _buckets = os.path.abspath(str(config.get("buckets_dir", "buckets")))
+        self._state_dir = str(config.get("state_dir") or "").strip() or os.path.join(
+            os.path.dirname(_buckets), "state"
+        )
+        os.makedirs(self._state_dir, exist_ok=True)
+
         self.state_store = state_store or GatewayStateStore(
             os.path.join(config["buckets_dir"], "gateway_state.db")
         )
@@ -822,6 +829,9 @@ class GatewayService:
         self.pending_tool_reasoning: dict[str, dict[tuple[str, ...], dict[str, Any]]] = {}
 
         self.http_client = http_client or httpx.AsyncClient(timeout=60.0)
+
+        # Load persisted gateway config (survives container restarts — state/ is on a Zeabur Volume)
+        self._load_gateway_runtime_config()
 
     async def close(self) -> None:
         if self.http_client and not getattr(self.http_client, "is_closed", False):
@@ -1804,6 +1814,8 @@ class GatewayService:
             updated.extend(self._apply_persona_config(persona_payload))
         if dream_payload is not None:
             updated.extend(self._apply_dream_config(dream_payload))
+        if updated:
+            self._save_gateway_runtime_config()
         return JSONResponse({
             "ok": True,
             "updated": updated,
@@ -1813,6 +1825,57 @@ class GatewayService:
             "persona": self._persona_config_payload(),
             "dream": self._dream_config_payload(),
         })
+
+    # --- Runtime config persistence (survives container restarts via state/ Volume) ---
+    def _gateway_runtime_config_path(self) -> str:
+        return os.path.join(self._state_dir, "gateway_config.json")
+
+    def _save_gateway_runtime_config(self) -> None:
+        try:
+            # Save all hot-reloadable config sections: gateway, dehydration, reranker,
+            # memory_diffusion, persona, dream
+            payload = {
+                "gateway": self.gateway_cfg,
+                "dehydration": self.config.get("dehydration", {}),
+                "reranker": self.config.get("reranker", {}),
+                "memory_diffusion": self.config.get("memory_diffusion", {}),
+                "persona": self.config.get("persona", {}),
+                "dream": self.config.get("dream", {}),
+            }
+            with open(self._gateway_runtime_config_path(), "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            logger.info("Gateway runtime config saved to %s", self._gateway_runtime_config_path())
+        except Exception as exc:
+            logger.warning("Failed to save gateway runtime config: %s", exc)
+
+    def _load_gateway_runtime_config(self) -> None:
+        path = self._gateway_runtime_config_path()
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return
+            # Restore gateway section
+            if isinstance(data.get("gateway"), dict):
+                self.gateway_cfg.update(data["gateway"])
+                self.upstreams = self._load_upstreams()
+                self._refresh_upstream_model_summary()
+                self.cooldown_hours = float(self.gateway_cfg.get("cooldown_hours", 6))
+                self.skip_recent_rounds = max(0, int(self.gateway_cfg.get("skip_recent_rounds", 5)))
+                self.recent_context_cooldown_hours = float(self.gateway_cfg.get("recent_context_cooldown_hours", 6))
+                self.recent_context_reentry_idle_hours = float(self.gateway_cfg.get("recent_context_reentry_idle_hours", 24))
+                self.inject_total_budget = int(self.gateway_cfg.get("inject_total_budget", 1800))
+                self.upstream_base_url = self.gateway_cfg.get("upstream_base_url", "").rstrip("/")
+                self.upstream_default_model = self.gateway_cfg.get("upstream_default_model", "")
+            # Restore other hot-reloadable sections
+            for section in ("dehydration", "reranker", "memory_diffusion", "persona", "dream"):
+                if isinstance(data.get(section), dict) and data[section]:
+                    self.config[section] = data[section]
+            logger.info("Gateway runtime config loaded from %s", path)
+        except Exception as exc:
+            logger.warning("Failed to load gateway runtime config: %s", exc)
 
     async def handle_health(self, request: Request) -> JSONResponse:
         try:

@@ -14996,9 +14996,7 @@ if __name__ == "__main__":
                 _GwRoute("/gateway/v1/models", _gw_models, methods=["GET"]),
                 _GwRoute("/gateway/api/debug/injections", _gw_injection_debug, methods=["GET"]),
             ])
-            async def _start_gateway():
-                await _gw_service.warm_recall_runtime()
-            _app.add_event_handler("startup", _start_gateway)
+            # warm_recall_runtime will happen lazily on first gateway request
             _gw_ok = True
             logger.info("Gateway mounted on /gateway/* / Gateway 已挂载")
         except Exception as _gw_exc:

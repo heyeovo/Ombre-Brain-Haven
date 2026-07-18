@@ -14947,9 +14947,6 @@ if __name__ == "__main__":
                 "ChatGPT OAuth enabled for Ombre MCP / 已启用 ChatGPT OAuth: protected_hosts=%s",
                 sorted(OMBRE_CHATGPT_OAUTH_PROTECTED_HOSTS),
             )
-        uvicorn.run(_app, host="0.0.0.0", port=8000)
-
-
         uvicorn.run(_app, host="0.0.0.0", port=OMBRE_PORT)
 
     else:

@@ -32,7 +32,8 @@ VOLUME ["/app/buckets"]
 # 容器场景默认用 streamable-http
 ENV OMBRE_TRANSPORT=streamable-http
 ENV OMBRE_BUCKETS_DIR=/app/buckets
+ENV OMBRE_PORT=8080
 
-EXPOSE 8000
+EXPOSE 8080
 
 CMD ["python", "server.py"]

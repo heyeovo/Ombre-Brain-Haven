@@ -11355,7 +11355,12 @@ async def api_reminder_update(request):
 
 @mcp.custom_route("/api/bucket/{bucket_id}", methods=["PATCH"])
 async def api_bucket_update(request):
-    """Update dashboard-editable bucket body fields."""
+    """Update dashboard-editable bucket metadata fields.
+
+    Accepts any subset of: content, name, date(event_time), importance,
+    resolved, pinned, digested, domain, tags, valence, arousal,
+    wish, todo, todo_done, anchor, source, confidence.
+    """
     from starlette.responses import JSONResponse
 
     err = _require_dashboard_auth(request)
@@ -11373,36 +11378,48 @@ async def api_bucket_update(request):
     if not isinstance(body, dict):
         return JSONResponse({"error": "json body must be an object"}, status_code=400)
 
-    content = str(body.get("content") or "").strip() if "content" in body else None
-    name = str(body.get("name") or "").strip() if "name" in body else None
-    event_date = str(body.get("date") or "").strip() if "date" in body else None
+    # --- allowed fields whitelist / 允许的字段白名单 ---
+    allowed_fields = {
+        "name", "domain", "valence", "arousal", "importance", "tags",
+        "resolved", "pinned", "digested", "content",
+        "wish", "todo", "todo_done", "anchor", "source", "confidence",
+    }
 
-    if content is None and name is None and event_date is None:
-        return JSONResponse({"error": "missing content, name, or date"}, status_code=400)
-    if event_date:
-        normalized_date = local_date_key(event_date)
+    update_kwargs: dict = {}
+    for key in allowed_fields:
+        val = body.get(key)
+        if val is not None:
+            update_kwargs[key] = val
+
+    # event_time: canonical event date field (frontend sends this key)
+    # date: legacy alias — both map to the same concept
+    # 前端发 event_time/date → 写 event_time（与 trace 工具和 API 返回一致）
+    # bucket_manager.update() handles both "event_time" and "date" keys
+    raw_date = body.get("event_time") or body.get("date")
+    if raw_date and str(raw_date).strip():
+        normalized_date = local_date_key(str(raw_date).strip())
         if not normalized_date:
             return JSONResponse({"error": "invalid date"}, status_code=400)
-        event_date = normalized_date
+        update_kwargs["event_time"] = normalized_date
+
+    if not update_kwargs:
+        return JSONResponse({"error": "no recognized fields in body"}, status_code=400)
 
     bucket = await bucket_mgr.get(bucket_id)
     if not bucket:
         return JSONResponse({"error": "not found"}, status_code=404)
 
     meta = bucket.get("metadata", {})
-    if content is not None:
-        if not content:
+
+    # --- content validation / 内容校验 ---
+    if "content" in update_kwargs:
+        if not update_kwargs["content"] or not str(update_kwargs["content"]).strip():
             return JSONResponse({"error": "empty content"}, status_code=400)
-        if _has_favorite_tag(meta.get("tags", [])) and not _has_favorite_reason(content):
+        if _has_favorite_tag(meta.get("tags", [])) and not _has_favorite_reason(str(update_kwargs["content"])):
             return JSONResponse({"error": _favorite_reason_error()}, status_code=400)
 
-    update_kwargs = {}
-    if content is not None:
-        update_kwargs["content"] = content
-    if name is not None:
-        update_kwargs["name"] = name or None
-    if event_date is not None:
-        update_kwargs["date"] = event_date
+    # --- preserve last_active (edit is maintenance, not activation) ---
+    # --- 编辑不刷新 last_active，避免人为维护影响浮现权重 ---
     update_kwargs["last_active"] = meta.get("last_active") or meta.get("created")
 
     before_bucket = bucket
@@ -11413,7 +11430,7 @@ async def api_bucket_update(request):
     bucket = await bucket_mgr.get(bucket_id)
     embedding_queued = (
         _queue_embedding_refresh_if_changed(bucket_id, before_bucket, bucket)
-        if (content is not None or name is not None)
+        if ("content" in update_kwargs or "name" in update_kwargs)
         else False
     )
     return JSONResponse({
@@ -11422,7 +11439,6 @@ async def api_bucket_update(request):
         "embedding_refreshed": False,
         "embedding_queued": embedding_queued,
         **_bucket_read_payload(bucket),
-
     })
 
 @mcp.custom_route("/api/archive/{bucket_id}", methods=["POST"])

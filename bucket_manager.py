@@ -563,8 +563,8 @@ class BucketManager:
             post["confidence"] = max(0.0, min(1.0, float(kwargs["confidence"])))
         if "period" in kwargs:
             post["period"] = str(kwargs["period"])
-        if "date" in kwargs:
-            post["date"] = str(kwargs["date"])
+        if "event_time" in kwargs:
+            post["event_time"] = kwargs["event_time"]
         if "comments" in kwargs:
             post["comments"] = kwargs["comments"] if isinstance(kwargs["comments"], list) else []
         if "comment_count" in kwargs:

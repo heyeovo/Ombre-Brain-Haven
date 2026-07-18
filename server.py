@@ -7096,7 +7096,7 @@ async def reminder_create(
     channel: str = "global",
     session_id: str = "",
 ) -> dict:
-    """创建独立照顾备忘；不写记忆桶，不触发 embedding。可设 start_at/end_at 和 daily_limit 控制每天出现次数；morning_evening 未指定时默认每天 2 次。"""
+    """创建独立照顾备忘；不写记忆桶，不触发 embedding。start_at/end_at 控制有效窗口，next_due_at 指定下次提醒时间，repeat_rule 可用 once/daily/morning_evening/every_n_rounds，daily_limit 控制每天最多次数。"""
     try:
         item = reminder_store.create(
             title=title,
@@ -7114,18 +7114,42 @@ async def reminder_create(
             source="mcp",
         )
     except ValueError as exc:
-        return {"error": str(exc)}
-    return {"status": "created", "reminder": _reminder_public_payload(item)}
+        return f"创建失败: {exc}"
+    return f"已创建照顾备忘 [{item['id']}] {title}"
 
 
 @mcp.tool()
-async def reminder_list(status: str = "active", limit: int = 20) -> dict:
-    """列出独立照顾备忘；status 可用 active/done/archived/all。"""
+async def reminder_list(status: str = "active", limit: int = 20) -> str:
+    """列出照顾备忘；status 可用 active（默认）/done/archived/all。返回总数 + 每条 id/title/content/start_at/end_at/next_due_at/status。"""
     try:
         items = reminder_store.list(status=status, limit=_int_between(limit, 20, 1, 100))
     except ValueError as exc:
-        return {"error": str(exc), "reminders": []}
-    return {"count": len(items), "reminders": [_reminder_public_payload(item) for item in items]}
+        return f"列出失败: {exc}"
+    if not items:
+        return f"没有 {status} 状态的照顾备忘。" if status != "all" else "没有任何照顾备忘。"
+    lines = [f"共 {len(items)} 条："]
+    for item in items:
+        sid = item.get("id", "?")
+        stitle = item.get("title", "?")
+        scontent = item.get("content", "")
+        sstatus = item.get("status", "?")
+        start = (item.get("start_at") or "")[:10]
+        end = (item.get("end_at") or "")[:10]
+        due = (item.get("next_due_at") or "")[:10]
+        meta_parts = []
+        if sstatus != "active":
+            meta_parts.append(sstatus)
+        if start:
+            meta_parts.append(f"{start}")
+        if end:
+            meta_parts.append(f"~{end}")
+        if due:
+            meta_parts.append(f"下次:{due}")
+        meta = " | ".join(meta_parts) if meta_parts else ""
+        lines.append(f"[{sid}] {stitle}" + (f" ({meta})" if meta else ""))
+        if scontent:
+            lines.append(f"  {scontent[:200]}")
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -7138,11 +7162,11 @@ async def reminder_update(
     content: str = "",
     daily_limit: int = -1,
     max_injections: int = -1,
-) -> dict:
-    """更新独立照顾备忘；完成用 status="done"，稍后用 snooze_minutes。"""
+) -> str:
+    """更新照顾备忘；完成用 status="done"/"archived"，稍后用 snooze_minutes，改标题/正文/下次时间传对应参数。"""
     reminder_id = _coerce_memory_id(reminder_id)
     if not reminder_id:
-        return {"error": "missing reminder_id"}
+        return "reminder_id 无效"
     try:
         if snooze_minutes:
             item = reminder_store.snooze(reminder_id, minutes=_int_between(snooze_minutes, 60, 1, 525600))
@@ -7157,10 +7181,12 @@ async def reminder_update(
                 max_injections=max_injections if max_injections >= 0 else None,
             )
     except ValueError as exc:
-        return {"error": str(exc)}
+        return f"更新失败: {exc}"
     if not item:
-        return {"error": "not found", "id": reminder_id}
-    return {"status": "updated", "reminder": _reminder_public_payload(item)}
+        return f"未找到照顾备忘: {reminder_id}"
+    new_status = item.get("status", "?")
+    new_title = item.get("title", reminder_id)
+    return f"已更新照顾备忘 [{reminder_id}] {new_title} → {new_status}"
 
 
 # =============================================================
@@ -8317,15 +8343,51 @@ async def resurface(max_results: int = 1, include_archive: bool = True, max_toke
 # 工具 1.5：read_bucket — 按 ID 精确读桶
 # =============================================================
 @mcp.tool()
-async def read_bucket(bucket_id: str) -> dict:
-    """按 bucket_id 精确读取完整记忆桶；trace/comment 前先读。只读，不刷新活跃度。"""
+async def read_bucket(bucket_id: str) -> str:
+    """按 bucket_id 精确读取完整记忆桶；包含正文和所有年轮。只读，不刷新活跃度。"""
     bucket_id = _coerce_memory_id(bucket_id)
     if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
-        return {"error": "invalid bucket_id"}
+        return "bucket_id 无效"
     bucket = await bucket_mgr.get(bucket_id)
     if not bucket:
-        return {"error": "not found", "id": bucket_id}
-    return _bucket_read_payload(bucket)
+        return f"未找到记忆桶: {bucket_id}"
+    meta = bucket.get("metadata", {})
+    title = meta.get("name") or bucket_id
+    imp = meta.get("importance", "?")
+    created = meta.get("date") or meta.get("event_time") or meta.get("created", "?")
+    if created != "?" and len(str(created)) >= 10:
+        created = str(created)[:10]
+
+    header = f"[{title}][{bucket_id}]"
+    if meta.get("pinned") or meta.get("protected"):
+        header += " [钉选]"
+    if meta.get("resolved"):
+        header += " [已解决]"
+    if meta.get("digested"):
+        header += " [已消化]"
+    header += f" [重要性:{imp}]"
+    if created != "?":
+        header += f" [日期:{created}]"
+
+    lines = [header, "", strip_wikilinks(bucket.get("content", ""))]
+
+    comments = meta.get("comments") or []
+    if isinstance(comments, list) and comments:
+        lines.append("")
+        for idx, c in enumerate(comments):
+            if not isinstance(c, dict):
+                continue
+            cid = c.get("id", f"#{idx + 1}")
+            c_created = str(c.get("created", "") or "")
+            if len(c_created) >= 10:
+                c_created = c_created[:10]
+            c_author = c.get("author", "?")
+            lines.append(f"[年轮#{idx + 1}][{cid}]" +
+                         (f" [日期:{c_created}]" if c_created else "") +
+                         (f" [作者:{c_author}]" if c_author != "?" else ""))
+            lines.append(str(c.get("content", "") or ""))
+
+    return "\n".join(lines)
 
 
 # =============================================================
@@ -8367,15 +8429,15 @@ async def comment_bucket(
     kind: str = "comment",
     valence: float = -1,
     arousal: float = -1,
-) -> dict:
+) -> str:
     """给已有 bucket 追加年轮/补充感受；会 touch，不改正文。kind=feel 时 content 只写第一人称感受，不写分段标题。"""
     bucket_id = _coerce_memory_id(bucket_id)
     if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
-        return {"error": "invalid bucket_id"}
+        return "bucket_id 无效"
     if not content or not content.strip():
-        return {"error": "empty content"}
+        return "内容为空，无法写入年轮"
     if not await bucket_mgr.get(bucket_id):
-        return {"error": "not found", "id": bucket_id}
+        return f"未找到记忆桶: {bucket_id}"
 
     entry = await bucket_mgr.add_comment(
         bucket_id,
@@ -8388,17 +8450,9 @@ async def comment_bucket(
         touch=True,
     )
     if not entry:
-        return {"error": "write failed", "id": bucket_id}
-    bucket = await bucket_mgr.get(bucket_id)
-    embedding_queued = _queue_embedding_refresh(bucket_id)
-    return {
-        "status": "commented",
-        "id": bucket_id,
-        "comment": entry,
-        "embedding_refreshed": False,
-        "embedding_queued": embedding_queued,
-        "metadata": _bucket_read_payload(bucket)["metadata"] if bucket else {},
-    }
+        return f"年轮写入失败: {bucket_id}"
+    _queue_embedding_refresh(bucket_id)
+    return f"年轮→{bucket_id}#{entry['id']}"
 
 
 # =============================================================
@@ -8406,16 +8460,16 @@ async def comment_bucket(
 # 工具 1.7：delete_bucket_comment — 删除一条自己写的年轮
 # =============================================================
 @mcp.tool()
-async def delete_bucket_comment(bucket_id: str, comment_id: str) -> dict:
+async def delete_bucket_comment(bucket_id: str, comment_id: str) -> str:
     """删除自己通过 comment_bucket 写入的一条年轮；不会删除 bucket，也不会删除小雨/dashboard 写的年轮。"""
     bucket_id = _coerce_memory_id(bucket_id)
     comment_id = _coerce_memory_id(comment_id)
     if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
-        return {"error": "invalid bucket_id"}
+        return "bucket_id 无效"
     if not comment_id or not MEMORY_ID_RE.fullmatch(comment_id):
-        return {"error": "invalid comment_id"}
+        return "comment_id 无效"
     if not await bucket_mgr.get(bucket_id):
-        return {"error": "not found", "id": bucket_id}
+        return f"未找到记忆桶: {bucket_id}"
 
     result = await bucket_mgr.delete_comment(
         bucket_id,
@@ -8424,27 +8478,13 @@ async def delete_bucket_comment(bucket_id: str, comment_id: str) -> dict:
         allowed_source="comment_bucket",
     )
     if result.get("status") == "not_found":
-        return {"error": "comment not found", "id": bucket_id, "comment_id": comment_id}
+        return f"未找到年轮 {bucket_id}#{comment_id}"
     if result.get("status") == "forbidden":
-        return {
-            "error": "forbidden",
-            "reason": "only AI-authored comment_bucket year rings can be deleted",
-            "id": bucket_id,
-            "comment_id": comment_id,
-        }
+        return f"无法删除年轮 {bucket_id}#{comment_id}：只能删除自己写的年轮"
     if result.get("status") != "deleted":
-        return {"error": "delete failed", "id": bucket_id, "comment_id": comment_id}
-
-    embedding_queued = _queue_embedding_refresh(bucket_id)
-    bucket = await bucket_mgr.get(bucket_id)
-    return {
-        "status": "deleted",
-        "id": bucket_id,
-        "comment_id": comment_id,
-        "embedding_refreshed": False,
-        "embedding_queued": embedding_queued,
-        "metadata": _bucket_read_payload(bucket)["metadata"] if bucket else {},
-    }
+        return f"年轮删除失败: {bucket_id}#{comment_id}"
+    _queue_embedding_refresh(bucket_id)
+    return f"已删除年轮 {bucket_id}#{comment_id}"
 
 
 @mcp.custom_route("/api/bucket/{bucket_id}/comments", methods=["POST"])
@@ -8805,10 +8845,10 @@ async def darkroom_enter(
     visibility: str = "active",
     lock_for: str = "",
     new_room: bool = True,
-) -> dict:
+) -> str:
     """写入一段未显影的私密反思；默认第一人称，不用第三人称自述；默认新开房间，new_room=false 才续写当前 active 房间；写错要撤回已有房间时传 new_room=false + visibility="retracted"；不回显 note 正文。"""
     try:
-        return darkroom_store.enter(
+        result = darkroom_store.enter(
             note,
             mood=mood,
             tags=tags,
@@ -8819,25 +8859,62 @@ async def darkroom_enter(
             new_room=new_room,
         )
     except ValueError as exc:
-        return {"status": "error", "error": str(exc)}
+        return f"暗房写入失败: {exc}"
+    rid = result.get("room_id", "?")
+    eid = result.get("entry_id", "?")
+    rev = result.get("revision", "?")
+    locked = result.get("locked_until", "")
+    lock_note = f" [锁至{locked[:16]}]" if locked else ""
+    return f"暗房 → [{rid}] #{rev} ({eid}){lock_note}"
 
 
 @mcp.tool()
-async def darkroom_rooms(limit: int = 20, visibility: str = "active") -> dict:
+async def darkroom_rooms(limit: int = 20, visibility: str = "active") -> str:
     """只读列出暗房门牌，不返回正文；默认列 active 房间，可传 visibility="all" 看全部门牌，用 room_id 再调用 darkroom_view。"""
     try:
-        return darkroom_store.rooms(limit=limit, visibility=visibility)
+        result = darkroom_store.rooms(limit=limit, visibility=visibility)
     except ValueError as exc:
-        return {"status": "error", "error": str(exc)}
+        return f"列出失败: {exc}"
+    rooms = result.get("rooms", [])
+    if not rooms:
+        return "暗房没有符合条件的房间。"
+    lines = [f"暗房 {result.get('visibility', visibility)} 房间，共 {len(rooms)} 间："]
+    for r in rooms:
+        rid = r.get("room_id", "?")
+        rc = r.get("revision_count", r.get("revision", "?"))
+        lw = (r.get("latest_written_at") or "")[:16]
+        extra = ""
+        if r.get("locked"):
+            extra = f" 🔒解锁:{r.get('unlock_at', '?')[:16]}"
+        lines.append(f"[{rid}] 修订{rc}次 最后:{lw}{extra}")
+    return "\n".join(lines)
 
 
 @mcp.tool()
-async def darkroom_view(entry_id: str = "latest") -> dict:
+async def darkroom_view(entry_id: str = "latest") -> str:
     """只读查看一条已解锁的暗房内容；未到锁门时间不返回正文。"""
     try:
-        return darkroom_store.view(entry_id=entry_id)
+        result = darkroom_store.view(entry_id=entry_id)
     except KeyError:
-        return {"status": "error", "error": "entry not found"}
+        return "暗房条目不存在。"
+    if result.get("status") == "locked":
+        return f"🔒 已锁，解锁时间: {result.get('unlock_at', '?')[:16]}"
+    if result.get("status") != "visible":
+        return f"暗房内容不可见: {result.get('status', '?')}"
+    eid = result.get("entry_id", "?")
+    rid = result.get("room_id", "?")
+    content = result.get("content", "")
+    lines = [f"[{rid}] ({eid})", "", content]
+    entries = result.get("entries") or []
+    if len(entries) > 1:
+        lines.append("")
+        lines.append("--- 修订历史 ---")
+        for item in entries:
+            ieid = item.get("entry_id", "?")
+            iat = (item.get("written_at") or item.get("created_at") or "")[:16]
+            itags = ", ".join(item.get("tags") or []) if item.get("tags") else ""
+            lines.append(f"[{ieid}] {iat}" + (f" [{itags}]" if itags else ""))
+    return "\n".join(lines)
 
 
 async def darkroom_status() -> dict:
@@ -8845,12 +8922,21 @@ async def darkroom_status() -> dict:
     return darkroom_store.status()
 
 
-async def darkroom_release(entry_id: str = "latest", reason: str = "") -> dict:
-    """把一条暗房内容显影并带出来。这个工具会公开返回正文,只在明确想让内容可见时调用。"""
+@mcp.tool()
+async def darkroom_release(entry_id: str = "latest", reason: str = "") -> str:
+    """把一条暗房内容显影并带出来。会公开返回正文，只在明确想让内容可见时调用。"""
     try:
-        return darkroom_store.release(entry_id=entry_id, reason=reason)
+        result = darkroom_store.release(entry_id=entry_id, reason=reason)
     except KeyError:
-        return {"status": "error", "error": "entry not found"}
+        return "暗房条目不存在。"
+    if result.get("status") == "locked":
+        return f"🔒 已锁，解锁时间: {result.get('unlock_at', '?')[:16]}"
+    if result.get("status") != "released":
+        return f"暗房显影失败: {result.get('status', '?')}"
+    rid = result.get("room_id", "?")
+    eid = result.get("entry_id", "?")
+    content = result.get("content", "")
+    return f"暗房显影 [{rid}] ({eid})\n\n{content}"
 
 
 # =============================================================

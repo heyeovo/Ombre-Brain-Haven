@@ -14993,7 +14993,8 @@ if __name__ == "__main__":
                 return await _gw_service.handle_injection_debug(request)
             _app.routes.extend([
                 _GwRoute("/gateway/health", _gw_health, methods=["GET"]),
-                _GwRoute("/gateway/api/config", _gw_config, methods=["GET", "POST"]),
+                _GwRoute("/gateway/api/config", _gw_config, methods=["GET"]),
+                _GwRoute("/gateway/api/config", _gw_config, methods=["POST"]),
                 _GwRoute("/gateway/v1/chat/completions", _gw_chat, methods=["POST"]),
                 _GwRoute("/gateway/v1/messages", _gw_anthropic, methods=["POST"]),
                 _GwRoute("/gateway/v1/models", _gw_models, methods=["GET"]),

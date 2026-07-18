@@ -2365,6 +2365,7 @@ def _bucket_read_payload(bucket: dict) -> dict:
         "digested",
         "anchor",
         "source",
+        "wish",
         "confidence",
         "period",
         "date",

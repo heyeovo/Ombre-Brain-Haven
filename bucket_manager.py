@@ -2118,6 +2118,33 @@ class BucketManager:
                 f"Failed to archive bucket / 归档桶失败: {bucket_id}: {e}"
             )
             return False
+        return True
+
+    async def unarchive(self, bucket_id: str) -> bool:
+        """Move a bucket back from archive to dynamic directory (preserving domain subdirs)."""
+        file_path = self._find_bucket_file(bucket_id)
+        if not file_path or self.archive_dir not in str(file_path):
+            return False
+        try:
+            post = frontmatter.load(file_path)
+            domain = post.get("domain", ["未分类"])
+            if not isinstance(domain, list):
+                domain = [domain]
+            primary_domain = sanitize_name(domain[0]) if domain else "未分类"
+            dynamic_subdir = os.path.join(self.dynamic_dir, primary_domain)
+            os.makedirs(dynamic_subdir, exist_ok=True)
+            dest = safe_path(dynamic_subdir, os.path.basename(file_path))
+            post["type"] = "dynamic"
+            # Restore feel type if tags indicate it was a feel bucket
+            if isinstance(post.get("tags"), list) and "feel" in post["tags"]:
+                post["type"] = "feel"
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(frontmatter.dumps(post))
+            shutil.move(file_path, str(dest))
+        except Exception as e:
+            logger.error(f"Failed to unarchive bucket / 取消归档失败: {bucket_id}: {e}")
+            return False
+        return True
 
         logger.info(f"Archived bucket / 归档记忆桶: {bucket_id} → archive/{primary_domain}/")
         return True

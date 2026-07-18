@@ -14969,6 +14969,18 @@ if __name__ == "__main__":
                 "ChatGPT OAuth enabled for Ombre MCP / 已启用 ChatGPT OAuth: protected_hosts=%s",
                 sorted(OMBRE_CHATGPT_OAUTH_PROTECTED_HOSTS),
             )
+
+        # --- Mount Gateway routes on same port / 挂载 Gateway 路由 ---
+        from gateway import create_gateway_app, GatewayService
+        from starlette.routing import Mount
+        _gw_service = GatewayService(config)
+        _gw_app = create_gateway_app(config=config, service=_gw_service)
+        _app.routes.append(Mount("/gateway", app=_gw_app))
+        async def _start_gateway():
+            await _gw_service.warm_recall_runtime()
+        _app.add_event_handler("startup", _start_gateway)
+        logger.info("Gateway mounted on /gateway / Gateway 已挂载到 /gateway")
+
         uvicorn.run(_app, host="0.0.0.0", port=OMBRE_PORT)
 
     else:

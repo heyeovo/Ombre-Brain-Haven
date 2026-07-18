@@ -4111,6 +4111,7 @@ async def _merge_or_create(
     unlock_hint: str = "",
     event_time: str = "",
     allow_merge: bool = True,
+    source: str = "",
 ) -> tuple[str, bool]:
     try:
         existing = await bucket_mgr.search(
@@ -4183,7 +4184,8 @@ async def _merge_or_create(
         author=author,
         locked=locked,
         unlock_hint=unlock_hint,
-        event_time=event_time
+        event_time=event_time,
+        source=source,
     )
     _queue_embedding_refresh(bucket_id)
     return bucket_id, name or bucket_id, False, related_bucket
@@ -8799,7 +8801,8 @@ async def hold(
             author=author,
             locked=locked,
             unlock_hint=unlock_hint,
-            event_time=event_time or event_date or ""
+            event_time=event_time or event_date or "",
+            source="AI",
         )
         _queue_embedding_refresh(bucket_id)
         _queue_memory_enrichment(bucket_id)
@@ -8822,7 +8825,8 @@ async def hold(
             author=author,
             locked=locked,
             unlock_hint=unlock_hint,
-            event_time=event_time or event_date or ""
+            event_time=event_time or event_date or "",
+            source="AI",
     )
     _queue_memory_enrichment(bucket_id)
 
@@ -9092,6 +9096,7 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
             arousal=analysis.get("arousal", 0.3),
             name=title.strip() or analysis.get("suggested_name", ""),
             allow_merge=False,
+            source="AI",
             memory_subject=fast_classification["memory_subject"],
             memory_layer=fast_classification["memory_layer"],
             memory_classification_source=fast_classification["memory_classification_source"],
@@ -9144,6 +9149,7 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
                 arousal=item.get("arousal", 0.3),
                 name=item.get("name", ""),
                 allow_merge=False,
+                source="AI",
                 memory_subject=item_classification["memory_subject"],
                 memory_layer=item_classification["memory_layer"],
                 memory_classification_source=item_classification["memory_classification_source"],
@@ -11516,6 +11522,7 @@ async def api_create_bucket(request):
         arousal=float(body.get("arousal", 0.3)),
         name=name,
         pinned=bool(body.get("pinned", False)),
+        source="小羊",
     )
     return JSONResponse({"ok": True, "id": bucket_id})
 

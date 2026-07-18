@@ -3392,7 +3392,7 @@ class ReflectionEngine:
                     valence=self._clamp(candidate.get("valence", 0.55)),
                     arousal=self._clamp(candidate.get("arousal", 0.3)),
                     name=str(candidate.get("title") or f"{key} 自动记忆")[:40],
-                    source="daily_chat_memory",
+                    source="自动记忆",
                     created=created_at,
                     last_active=created_at,
                     updated_at=created_at,

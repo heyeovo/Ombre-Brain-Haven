@@ -14971,15 +14971,31 @@ if __name__ == "__main__":
             )
 
         # --- Mount Gateway routes on same port / 挂载 Gateway 路由 ---
-        from gateway import create_gateway_app, GatewayService
-        from starlette.routing import Mount
+        from gateway import GatewayService
+        from starlette.routing import Route
         _gw_service = GatewayService(config)
-        _gw_app = create_gateway_app(config=config, service=_gw_service)
-        _app.routes.append(Mount("/gateway", app=_gw_app))
+        async def _gw_health(request):
+            from starlette.responses import JSONResponse
+            return await _gw_service.handle_health(request)
+        async def _gw_chat(request):
+            return await _gw_service.handle_chat(request)
+        async def _gw_anthropic(request):
+            return await _gw_service.handle_anthropic_messages(request)
+        async def _gw_models(request):
+            return await _gw_service.handle_models(request)
+        async def _gw_injection_debug(request):
+            return await _gw_service.handle_injection_debug(request)
+        _app.routes.extend([
+            Route("/gateway/health", _gw_health, methods=["GET"]),
+            Route("/gateway/v1/chat/completions", _gw_chat, methods=["POST"]),
+            Route("/gateway/v1/messages", _gw_anthropic, methods=["POST"]),
+            Route("/gateway/v1/models", _gw_models, methods=["GET"]),
+            Route("/gateway/api/debug/injections", _gw_injection_debug, methods=["GET"]),
+        ])
         async def _start_gateway():
             await _gw_service.warm_recall_runtime()
         _app.add_event_handler("startup", _start_gateway)
-        logger.info("Gateway mounted on /gateway / Gateway 已挂载到 /gateway")
+        logger.info("Gateway routes mounted: /gateway/v1/chat/completions, /gateway/v1/messages, /gateway/v1/models")
 
         uvicorn.run(_app, host="0.0.0.0", port=OMBRE_PORT)
 

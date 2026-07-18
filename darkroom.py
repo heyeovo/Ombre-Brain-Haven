@@ -11,7 +11,7 @@ from identity import identity_names
 
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
-LOCK_FOR_RE = re.compile(r"^\s*(\d+)\s*(h|hr|hour|hours|小时|d|day|days|天)\s*$", re.IGNORECASE)
+LOCK_FOR_RE = re.compile(r"^\s*(\d+)\s*(m|min|minute|minutes|分钟|h|hr|hour|hours|小时|d|day|days|天)\s*$", re.IGNORECASE)
 
 
 def _now() -> datetime:
@@ -33,6 +33,8 @@ def _parse_lock_for(value: str | None) -> timedelta | None:
     if amount <= 0:
         return None
     unit = match.group(2).lower()
+    if unit in {"m", "min", "minute", "minutes", "分钟"}:
+        return timedelta(minutes=amount)
     if unit in {"h", "hr", "hour", "hours", "小时"}:
         return timedelta(hours=amount)
     return timedelta(days=amount)

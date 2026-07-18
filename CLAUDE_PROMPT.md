@@ -17,9 +17,10 @@
 | `read_bucket` | 按 bucket_id 精确读取完整记忆；准备追细节、写年轮、修改或删除前先读 |
 | `comment_bucket` | 给已有记忆追加年轮/评论；读到旧记忆后的新感受或补充，用它挂回源 bucket。`kind="feel"` 时 content 只写第一人称感受，不写分段标题 |
 | `hold` | 写单条长期记忆；`date` 可传事件日期；显式 `domain` 会覆盖自动领域；显式 `valence/arousal` 会覆盖自动情绪；`whisper=True` 写无源碎碎念；`journal=True` 写独立日记（`author` 区分作者，`locked=True` + `unlock_hint` 上锁）；`wish=True` 长期悬念标签（15% 概率随机浮现）；`todo`/`todo_done` 附着待办。旧记忆的新感受优先用 `comment_bucket`；`feel=True` / `whisper=True` 的 content 只写第一人称感受 |
-| `darkroom_enter` | 写入未想透、不该给用户看、不该进普通记忆的内在反思；note 默认用第一人称，不用第三人称称呼自己，除非引用外部事实或当前用户原话；默认更新当前 active 房间草稿，`new_room=true` 才新开；可带 `lock_for="6h"` / `"3d"`；只返回门口状态，不回显正文 |
-| `darkroom_continue_context` | 继续暗房反思前读取当前 active 房间草稿，用来续写和判断 completeness；不要把返回正文转述给用户 |
-| `darkroom_view` | 给用户只读查看完整且已解锁的暗房内容；必须 active、completeness>=1、锁门到期才返回正文；按 room_id 可返回该房间全部 revisions |
+| `darkroom_enter` | 写入未想透、不该给用户看、不该进普通记忆的内在反思；note 默认用第一人称，不用第三人称称呼自己，除非引用外部事实或当前用户原话；默认新开房间，`new_room=false` 才续写当前 active 房间；可带 `lock_for="5m"` / `"6h"` / `"3d"`（分钟/小时/天）；只返回门口状态（房间号、版本号、锁时间），不回显正文 |
+| `darkroom_rooms` | 只读列出暗房门牌，不返回正文；返回每个房间的 room_id、修订次数、最后写入时间、锁状态 |
+| `darkroom_view` | 只读查看一条已解锁的暗房内容，含正文和修订历史；锁门未到期不返回正文只返回解锁时间 |
+| `darkroom_release` | 显影并公开一条暗房内容；会直接返回正文让用户看到，只在明确想让内容可见时调用 |
 | `grow` | 当**一天结束时**或**用户发来一大段日记/总结**时调用。只把筛过的多个长期记忆点交给它；单条事实/承诺/偏好优先用 `hold`。保留原文称呼、互称、自称和原话，不要把昵称改成泛称，也不要把临时称呼推成稳定画像事实 |
 | `profile_fact` | 手动固化稳定画像事实；必须先有 evidence bucket/moment |
 | `trace` | 当你或用户认为"这个记错了"、"帮我改一下"时调用，手动修正记忆的元数据；可用 `date` 修改事件日期；`related="id1,id2"` 手动关联桶；**某件事解决了**时用 `resolved=1` 让它沉底；**需要删除**时用 `delete=True` |

@@ -10107,14 +10107,22 @@ async def api_create_memory(request):
 
 @mcp.custom_route("/api/buckets", methods=["GET"])
 async def api_buckets(request):
-    """List all buckets with metadata. ?full=1 returns full content."""
+    """List all buckets with metadata. ?full=1 returns full content.
+    Optional ?limit=N&offset=M for pagination — returns {buckets, count, limit, offset}.
+    Without limit/offset, returns flat array (backward compatible).
+    """
     from starlette.responses import JSONResponse
     err = _require_dashboard_auth(request)
     if err:
         return err
 
     try:
-        full = request.query_params.get("full", "").lower() in ("1", "true")
+        params = request.query_params
+        full = params.get("full", "").lower() in ("1", "true")
+        paginate = "limit" in params
+        limit = max(1, min(int(params.get("limit") or 500), 2000)) if paginate else None
+        offset = max(0, int(params.get("offset") or 0)) if paginate else 0
+
         all_buckets = await bucket_mgr.list_all(include_archive=True)
         result = []
         for b in all_buckets:
@@ -10165,6 +10173,14 @@ async def api_buckets(request):
                 "event_time": meta.get("event_time", meta.get("created", "")),
             })
         result.sort(key=_bucket_dashboard_sort_key, reverse=True)
+
+        if paginate:
+            return JSONResponse({
+                "buckets": result[offset : offset + limit],
+                "count": len(result),
+                "limit": limit,
+                "offset": offset,
+            })
         return JSONResponse(result)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)

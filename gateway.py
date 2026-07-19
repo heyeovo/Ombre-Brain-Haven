@@ -1888,12 +1888,68 @@ class GatewayService:
             logger.exception("Gateway health check failed: %s", exc)
             return JSONResponse({"status": "error", "detail": str(exc)}, status_code=500)
 
+    async def handle_preview_handoff(self, request: Request) -> JSONResponse:
+        """Return handoff preview data for the Polaris new-window panel."""
+        from starlette.responses import JSONResponse
+        session_id = (
+            request.query_params.get("session_id")
+            or request.headers.get("X-Ombre-Session-Id")
+            or self.default_session_id
+        ).strip()
+        try:
+            all_buckets = await self._list_gateway_buckets(include_archive=False)
+            pinned = []
+            recent = []
+            pinned_ids: set[str] = set()
+
+            for bucket in all_buckets:
+                if self._is_self_anchor_recall_excluded_bucket(bucket):
+                    continue
+                meta = bucket.get("metadata", {})
+                bid = str(bucket.get("id") or "")
+                if not bid:
+                    continue
+                name = str(meta.get("name") or bid).strip()
+                text = str(bucket.get("content") or "").strip()
+                snippet = text[:400]
+
+                if meta.get("pinned") or meta.get("protected"):
+                    if bid not in pinned_ids:
+                        pinned_ids.add(bid)
+                        pinned.append({
+                            "id": bid,
+                            "name": name,
+                            "snippet": snippet,
+                            "charCount": len(text),
+                            "created": str(meta.get("created") or ""),
+                        })
+                else:
+                    recent.append({
+                        "id": bid,
+                        "name": name,
+                        "snippet": snippet,
+                        "charCount": len(text),
+                        "created": str(meta.get("created") or ""),
+                    })
+
+            recent.sort(key=lambda b: b["created"], reverse=True)
+            recent_light = recent[:10]
+
+            return JSONResponse({
+                "pinned": pinned,
+                "recent": recent_light,
+                "totalBucketCount": len(all_buckets),
+            })
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     async def handle_chat(self, request: Request) -> Response:
         auth_result = self._authorize(request.headers.get("Authorization", ""))
         if auth_result is not None:
             return auth_result
 
         session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
+        skip_handoff = self._truthy_header(request.headers.get("X-Ombre-Skip-Handoff"))
         client_label = self._client_label_from_request(request, "/v1/chat/completions")
 
         try:
@@ -1934,6 +1990,7 @@ class GatewayService:
                     if str(request.headers.get("X-Ombre-Debug-Detail") or "").strip().lower() == "full"
                     else "compact"
                 ),
+                skip_handoff=skip_handoff,
             )
         except ValueError as exc:
             return JSONResponse(
@@ -2037,6 +2094,7 @@ class GatewayService:
             return auth_result
 
         session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
+        skip_handoff = self._truthy_header(request.headers.get("X-Ombre-Skip-Handoff"))
         client_label = self._client_label_from_request(request, "/v1/messages")
 
         try:
@@ -2075,6 +2133,7 @@ class GatewayService:
                     if str(request.headers.get("X-Ombre-Debug-Detail") or "").strip().lower() == "full"
                     else "compact"
                 ),
+                skip_handoff=skip_handoff,
             )
         except ValueError as exc:
             return self._anthropic_error(str(exc), status_code=400)
@@ -2564,6 +2623,7 @@ class GatewayService:
         include_favorite_memory: bool = False,
         include_debug: bool = False,
         debug_detail: str = "full",
+        skip_handoff: bool = False,
     ) -> tuple[dict, list[str] | None] | tuple[dict, list[str] | None, dict[str, Any]]:
         prepare_started_at = time.perf_counter()
         prepare_steps_ms: dict[str, int] = {}
@@ -2592,30 +2652,19 @@ class GatewayService:
         is_new_user_turn = bool(current_user_query)
         has_handoff_context = self._messages_contain_handoff_context(messages)
         is_session_start = self.state_store.get_last_success_at(session_id) is None
-        just_now_context_requested = (
-            self.just_now_context_enabled
-            and self._query_requests_just_now_context(current_user_query)
-        )
         is_handoff_trigger_query = self._query_is_handoff_trigger(current_user_query)
-        handoff_just_now_requested = (
-            just_now_context_requested
-            and self._query_has_handoff_transition_marker(current_user_query)
-        )
         is_session_start_handoff_query = (
             is_session_start
             and not has_handoff_context
-            and not handoff_just_now_requested
             and self._query_prefers_session_start_handoff(current_user_query)
         )
         if is_handoff_trigger_query:
             handoff_skip_reason = "handoff_trigger"
-        elif handoff_just_now_requested:
-            handoff_skip_reason = "handoff_trigger_with_just_now"
         elif is_session_start_handoff_query:
             handoff_skip_reason = "session_start_handoff"
         else:
             handoff_skip_reason = ""
-        needs_handoff_first = bool(handoff_skip_reason)
+        needs_handoff_first = bool(handoff_skip_reason) and not skip_handoff
         date_recall_requested = (
             self.date_recall_enabled
             and self._query_requests_date_recall(current_user_query)
@@ -2652,6 +2701,7 @@ class GatewayService:
         targeted_memory_detail_debug: dict[str, Any] = self._targeted_memory_detail_debug_base()
         memory_detail_recall_instruction = ""
         handoff_tool_hint = ""
+        handoff_block = ""
         dream_context = ""
         dream_context_status: dict[str, Any] = {"status": "skipped", "reason": "not_current_user_turn"}
         active_reminders = ""
@@ -2679,7 +2729,6 @@ class GatewayService:
                 session_id,
                 all_buckets,
                 needs_handoff_first=needs_handoff_first,
-                just_now_context_requested=just_now_context_requested,
                 date_recall_requested=date_recall_requested,
                 targeted_detail_skip=skip_for_targeted_detail,
             )
@@ -2690,7 +2739,6 @@ class GatewayService:
             pre_domain_skip_broad = (
                 skip_for_targeted_detail
                 or needs_handoff_first
-                or just_now_context_requested
                 or date_recall_requested
                 or sentinel_skip_broad
                 or (low_signal_auto_recall and not sentinel_search)
@@ -2715,32 +2763,10 @@ class GatewayService:
             )
             if needs_handoff_first:
                 query_planner_debug["skip_reason"] = handoff_skip_reason
-                if is_session_start_handoff_query and not is_handoff_trigger_query:
-                    handoff_tool_hint = (
-                        "First turn of a new session with a date-continuity question: call the memory tool "
-                        "as breath(is_session_start=True) or breath(mode=\"handoff\") before answering. "
-                        "Use this to restore identity and life context first; if concrete details are still "
-                        "needed afterwards, then call breath(query=...) for the date/event."
-                    )
-                else:
-                    handoff_tool_hint = (
-                        "New-window signal: call the memory tool as breath(is_session_start=True) "
-                        "or breath(mode=\"handoff\") before replying. Do not call breath(query=\"新窗口\") "
-                        "for this literal signal, and do not write/hold it unless the user explicitly asks."
-                    )
-                if handoff_just_now_requested:
-                    stage_started_at = time.perf_counter()
-                    just_now_context, just_now_context_debug = self._build_just_now_chat_context(
-                        current_user_query,
-                    )
-                    mark_step("just_now_context", stage_started_at)
-            elif just_now_context_requested:
-                query_planner_debug["skip_reason"] = "just_now_context"
+                handoff_tool_hint = ""
                 stage_started_at = time.perf_counter()
-                just_now_context, just_now_context_debug = self._build_just_now_chat_context(
-                    current_user_query,
-                )
-                mark_step("just_now_context", stage_started_at)
+                handoff_block = await self._build_handoff_block(all_buckets, session_id)
+                mark_step("handoff_block", stage_started_at)
             elif date_recall_requested:
                 query_planner_debug["skip_reason"] = "date_recall"
                 stage_started_at = time.perf_counter()
@@ -2782,18 +2808,16 @@ class GatewayService:
                 channel="gateway",
             )
             mark_step("active_reminders", stage_started_at)
-            if not needs_handoff_first and not just_now_context_requested and not date_recall_requested and self._should_inject_interval(
+            if not needs_handoff_first and not date_recall_requested and self._should_inject_interval(
                 session_id,
                 self.core_memory_interval_rounds,
             ):
                 stage_started_at = time.perf_counter()
                 core_memory = await self._build_core_memory_block(all_buckets)
                 mark_step("core_memory", stage_started_at)
-            if needs_handoff_first or just_now_context_requested or date_recall_requested:
+            if needs_handoff_first or date_recall_requested:
                 portrait_memory_debug["skip_reason"] = (
-                    "just_now_context"
-                    if just_now_context_requested and not needs_handoff_first
-                    else "date_recall"
+                    "date_recall"
                     if date_recall_requested and not needs_handoff_first
                     else handoff_skip_reason
                 )
@@ -2892,12 +2916,8 @@ class GatewayService:
             )
             mark_step("format_recalled_memory", stage_started_at)
             date_persona_trace_requested = self._query_requests_date_persona_trace(current_user_query)
-            if needs_handoff_first or just_now_context_requested:
-                date_persona_trace_debug["skip_reason"] = (
-                    "just_now_context"
-                    if just_now_context_requested and not needs_handoff_first
-                    else handoff_skip_reason
-                )
+            if needs_handoff_first:
+                date_persona_trace_debug["skip_reason"] = handoff_skip_reason
             elif not date_persona_trace_requested:
                 date_persona_trace_debug["skip_reason"] = (
                     "no_date_hint"
@@ -2994,28 +3014,6 @@ class GatewayService:
                     "memory detail is already present, use that detail directly and do not request "
                     "memory_detail again. Do not mention this line in the final answer."
                 )
-            reliable_dynamic_context = bool(recalled_memory.strip() or related_memory.strip())
-            memory_sentinel_blocks_context = str(memory_sentinel_debug.get("route") or "") in {"tone_only", "skip"}
-            if not memory_sentinel_blocks_context and not just_now_context_requested and not date_recall_requested and self._should_inject_recent_context(
-                session_id,
-                current_user_query,
-                has_reliable_dynamic_context=reliable_dynamic_context,
-                has_handoff_context=has_handoff_context or needs_handoff_first,
-            ):
-                explicit_recent_query = self._query_requests_recent_context(current_user_query)
-                stage_started_at = time.perf_counter()
-                recent_context = await self._build_recent_context_block(
-                    all_buckets,
-                    current_user_query,
-                    allow_vague=explicit_recent_query,
-                )
-                mark_step("recent_context", stage_started_at)
-                if recent_context.strip():
-                    recent_context_reason = self._recent_context_reason(
-                        session_id,
-                        current_user_query,
-                        has_reliable_dynamic_context=reliable_dynamic_context,
-                    )
             stage_started_at = time.perf_counter()
             if has_handoff_context or needs_handoff_first:
                 dream_context = ""
@@ -3084,6 +3082,7 @@ class GatewayService:
             active_reminders=active_reminders,
             memory_detail_recall_instruction=memory_detail_recall_instruction,
             handoff_tool_hint=handoff_tool_hint,
+            handoff_block=handoff_block,
             context_mode=context_mode,
         )
         mark_step("build_context_messages", stage_started_at)
@@ -3129,8 +3128,7 @@ class GatewayService:
             "bucket_count": len(all_buckets),
             "is_new_user_turn": is_new_user_turn,
             "needs_handoff_first": needs_handoff_first,
-            "just_now_context_requested": just_now_context_requested,
-            "date_recall_requested": date_recall_requested,
+"date_recall_requested": date_recall_requested,
             "date_persona_trace_requested": date_persona_trace_requested,
             "low_signal_auto_recall": low_signal_auto_recall,
             "skip_broad_dynamic_recall": skip_broad_dynamic_recall,
@@ -7240,6 +7238,73 @@ class GatewayService:
             reverse=True,
         )
         return await self._summarize_buckets(core_buckets, self.core_budget)
+
+    async def _build_handoff_block(
+        self,
+        all_buckets: list[dict],
+        session_id: str,
+    ) -> str:
+        """\
+        Build one-shot handoff context for a new session start.
+        Contains: pinned bucket snippets + recent high-signal bucket intros.
+        Injected into stable context so it enters the cache prefix.
+        """
+        pinned_ids = set()
+        pinned_entries: list[str] = []
+
+        for bucket in all_buckets:
+            if self._is_self_anchor_recall_excluded_bucket(bucket):
+                continue
+            meta = bucket.get("metadata", {})
+            if meta.get("pinned") or meta.get("protected"):
+                bid = str(bucket.get("id") or "")
+                if bid and bid not in pinned_ids:
+                    pinned_ids.add(bid)
+                    name = str(meta.get("name") or bucket.get("id") or "").strip()
+                    text = str(bucket.get("content") or "").strip()
+                    snippet = text[:600] if text else ""
+                    pinned_entries.append(
+                        f"- {name}"
+                        + (f"\n  {snippet}" if snippet else "")
+                    )
+
+        recent_candidates = []
+        for bucket in all_buckets:
+            if self._is_self_anchor_recall_excluded_bucket(bucket):
+                continue
+            meta = bucket.get("metadata", {})
+            bid = str(bucket.get("id") or "")
+            if not bid or bid in pinned_ids:
+                continue
+            created = meta.get("created") or ""
+            recent_candidates.append((created, bucket))
+
+        recent_candidates.sort(key=lambda x: x[0], reverse=True)
+        intro_entries: list[str] = []
+        for _created, bucket in recent_candidates[:10]:
+            meta = bucket.get("metadata", {})
+            name = str(meta.get("name") or bucket.get("id") or "").strip()
+            text = str(bucket.get("content") or "").strip()
+            snippet = text[:400] if text else ""
+            intro_entries.append(
+                f"- {name}"
+                + (f"\n  {snippet}" if snippet else "")
+            )
+
+        if not pinned_entries and not intro_entries:
+            return ""
+
+        lines: list[str] = [
+            "This is a new session. The following is carried over from previous windows.",
+        ]
+        if pinned_entries:
+            lines.append("Pinned Memory (always carried):")
+            lines.extend(pinned_entries)
+        if intro_entries:
+            lines.append("Recent Memory (last 10 by time):")
+            lines.extend(intro_entries)
+
+        return "\n".join(lines)
 
     def _build_portrait_memory_block(self, all_buckets: list[dict]) -> tuple[str, dict[str, Any]]:
         debug = self._portrait_memory_debug_base()
@@ -17374,6 +17439,7 @@ class GatewayService:
         active_reminders: str = "",
         memory_detail_recall_instruction: str = "",
         handoff_tool_hint: str = "",
+        handoff_block: str = "",
         context_mode: str = "",
         date_persona_trace: str = "",
         date_recall: str = "",
@@ -17414,7 +17480,7 @@ class GatewayService:
             ]
         )
         stable_sections = []
-        if core_memory.strip() or portrait_memory.strip():
+        if handoff_block.strip() or core_memory.strip() or portrait_memory.strip():
             stable_sections = [
                 "Use the following private memory only when it fits naturally. "
                 "Keep the reply seamless and do not mention memory lookup, search, or hidden context.",
@@ -17424,6 +17490,7 @@ class GatewayService:
                 if content.strip():
                     stable_sections.extend(["", title, content])
 
+            add_stable_section("Session Handoff", handoff_block)
             add_stable_section("Core Memory", core_memory)
             add_stable_section("Portrait Memory", portrait_memory)
 

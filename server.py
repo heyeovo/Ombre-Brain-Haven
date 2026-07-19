@@ -15095,6 +15095,8 @@ if __name__ == "__main__":
                 return await _gw_service.handle_config(request)
             async def _gw_injection_debug(request):
                 return await _gw_service.handle_injection_debug(request)
+            async def _gw_preview_handoff(request):
+                return await _gw_service.handle_preview_handoff(request)
             _app.routes.extend([
                 _GwRoute("/gateway/health", _gw_health, methods=["GET"]),
                 _GwRoute("/gateway/api/config", _gw_config, methods=["GET"]),
@@ -15103,6 +15105,7 @@ if __name__ == "__main__":
                 _GwRoute("/gateway/v1/messages", _gw_anthropic, methods=["POST"]),
                 _GwRoute("/gateway/v1/models", _gw_models, methods=["GET"]),
                 _GwRoute("/gateway/api/debug/injections", _gw_injection_debug, methods=["GET"]),
+                _GwRoute("/gateway/api/preview-handoff", _gw_preview_handoff, methods=["GET"]),
             ])
             # warm_recall_runtime will happen lazily on first gateway request
             _gw_ok = True

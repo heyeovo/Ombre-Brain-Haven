@@ -1242,11 +1242,15 @@ class GatewayService:
                 sanitized["models"] = models
 
             existing = existing_by_name.get(name, {})
-            for secret_key in ("api_key", "api_keys"):
-                if secret_key in raw:
-                    sanitized[secret_key] = raw[secret_key]
-                elif isinstance(existing, dict) and secret_key in existing:
-                    sanitized[secret_key] = existing[secret_key]
+            # dashboard.html sends api_key_values when persistEnv is checked
+            if "api_key_values" in raw and isinstance(raw["api_key_values"], list):
+                sanitized["api_keys"] = raw["api_key_values"]
+            else:
+                for secret_key in ("api_key", "api_keys"):
+                    if secret_key in raw:
+                        sanitized[secret_key] = raw[secret_key]
+                    elif isinstance(existing, dict) and secret_key in existing:
+                        sanitized[secret_key] = existing[secret_key]
             upstreams.append(sanitized)
         return upstreams
 

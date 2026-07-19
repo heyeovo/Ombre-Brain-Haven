@@ -8126,7 +8126,7 @@ function collectGatewayUpstreams(includeKeyValues) {
       }
     });
     if (upstream.api_key_values.length && !includeKeyValues) {
-      throw new Error('填写了真实 key 时，请使用“应用并保存密钥到 .env”');
+      includeKeyValues = true;
     }
     if (upstream.api_key_values.length > upstream.api_key_envs.length) {
       throw new Error('上游 ' + upstream.name + ' 的 key 数量多于 env 名数量');

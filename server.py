@@ -12782,6 +12782,28 @@ async def api_update_config(request):
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+@mcp.custom_route("/api/gateway-injections", methods=["GET"])
+async def api_gateway_injections(request):
+    """Return recent Gateway injection debug records (dashboard.html 注入监测)."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    gws = _resolve_gateway_config_service()
+    if not gws or not gws.state_store:
+        return JSONResponse({"items": []})
+    try:
+        limit = int(request.query_params.get("limit", "10"))
+    except ValueError:
+        limit = 10
+    include_context = request.query_params.get("include_context", "1").strip().lower() not in {"0", "false", "no"}
+    return JSONResponse({
+        "items": gws.state_store.list_injection_debug(
+            limit=limit,
+            include_context=include_context,
+        )
+    })
+
 def _resolve_gateway_config_service():
     try:
         return _gw_service

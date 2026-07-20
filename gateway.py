@@ -2304,12 +2304,18 @@ class GatewayService:
             "false",
             "no",
         }
+        include_payload = str(request.query_params.get("include_payload", "1")).strip().lower() not in {
+            "0",
+            "false",
+            "no",
+        }
         return JSONResponse(
             {
                 "items": self.state_store.list_injection_debug(
                     session_id=session_id,
                     limit=limit,
                     include_context=include_context,
+                    include_payload=include_payload,
                 )
             }
         )

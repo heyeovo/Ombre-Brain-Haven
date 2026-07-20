@@ -499,6 +499,7 @@ class GatewayStateStore:
         session_id: str = "",
         limit: int = 20,
         include_context: bool = True,
+        include_payload: bool = True,
     ) -> list[dict[str, Any]]:
         limit = max(1, min(100, int(limit)))
         conn = self._connect()
@@ -527,6 +528,16 @@ class GatewayStateStore:
 
         items: list[dict[str, Any]] = []
         for row in rows:
+            if not include_payload:
+                items.append(
+                    {
+                        "id": row["id"],
+                        "session_id": row["session_id"],
+                        "round_id": row["round_id"],
+                        "created_at": row["created_at"],
+                    }
+                )
+                continue
             try:
                 payload = json.loads(row["payload_json"])
             except json.JSONDecodeError:

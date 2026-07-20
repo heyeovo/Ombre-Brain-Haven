@@ -19282,14 +19282,11 @@ class GatewayService:
             else:
                 new_messages.insert(0, stable_message)
         if dynamic_context.strip():
+            dynamic_message = {"role": "system", "content": dynamic_context}
             current_user_index = self._current_turn_user_index(new_messages)
             if current_user_index is not None:
-                new_messages[current_user_index] = self._prepend_dynamic_context_to_user_message(
-                    new_messages[current_user_index],
-                    dynamic_context,
-                )
+                new_messages.insert(current_user_index, dynamic_message)
             else:
-                dynamic_message = {"role": "system", "content": dynamic_context}
                 insert_at = self._after_leading_system_index(new_messages)
                 new_messages.insert(insert_at, dynamic_message)
         return new_messages

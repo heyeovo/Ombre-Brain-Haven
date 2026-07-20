@@ -2792,8 +2792,8 @@ class GatewayService:
                 if handoff_block.strip():
                     self._session_handoff_blocks[session_id] = handoff_block
                 mark_step("handoff_block", stage_started_at)
-            elif has_handoff_context:
-                handoff_block = self._session_handoff_blocks.get(session_id, "")
+            elif session_id in self._session_handoff_blocks:
+                handoff_block = self._session_handoff_blocks[session_id]
             elif date_recall_requested:
                 query_planner_debug["skip_reason"] = "date_recall"
                 stage_started_at = time.perf_counter()

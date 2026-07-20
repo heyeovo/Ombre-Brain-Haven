@@ -263,6 +263,7 @@ mcp = FastMCP(
     "Ombre Brain",
     host="0.0.0.0",
     port=OMBRE_PORT,
+    stateless_http=True,
 )
 
 

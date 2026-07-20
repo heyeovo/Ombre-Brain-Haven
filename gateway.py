@@ -1950,6 +1950,13 @@ class GatewayService:
 
         session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
         skip_handoff = self._truthy_header(request.headers.get("X-Ombre-Skip-Handoff"))
+        force_handoff = self._truthy_header(request.headers.get("X-Ombre-Force-Handoff"))
+        handoff_bucket_ids_raw = (request.headers.get("X-Ombre-Handoff-Buckets") or "").strip()
+        handoff_bucket_ids = (
+            [bid.strip() for bid in handoff_bucket_ids_raw.split(",") if bid.strip()]
+            if handoff_bucket_ids_raw
+            else None
+        )
         client_label = self._client_label_from_request(request, "/v1/chat/completions")
 
         try:
@@ -1991,6 +1998,8 @@ class GatewayService:
                     else "compact"
                 ),
                 skip_handoff=skip_handoff,
+                force_handoff=force_handoff,
+                handoff_bucket_ids=handoff_bucket_ids,
             )
         except ValueError as exc:
             return JSONResponse(
@@ -2095,6 +2104,13 @@ class GatewayService:
 
         session_id = (request.headers.get("X-Ombre-Session-Id") or self.default_session_id).strip()
         skip_handoff = self._truthy_header(request.headers.get("X-Ombre-Skip-Handoff"))
+        force_handoff = self._truthy_header(request.headers.get("X-Ombre-Force-Handoff"))
+        handoff_bucket_ids_raw = (request.headers.get("X-Ombre-Handoff-Buckets") or "").strip()
+        handoff_bucket_ids = (
+            [bid.strip() for bid in handoff_bucket_ids_raw.split(",") if bid.strip()]
+            if handoff_bucket_ids_raw
+            else None
+        )
         client_label = self._client_label_from_request(request, "/v1/messages")
 
         try:
@@ -2134,6 +2150,8 @@ class GatewayService:
                     else "compact"
                 ),
                 skip_handoff=skip_handoff,
+                force_handoff=force_handoff,
+                handoff_bucket_ids=handoff_bucket_ids,
             )
         except ValueError as exc:
             return self._anthropic_error(str(exc), status_code=400)
@@ -2624,6 +2642,8 @@ class GatewayService:
         include_debug: bool = False,
         debug_detail: str = "full",
         skip_handoff: bool = False,
+        force_handoff: bool = False,
+        handoff_bucket_ids: list[str] | None = None,
     ) -> tuple[dict, list[str] | None] | tuple[dict, list[str] | None, dict[str, Any]]:
         prepare_started_at = time.perf_counter()
         prepare_steps_ms: dict[str, int] = {}
@@ -2658,7 +2678,9 @@ class GatewayService:
             and not has_handoff_context
             and self._query_prefers_session_start_handoff(current_user_query)
         )
-        if is_handoff_trigger_query:
+        if force_handoff:
+            handoff_skip_reason = "handoff_trigger"
+        elif is_handoff_trigger_query:
             handoff_skip_reason = "handoff_trigger"
         elif is_session_start_handoff_query:
             handoff_skip_reason = "session_start_handoff"
@@ -2765,7 +2787,7 @@ class GatewayService:
                 query_planner_debug["skip_reason"] = handoff_skip_reason
                 handoff_tool_hint = ""
                 stage_started_at = time.perf_counter()
-                handoff_block = await self._build_handoff_block(all_buckets, session_id)
+                handoff_block = await self._build_handoff_block(all_buckets, session_id, bucket_ids=handoff_bucket_ids)
                 mark_step("handoff_block", stage_started_at)
             elif date_recall_requested:
                 query_planner_debug["skip_reason"] = "date_recall"
@@ -7243,12 +7265,17 @@ class GatewayService:
         self,
         all_buckets: list[dict],
         session_id: str,
+        bucket_ids: list[str] | None = None,
     ) -> str:
         """\
         Build one-shot handoff context for a new session start.
         Contains: pinned bucket snippets + recent high-signal bucket intros.
         Injected into stable context so it enters the cache prefix.
+
+        If bucket_ids is provided, only those buckets are included (still
+        grouped as pinned vs recent).
         """
+        bucket_id_set = set(bucket_ids) if bucket_ids is not None else None
         pinned_ids = set()
         pinned_entries: list[str] = []
 
@@ -7258,6 +7285,8 @@ class GatewayService:
             meta = bucket.get("metadata", {})
             if meta.get("pinned") or meta.get("protected"):
                 bid = str(bucket.get("id") or "")
+                if bucket_id_set is not None and bid not in bucket_id_set:
+                    continue
                 if bid and bid not in pinned_ids:
                     pinned_ids.add(bid)
                     name = str(meta.get("name") or bucket.get("id") or "").strip()
@@ -7274,6 +7303,8 @@ class GatewayService:
                 continue
             meta = bucket.get("metadata", {})
             bid = str(bucket.get("id") or "")
+            if bucket_id_set is not None and bid not in bucket_id_set:
+                continue
             if not bid or bid in pinned_ids:
                 continue
             created = meta.get("created") or ""

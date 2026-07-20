@@ -508,6 +508,7 @@ class GatewayService:
         self.state_store = state_store or GatewayStateStore(
             os.path.join(config["buckets_dir"], "gateway_state.db")
         )
+        self._session_handoff_blocks: dict[str, str] = {}
         self.raw_event_store = raw_event_store or RawEventStore(config)
         self.reminder_store = ReminderStore(config)
         self.persona_engine = persona_engine or PersonaStateEngine(config)
@@ -2788,7 +2789,11 @@ class GatewayService:
                 handoff_tool_hint = ""
                 stage_started_at = time.perf_counter()
                 handoff_block = await self._build_handoff_block(all_buckets, session_id, bucket_ids=handoff_bucket_ids)
+                if handoff_block.strip():
+                    self._session_handoff_blocks[session_id] = handoff_block
                 mark_step("handoff_block", stage_started_at)
+            elif has_handoff_context:
+                handoff_block = self._session_handoff_blocks.get(session_id, "")
             elif date_recall_requested:
                 query_planner_debug["skip_reason"] = "date_recall"
                 stage_started_at = time.perf_counter()
@@ -5611,9 +5616,12 @@ class GatewayService:
             tail_tokens += estimates[index + 1]
             prefix_tokens -= estimates[index + 1]
             message = messages[index]
-            if not isinstance(message, dict) or message.get("role") != "assistant":
+            if not isinstance(message, dict):
                 continue
-            if prefix_tokens >= min_tokens and tail_tokens >= tail_target:
+            role = message.get("role")
+            if role == "assistant" and prefix_tokens >= min_tokens and tail_tokens >= tail_target:
+                return index
+            if role == "user" and index >= 1 and prefix_tokens >= min_tokens and tail_tokens >= tail_target:
                 return index
         return None
 

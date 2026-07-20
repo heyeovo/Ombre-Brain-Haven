@@ -3242,6 +3242,7 @@ class GatewayService:
             prepare_timing_debug["total_ms"] = max(0, int((time.perf_counter() - prepare_started_at) * 1000))
             prepare_timing_debug["steps_ms"] = dict(prepare_steps_ms)
             debug_payload["prepare_timing_debug"] = prepare_timing_debug
+            debug_payload["final_messages"] = forward_payload.get("messages", [])
             log_prepare_timing()
             return forward_payload, injected_ids, debug_payload
         log_prepare_timing()

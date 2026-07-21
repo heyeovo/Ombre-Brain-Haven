@@ -20736,6 +20736,13 @@ a { color: #58a6ff; text-decoration: none; }
 .bucket-injected { background: #0c2d26; color: #7ee787; }
 .bucket-suppressed { background: #2e1c14; color: #f85149; }
 .empty { color: #484f58; font-style: italic; padding: 24px; text-align: center; }
+.round-card { cursor: pointer; }
+.round-detail-expanded { display: none; margin-top: 10px; padding-top: 10px; border-top: 1px solid #21262d; }
+.round-card.open .round-detail-expanded { display: block; }
+.detail-section { margin-bottom: 8px; }
+.detail-section .title { font-size: 11px; color: #8b949e; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+.detail-section .body { font-size: 12px; color: #c9d1d9; white-space: pre-wrap; max-height: 300px; overflow-y: auto; background: #0d1117; padding: 8px; border-radius: 4px; }
+.final-msg { font-size: 12px; color: #c9d1d9; white-space: pre-wrap; max-height: 200px; overflow-y: auto; background: #0d1117; padding: 8px; border-radius: 4px; margin-bottom: 4px; border-left: 2px solid #30363d; }
 </style>
 </head>
 <body>
@@ -20813,19 +20820,37 @@ async function loadRounds(sid, row) {
       const rws = p.recall_why_summary || {};
       for (const [bid, bw] of Object.entries(rws.by_bucket_id || {})) {
         const cls = bw.final_status === 'injected' ? 'bucket-injected' : 'bucket-suppressed';
-        bucketsHtml += '<span class="bucket-tag ' + cls + '">' + (bw.bucket_name || bid) + '</span> ';
+        const name = bw.bucket_name || bid;
+        const reasons = (bw.admission_reasons || []).join(', ');
+        bucketsHtml += '<span class="bucket-tag ' + cls + '" title="' + reasons + '">' + name + '</span> ';
       }
-      html += '<div class="round-card">' +
+      let finalMsgsHtml = '';
+      const fm = p.final_messages;
+      if (Array.isArray(fm)) {
+        for (let i = 0; i < fm.length; i++) {
+          const m = fm[i];
+          let content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+          if (content.length > 300) content = content.slice(0, 300) + '...';
+          finalMsgsHtml += '<div class="final-msg"><b>[' + i + ']</b> <b>' + m.role + '</b>: ' + content.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>';
+        }
+      }
+      html += '<div class="round-card" onclick="this.classList.toggle(\'open\')">' +
         '<div class="head">' +
           '<span class="meta">Round ' + item.round_id + ' | ' + item.created_at + '</span>' +
           '<span class="tag ' + tagCls + '">' + total + 'ms</span>' +
           (reason ? '<span class="tag tag-reason">' + reason + '</span>' : '') +
+          '<span style="font-size:10px;color:#484f58;margin-left:4px">&#9660;</span>' +
         '</div>' +
         '<div class="query">' + (p.query_preview || '').slice(0, 200) + '</div>' +
         '<div class="meta">steps: ' + (stepHtml || '(none)') + '</div>' +
         (bucketsHtml ? '<div class="meta">buckets: ' + bucketsHtml + '</div>' : '') +
-        ((p.recalled_memory || '') ? '<div class="recalled">' + p.recalled_memory.slice(0, 600) + '</div>' : '') +
-        ((p.stable_context || '') ? '<div class="stable">' + p.stable_context.slice(0, 500) + '</div>' : '') +
+        '<div class="round-detail-expanded">' +
+          ((p.recalled_memory || '') ? '<div class="detail-section"><div class="title">Recalled Memory</div><div class="body">' + p.recalled_memory.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div></div>' : '') +
+          ((p.stable_context || '') ? '<div class="detail-section"><div class="title">Stable Context</div><div class="body">' + p.stable_context.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div></div>' : '') +
+          ((p.dynamic_context || '') ? '<div class="detail-section"><div class="title">Dynamic Context</div><div class="body">' + p.dynamic_context.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div></div>' : '') +
+          (finalMsgsHtml ? '<div class="detail-section"><div class="title">Final Messages (' + fm.length + ')</div>' + finalMsgsHtml + '</div>' : '') +
+          '<div class="detail-section"><div class="title">Debug</div><div class="meta">injected_buckets=' + JSON.stringify(p.injected_bucket_ids) + ' | recalled=' + (p.recalled_moment_count || 0) + ' | suppressed=' + (p.suppressed_bucket_count || 0) + ' | diffused=' + (p.diffused_item_count || 0) + ' | handoff_first=' + (pt.needs_handoff_first || false) + '</div></div>' +
+        '</div>' +
       '</div>';
     }
     el.innerHTML = html || '<div class="empty">No rounds</div>';

@@ -3215,6 +3215,9 @@ class GatewayService:
             "targeted_detail_chars": len(targeted_memory_detail),
             "stable_context_chars": len(stable_context),
             "dynamic_context_chars": len(dynamic_context),
+            "handoff_recent_rounds_received": handoff_recent_rounds is not None and bool(handoff_recent_rounds.strip()) if handoff_recent_rounds else False,
+            "handoff_recent_rounds_chars": len(handoff_recent_rounds) if handoff_recent_rounds else 0,
+            "handoff_block_chars": len(handoff_block),
             "query_planner_triggered": bool(query_planner_debug.get("triggered")),
             "query_planner_skip_reason": str(query_planner_debug.get("skip_reason") or ""),
             "operit_context_rewrite": operit_context_rewrite_debug,
@@ -7376,11 +7379,16 @@ class GatewayService:
             )
 
         if not pinned_entries and not intro_entries:
-            return ""
-
-        lines: list[str] = [
-            "This is a new session. The following is carried over from previous windows.",
-        ]
+            # Still carry over recent conversation rounds if provided.
+            if not (recent_rounds_text and recent_rounds_text.strip()):
+                return ""
+            lines: list[str] = [
+                "This is a new session. The following is carried over from previous windows.",
+            ]
+        else:
+            lines: list[str] = [
+                "This is a new session. The following is carried over from previous windows.",
+            ]
         if pinned_entries:
             lines.append("Pinned Memory (always carried):")
             lines.extend(pinned_entries)

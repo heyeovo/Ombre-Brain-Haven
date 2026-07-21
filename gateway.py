@@ -1,3 +1,4 @@
+import base64
 import logging
 import hashlib
 import os
@@ -1965,6 +1966,9 @@ class GatewayService:
             if handoff_bucket_ids_raw
             else None
         )
+        handoff_recent_rounds = self._decode_base64_header(
+            request.headers.get("X-Ombre-Handoff-Recent-Rounds")
+        )
         client_label = self._client_label_from_request(request, "/v1/chat/completions")
 
         try:
@@ -2008,6 +2012,7 @@ class GatewayService:
                 skip_handoff=skip_handoff,
                 force_handoff=force_handoff,
                 handoff_bucket_ids=handoff_bucket_ids,
+                handoff_recent_rounds=handoff_recent_rounds,
             )
         except ValueError as exc:
             return JSONResponse(
@@ -2119,6 +2124,9 @@ class GatewayService:
             if handoff_bucket_ids_raw
             else None
         )
+        handoff_recent_rounds = self._decode_base64_header(
+            request.headers.get("X-Ombre-Handoff-Recent-Rounds")
+        )
         client_label = self._client_label_from_request(request, "/v1/messages")
 
         try:
@@ -2160,6 +2168,7 @@ class GatewayService:
                 skip_handoff=skip_handoff,
                 force_handoff=force_handoff,
                 handoff_bucket_ids=handoff_bucket_ids,
+                handoff_recent_rounds=handoff_recent_rounds,
             )
         except ValueError as exc:
             return self._anthropic_error(str(exc), status_code=400)
@@ -2662,6 +2671,7 @@ class GatewayService:
         skip_handoff: bool = False,
         force_handoff: bool = False,
         handoff_bucket_ids: list[str] | None = None,
+        handoff_recent_rounds: str | None = None,
     ) -> tuple[dict, list[str] | None] | tuple[dict, list[str] | None, dict[str, Any]]:
         prepare_started_at = time.perf_counter()
         prepare_steps_ms: dict[str, int] = {}
@@ -2805,7 +2815,7 @@ class GatewayService:
                 query_planner_debug["skip_reason"] = handoff_skip_reason
                 handoff_tool_hint = ""
                 stage_started_at = time.perf_counter()
-                handoff_block = await self._build_handoff_block(all_buckets, session_id, bucket_ids=handoff_bucket_ids)
+                handoff_block = await self._build_handoff_block(all_buckets, session_id, bucket_ids=handoff_bucket_ids, recent_rounds_text=handoff_recent_rounds)
                 if handoff_block.strip():
                     self._session_handoff_blocks[session_id] = handoff_block
                     self.state_store.save_handoff_block(session_id, handoff_block)
@@ -7231,6 +7241,16 @@ class GatewayService:
     def _truthy_header(self, value: str | None) -> bool:
         return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
+    @staticmethod
+    def _decode_base64_header(value: str | None) -> str | None:
+        """Decode a base64-encoded header value (used for non-ASCII text)."""
+        if not value or not value.strip():
+            return None
+        try:
+            return base64.b64decode(value.strip()).decode("utf-8")
+        except Exception:
+            return None
+
     def _strip_favorite_memory_marker_from_payload(self, payload: dict) -> tuple[dict, bool]:
         cleaned = deepcopy(payload)
         messages = cleaned.get("messages")
@@ -7296,10 +7316,12 @@ class GatewayService:
         all_buckets: list[dict],
         session_id: str,
         bucket_ids: list[str] | None = None,
+        recent_rounds_text: str | None = None,
     ) -> str:
         """\
         Build one-shot handoff context for a new session start.
-        Contains: pinned bucket snippets + recent high-signal bucket intros.
+        Contains: pinned bucket snippets + recent high-signal bucket intros
+        + optional recent conversation rounds from the client.
         Injected into stable context so it enters the cache prefix.
 
         If bucket_ids is provided, only those buckets are included (still
@@ -7364,6 +7386,11 @@ class GatewayService:
         if intro_entries:
             lines.append("Recent Memory (last 10 by time):")
             lines.extend(intro_entries)
+
+        if recent_rounds_text and recent_rounds_text.strip():
+            lines.append("")
+            lines.append("Recent Conversation (carried from previous window):")
+            lines.append(recent_rounds_text.strip())
 
         return "\n".join(lines)
 

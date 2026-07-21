@@ -1986,6 +1986,9 @@ class GatewayService:
         raw_recent_rounds = payload.pop("x_ombre_handoff_recent_rounds", None)
         if isinstance(raw_recent_rounds, str) and raw_recent_rounds.strip():
             handoff_recent_rounds = raw_recent_rounds.strip()
+            logger.info("Gateway chat | handoff_recent_rounds received: %d chars", len(handoff_recent_rounds))
+        else:
+            logger.info("Gateway chat | no x_ombre_handoff_recent_rounds in body (keys: %s)", list(payload.keys())[:10])
 
         logger.info(
             "Gateway incoming chat | session=%s model=%s stream=%s messages=%s",
@@ -2141,6 +2144,9 @@ class GatewayService:
         raw_recent_rounds = payload.pop("x_ombre_handoff_recent_rounds", None)
         if isinstance(raw_recent_rounds, str) and raw_recent_rounds.strip():
             handoff_recent_rounds = raw_recent_rounds.strip()
+            logger.info("Gateway anthropic | handoff_recent_rounds received: %d chars", len(handoff_recent_rounds))
+        else:
+            logger.info("Gateway anthropic | no x_ombre_handoff_recent_rounds in body (keys: %s)", list(payload.keys())[:10])
 
         try:
             openai_payload = self._anthropic_request_to_openai(payload)
@@ -7386,8 +7392,11 @@ class GatewayService:
             lines.append("")
             lines.append("Recent Conversation (carried from previous window):")
             lines.append(recent_rounds_text.strip())
+            logger.info("Gateway handoff_block | appended recent_rounds_text: %d chars", len(recent_rounds_text.strip()))
 
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        logger.info("Gateway handoff_block | total length: %d chars", len(result))
+        return result
 
     def _build_portrait_memory_block(self, all_buckets: list[dict]) -> tuple[str, dict[str, Any]]:
         debug = self._portrait_memory_debug_base()

@@ -554,7 +554,8 @@ class GatewayService:
             True,
         )
         self.domain_sentinel_enabled = self._bool_config_value(
-            self.gateway_cfg.get("domain_sentinel_enabled"),
+            os.environ.get("OMBRE_DOMAIN_SENTINEL_ENABLED") if "OMBRE_DOMAIN_SENTINEL_ENABLED" in os.environ
+            else self.gateway_cfg.get("domain_sentinel_enabled"),
             True,
         )
         self.domain_sentinel_model = self._resolve_domain_sentinel_model()
@@ -770,7 +771,8 @@ class GatewayService:
             ai_reaction_names=[self.identity.get("ai_name")],
         )
         self.query_planner_enabled = self._bool_config_value(
-            self.gateway_cfg.get("query_planner_enabled"),
+            os.environ.get("OMBRE_QUERY_PLANNER_ENABLED") if "OMBRE_QUERY_PLANNER_ENABLED" in os.environ
+            else self.gateway_cfg.get("query_planner_enabled"),
             False,
         )
         (

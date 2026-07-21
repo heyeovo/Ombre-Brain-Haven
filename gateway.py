@@ -1,4 +1,3 @@
-import base64
 import logging
 import hashlib
 import os
@@ -1966,9 +1965,6 @@ class GatewayService:
             if handoff_bucket_ids_raw
             else None
         )
-        handoff_recent_rounds = self._decode_base64_header(
-            request.headers.get("X-Ombre-Handoff-Recent-Rounds")
-        )
         client_label = self._client_label_from_request(request, "/v1/chat/completions")
 
         try:
@@ -1984,6 +1980,12 @@ class GatewayService:
                 {"error": {"message": "Request body must be a JSON object", "type": "invalid_request_error"}},
                 status_code=400,
             )
+
+        # Read recent-rounds text from JSON body (avoids HTTP header size limits).
+        handoff_recent_rounds: str | None = None
+        raw_recent_rounds = payload.pop("x_ombre_handoff_recent_rounds", None)
+        if isinstance(raw_recent_rounds, str) and raw_recent_rounds.strip():
+            handoff_recent_rounds = raw_recent_rounds.strip()
 
         logger.info(
             "Gateway incoming chat | session=%s model=%s stream=%s messages=%s",
@@ -2124,9 +2126,6 @@ class GatewayService:
             if handoff_bucket_ids_raw
             else None
         )
-        handoff_recent_rounds = self._decode_base64_header(
-            request.headers.get("X-Ombre-Handoff-Recent-Rounds")
-        )
         client_label = self._client_label_from_request(request, "/v1/messages")
 
         try:
@@ -2136,6 +2135,12 @@ class GatewayService:
 
         if not isinstance(payload, dict):
             return self._anthropic_error("Request body must be a JSON object", status_code=400)
+
+        # Read recent-rounds text from JSON body (avoids HTTP header size limits).
+        handoff_recent_rounds: str | None = None
+        raw_recent_rounds = payload.pop("x_ombre_handoff_recent_rounds", None)
+        if isinstance(raw_recent_rounds, str) and raw_recent_rounds.strip():
+            handoff_recent_rounds = raw_recent_rounds.strip()
 
         try:
             openai_payload = self._anthropic_request_to_openai(payload)
@@ -7240,16 +7245,6 @@ class GatewayService:
 
     def _truthy_header(self, value: str | None) -> bool:
         return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-    @staticmethod
-    def _decode_base64_header(value: str | None) -> str | None:
-        """Decode a base64-encoded header value (used for non-ASCII text)."""
-        if not value or not value.strip():
-            return None
-        try:
-            return base64.b64decode(value.strip()).decode("utf-8")
-        except Exception:
-            return None
 
     def _strip_favorite_memory_marker_from_payload(self, payload: dict) -> tuple[dict, bool]:
         cleaned = deepcopy(payload)

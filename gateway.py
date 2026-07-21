@@ -20760,6 +20760,7 @@ async function api(path) {
 }
 
 async function loadSessions() {
+  tk(); // persist any typed value first
   document.getElementById('token').value = sessionStorage.getItem('gw_debug_token') || '';
   const el = document.getElementById('sessions');
   el.innerHTML = '<div class="session-item"><span class="id">Loading...</span></div>';

@@ -2320,6 +2320,10 @@ class GatewayService:
             }
         )
 
+    async def handle_debug_dashboard(self, request: Request) -> Response:
+        from starlette.responses import HTMLResponse
+        return HTMLResponse(_DEBUG_DASHBOARD_HTML)
+
     async def handle_hook_recall(self, request: Request) -> JSONResponse:
         auth_result = self._authorize(request.headers.get("Authorization", ""))
         if auth_result is not None:
@@ -20684,3 +20688,147 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# ============================================================
+# Debug Dashboard HTML
+# ============================================================
+_DEBUG_DASHBOARD_HTML = r"""<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gateway Debug</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, -apple-system, sans-serif; background: #0d1117; color: #c9d1d9; padding: 16px; }
+h1 { font-size: 18px; margin-bottom: 12px; color: #f0f6fc; }
+a { color: #58a6ff; text-decoration: none; }
+.top-bar { display: flex; gap: 8px; margin-bottom: 16px; align-items: center; }
+.top-bar input { flex: 1; padding: 8px 12px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; font-size: 13px; max-width: 320px; }
+.top-bar button { padding: 8px 16px; background: #238636; border: none; border-radius: 6px; color: #fff; cursor: pointer; font-size: 13px; }
+.top-bar button:hover { background: #2ea043; }
+.layout { display: flex; gap: 16px; height: calc(100vh - 80px); }
+.session-list { width: 300px; overflow-y: auto; border: 1px solid #30363d; border-radius: 6px; background: #161b22; }
+.session-item { padding: 10px 12px; border-bottom: 1px solid #21262d; cursor: pointer; font-size: 12px; }
+.session-item:hover { background: #1c2128; }
+.session-item.active { background: #1f2937; border-left: 3px solid #58a6ff; }
+.session-item .id { color: #8b949e; font-family: monospace; font-size: 11px; }
+.session-item .time { color: #484f58; }
+.round-detail { flex: 1; overflow-y: auto; border: 1px solid #30363d; border-radius: 6px; background: #161b22; padding: 16px; }
+.round-card { margin-bottom: 12px; padding: 12px; border: 1px solid #21262d; border-radius: 8px; background: #0d1117; }
+.round-card .head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.round-card .query { color: #f0f6fc; font-size: 13px; margin-bottom: 6px; word-break: break-all; }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; margin: 2px; }
+.tag-slow { background: #da3633; color: #fff; }
+.tag-ok { background: #1f6feb; color: #fff; }
+.tag-fast { background: #238636; color: #fff; }
+.tag-reason { background: #6e3b2e; color: #ffa657; }
+.meta { font-size: 11px; color: #8b949e; margin-bottom: 4px; }
+.recalled { background: #161b22; border-left: 2px solid #d29922; padding: 8px; margin: 8px 0; font-size: 12px; color: #e6c56f; max-height: 120px; overflow-y: auto; white-space: pre-wrap; }
+.stable { background: #161b22; border-left: 2px solid #58a6ff; padding: 8px; margin: 8px 0; font-size: 12px; color: #79c0ff; max-height: 120px; overflow-y: auto; white-space: pre-wrap; }
+.bucket-tag { display: inline-block; padding: 2px 6px; border-radius: 4px; background: #1f2937; font-size: 11px; margin: 2px; color: #8b949e; }
+.bucket-injected { background: #0c2d26; color: #7ee787; }
+.bucket-suppressed { background: #2e1c14; color: #f85149; }
+.empty { color: #484f58; font-style: italic; padding: 24px; text-align: center; }
+</style>
+</head>
+<body>
+<h1>Gateway Injection Debug</h1>
+<div class="top-bar">
+  <input id="token" type="password" placeholder="Bearer token (HONOO)" />
+  <button onclick="loadSessions()">Refresh</button>
+</div>
+<div class="layout">
+  <div class="session-list" id="sessions"></div>
+  <div class="round-detail" id="rounds">
+    <div class="empty">Click a session to see rounds</div>
+  </div>
+</div>
+<script>
+const API = '/gateway/api/debug/injections';
+
+function tk() {
+  const v = document.getElementById('token').value.trim();
+  if (v) sessionStorage.setItem('gw_debug_token', v);
+  return v || sessionStorage.getItem('gw_debug_token') || '';
+}
+
+async function api(path) {
+  const r = await fetch(path, { headers: { Authorization: 'Bearer ' + tk() } });
+  if (!r.ok) throw new Error(r.status + ' ' + (await r.text()).slice(0, 200));
+  return r.json();
+}
+
+async function loadSessions() {
+  document.getElementById('token').value = sessionStorage.getItem('gw_debug_token') || '';
+  const el = document.getElementById('sessions');
+  el.innerHTML = '<div class="session-item"><span class="id">Loading...</span></div>';
+  try {
+    const d = await api(API + '?include_payload=0&limit=50');
+    const seen = {};
+    const grouped = [];
+    for (const item of d.items) {
+      if (!seen[item.session_id]) { seen[item.session_id] = true; grouped.push(item.session_id); }
+    }
+    el.innerHTML = grouped.map(sid =>
+      '<div class="session-item" onclick="loadRounds(\'' + sid + '\', this)">' +
+        '<div class="id">' + sid.slice(0, 30) + '...</div>' +
+        '<div class="time">click to load</div>' +
+      '</div>'
+    ).join('');
+    if (!grouped.length) el.innerHTML = '<div class="empty">No data</div>';
+  } catch(e) {
+    el.innerHTML = '<div class="empty" style="color:#f85149">' + e.message + '</div>';
+  }
+}
+
+async function loadRounds(sid, row) {
+  document.querySelectorAll('.session-item.active').forEach(e => e.classList.remove('active'));
+  if (row) row.classList.add('active');
+  const el = document.getElementById('rounds');
+  el.innerHTML = '<div class="empty">Loading...</div>';
+  try {
+    const d = await api(API + '?session_id=' + sid + '&include_payload=1&limit=40');
+    let html = '<h3 style="margin-bottom:12px;font-size:14px;color:#8b949e;font-family:monospace">' + sid + '</h3>';
+    for (const item of d.items) {
+      const p = item.payload || {};
+      const qp = p.query_planner_debug || {};
+      const pt = p.prepare_timing_debug || {};
+      const total = pt.total_ms || 0;
+      const steps = pt.steps_ms || {};
+      const tagCls = total > 2000 ? 'tag-slow' : total > 500 ? 'tag-ok' : 'tag-fast';
+      const reason = qp.trigger_reason || '';
+      let stepHtml = '';
+      for (const [k, v] of Object.entries(steps)) {
+        if (v > 0) stepHtml += '<span class="bucket-tag">' + k + ': ' + v + 'ms</span> ';
+      }
+      let bucketsHtml = '';
+      const rws = p.recall_why_summary || {};
+      for (const [bid, bw] of Object.entries(rws.by_bucket_id || {})) {
+        const cls = bw.final_status === 'injected' ? 'bucket-injected' : 'bucket-suppressed';
+        bucketsHtml += '<span class="bucket-tag ' + cls + '">' + (bw.bucket_name || bid) + '</span> ';
+      }
+      html += '<div class="round-card">' +
+        '<div class="head">' +
+          '<span class="meta">Round ' + item.round_id + ' | ' + item.created_at + '</span>' +
+          '<span class="tag ' + tagCls + '">' + total + 'ms</span>' +
+          (reason ? '<span class="tag tag-reason">' + reason + '</span>' : '') +
+        '</div>' +
+        '<div class="query">' + (p.query_preview || '').slice(0, 200) + '</div>' +
+        '<div class="meta">steps: ' + (stepHtml || '(none)') + '</div>' +
+        (bucketsHtml ? '<div class="meta">buckets: ' + bucketsHtml + '</div>' : '') +
+        ((p.recalled_memory || '') ? '<div class="recalled">' + p.recalled_memory.slice(0, 600) + '</div>' : '') +
+        ((p.stable_context || '') ? '<div class="stable">' + p.stable_context.slice(0, 500) + '</div>' : '') +
+      '</div>';
+    }
+    el.innerHTML = html || '<div class="empty">No rounds</div>';
+  } catch(e) {
+    el.innerHTML = '<div class="empty" style="color:#f85149">' + e.message + '</div>';
+  }
+}
+
+// Init
+loadSessions();
+</script>
+</body>
+</html>"""

@@ -558,6 +558,11 @@ class GatewayService:
             else self.gateway_cfg.get("domain_sentinel_enabled"),
             True,
         )
+        self.domain_sentinel_llm_enabled = self._bool_config_value(
+            os.environ.get("OMBRE_DOMAIN_SENTINEL_LLM_ENABLED") if "OMBRE_DOMAIN_SENTINEL_LLM_ENABLED" in os.environ
+            else self.gateway_cfg.get("domain_sentinel_llm_enabled"),
+            True,
+        )
         self.domain_sentinel_model = self._resolve_domain_sentinel_model()
         self.domain_sentinel_base_url = self._resolve_domain_sentinel_base_url()
         self.domain_sentinel_api_key = self._resolve_domain_sentinel_api_key()
@@ -12965,6 +12970,17 @@ class GatewayService:
                 recall_route="search",
                 reason="explicit_memory_need",
             )
+            return debug
+        if not self.domain_sentinel_llm_enabled:
+            domains = debug.get("domains", []) or []
+            is_general = not domains or domains == ["general"]
+            if is_general:
+                debug.update(
+                    should_recall=False,
+                    confidence=0.7,
+                    message_type="ordinary_chat",
+                    reason="rule_passthrough",
+                )
             return debug
         if self._domain_sentinel_should_skip_recall(debug, query):
             return debug

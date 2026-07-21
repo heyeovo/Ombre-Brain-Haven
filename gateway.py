@@ -1981,15 +1981,6 @@ class GatewayService:
                 status_code=400,
             )
 
-        # Read recent-rounds text from JSON body (avoids HTTP header size limits).
-        handoff_recent_rounds: str | None = None
-        raw_recent_rounds = payload.pop("x_ombre_handoff_recent_rounds", None)
-        if isinstance(raw_recent_rounds, str) and raw_recent_rounds.strip():
-            handoff_recent_rounds = raw_recent_rounds.strip()
-            logger.info("Gateway chat | handoff_recent_rounds received: %d chars", len(handoff_recent_rounds))
-        else:
-            logger.info("Gateway chat | no x_ombre_handoff_recent_rounds in body (keys: %s)", list(payload.keys())[:10])
-
         logger.info(
             "Gateway incoming chat | session=%s model=%s stream=%s messages=%s",
             session_id,
@@ -2017,7 +2008,6 @@ class GatewayService:
                 skip_handoff=skip_handoff,
                 force_handoff=force_handoff,
                 handoff_bucket_ids=handoff_bucket_ids,
-                handoff_recent_rounds=handoff_recent_rounds,
             )
         except ValueError as exc:
             return JSONResponse(
@@ -2139,15 +2129,6 @@ class GatewayService:
         if not isinstance(payload, dict):
             return self._anthropic_error("Request body must be a JSON object", status_code=400)
 
-        # Read recent-rounds text from JSON body (avoids HTTP header size limits).
-        handoff_recent_rounds: str | None = None
-        raw_recent_rounds = payload.pop("x_ombre_handoff_recent_rounds", None)
-        if isinstance(raw_recent_rounds, str) and raw_recent_rounds.strip():
-            handoff_recent_rounds = raw_recent_rounds.strip()
-            logger.info("Gateway anthropic | handoff_recent_rounds received: %d chars", len(handoff_recent_rounds))
-        else:
-            logger.info("Gateway anthropic | no x_ombre_handoff_recent_rounds in body (keys: %s)", list(payload.keys())[:10])
-
         try:
             openai_payload = self._anthropic_request_to_openai(payload)
         except ValueError as exc:
@@ -2179,7 +2160,6 @@ class GatewayService:
                 skip_handoff=skip_handoff,
                 force_handoff=force_handoff,
                 handoff_bucket_ids=handoff_bucket_ids,
-                handoff_recent_rounds=handoff_recent_rounds,
             )
         except ValueError as exc:
             return self._anthropic_error(str(exc), status_code=400)
@@ -2682,7 +2662,6 @@ class GatewayService:
         skip_handoff: bool = False,
         force_handoff: bool = False,
         handoff_bucket_ids: list[str] | None = None,
-        handoff_recent_rounds: str | None = None,
     ) -> tuple[dict, list[str] | None] | tuple[dict, list[str] | None, dict[str, Any]]:
         prepare_started_at = time.perf_counter()
         prepare_steps_ms: dict[str, int] = {}
@@ -2826,7 +2805,7 @@ class GatewayService:
                 query_planner_debug["skip_reason"] = handoff_skip_reason
                 handoff_tool_hint = ""
                 stage_started_at = time.perf_counter()
-                handoff_block = await self._build_handoff_block(all_buckets, session_id, bucket_ids=handoff_bucket_ids, recent_rounds_text=handoff_recent_rounds)
+                handoff_block = await self._build_handoff_block(all_buckets, session_id, bucket_ids=handoff_bucket_ids)
                 if handoff_block.strip():
                     self._session_handoff_blocks[session_id] = handoff_block
                     self.state_store.save_handoff_block(session_id, handoff_block)
@@ -3215,9 +3194,6 @@ class GatewayService:
             "targeted_detail_chars": len(targeted_memory_detail),
             "stable_context_chars": len(stable_context),
             "dynamic_context_chars": len(dynamic_context),
-            "handoff_recent_rounds_received": handoff_recent_rounds is not None and bool(handoff_recent_rounds.strip()) if handoff_recent_rounds else False,
-            "handoff_recent_rounds_chars": len(handoff_recent_rounds) if handoff_recent_rounds else 0,
-            "handoff_block_chars": len(handoff_block),
             "query_planner_triggered": bool(query_planner_debug.get("triggered")),
             "query_planner_skip_reason": str(query_planner_debug.get("skip_reason") or ""),
             "operit_context_rewrite": operit_context_rewrite_debug,
@@ -7320,12 +7296,10 @@ class GatewayService:
         all_buckets: list[dict],
         session_id: str,
         bucket_ids: list[str] | None = None,
-        recent_rounds_text: str | None = None,
     ) -> str:
         """\
         Build one-shot handoff context for a new session start.
-        Contains: pinned bucket snippets + recent high-signal bucket intros
-        + optional recent conversation rounds from the client.
+        Contains: pinned bucket snippets + recent high-signal bucket intros.
         Injected into stable context so it enters the cache prefix.
 
         If bucket_ids is provided, only those buckets are included (still
@@ -7379,16 +7353,11 @@ class GatewayService:
             )
 
         if not pinned_entries and not intro_entries:
-            # Still carry over recent conversation rounds if provided.
-            if not (recent_rounds_text and recent_rounds_text.strip()):
-                return ""
-            lines: list[str] = [
-                "This is a new session. The following is carried over from previous windows.",
-            ]
-        else:
-            lines: list[str] = [
-                "This is a new session. The following is carried over from previous windows.",
-            ]
+            return ""
+
+        lines: list[str] = [
+            "This is a new session. The following is carried over from previous windows.",
+        ]
         if pinned_entries:
             lines.append("Pinned Memory (always carried):")
             lines.extend(pinned_entries)
@@ -7396,15 +7365,7 @@ class GatewayService:
             lines.append("Recent Memory (last 10 by time):")
             lines.extend(intro_entries)
 
-        if recent_rounds_text and recent_rounds_text.strip():
-            lines.append("")
-            lines.append("Recent Conversation (carried from previous window):")
-            lines.append(recent_rounds_text.strip())
-            logger.info("Gateway handoff_block | appended recent_rounds_text: %d chars", len(recent_rounds_text.strip()))
-
-        result = "\n".join(lines)
-        logger.info("Gateway handoff_block | total length: %d chars", len(result))
-        return result
+        return "\n".join(lines)
 
     def _build_portrait_memory_block(self, all_buckets: list[dict]) -> tuple[str, dict[str, Any]]:
         debug = self._portrait_memory_debug_base()
@@ -20904,7 +20865,7 @@ async function loadRounds(sid, row) {
           ((p.stable_context || '') ? '<div class="detail-section"><div class="title">Stable Context</div><div class="body">' + p.stable_context.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div></div>' : '') +
           ((p.dynamic_context || '') ? '<div class="detail-section"><div class="title">Dynamic Context</div><div class="body">' + p.dynamic_context.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div></div>' : '') +
           (finalMsgsHtml ? '<div class="detail-section"><div class="title">Final Messages (' + fm.length + ')</div>' + finalMsgsHtml + '</div>' : '') +
-          '<div class="detail-section"><div class="title">Debug</div><div class="meta">injected_buckets=' + JSON.stringify(p.injected_bucket_ids) + ' | recalled=' + (p.recalled_moment_count || 0) + ' | suppressed=' + (p.suppressed_bucket_count || 0) + ' | diffused=' + (p.diffused_item_count || 0) + ' | handoff_first=' + (pt.needs_handoff_first || false) + ' | handoff_rr_rcvd=' + (pt.handoff_recent_rounds_received || false) + ' | handoff_rr_chars=' + (pt.handoff_recent_rounds_chars || 0) + ' | handoff_block_chars=' + (pt.handoff_block_chars || 0) + '</div></div>' +
+          '<div class="detail-section"><div class="title">Debug</div><div class="meta">injected_buckets=' + JSON.stringify(p.injected_bucket_ids) + ' | recalled=' + (p.recalled_moment_count || 0) + ' | suppressed=' + (p.suppressed_bucket_count || 0) + ' | diffused=' + (p.diffused_item_count || 0) + ' | handoff_first=' + (pt.needs_handoff_first || false) + '</div></div>' +
         '</div>' +
       '</div>';
     }

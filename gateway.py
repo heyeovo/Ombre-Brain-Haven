@@ -20904,7 +20904,7 @@ async function loadRounds(sid, row) {
           ((p.stable_context || '') ? '<div class="detail-section"><div class="title">Stable Context</div><div class="body">' + p.stable_context.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div></div>' : '') +
           ((p.dynamic_context || '') ? '<div class="detail-section"><div class="title">Dynamic Context</div><div class="body">' + p.dynamic_context.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div></div>' : '') +
           (finalMsgsHtml ? '<div class="detail-section"><div class="title">Final Messages (' + fm.length + ')</div>' + finalMsgsHtml + '</div>' : '') +
-          '<div class="detail-section"><div class="title">Debug</div><div class="meta">injected_buckets=' + JSON.stringify(p.injected_bucket_ids) + ' | recalled=' + (p.recalled_moment_count || 0) + ' | suppressed=' + (p.suppressed_bucket_count || 0) + ' | diffused=' + (p.diffused_item_count || 0) + ' | handoff_first=' + (pt.needs_handoff_first || false) + '</div></div>' +
+          '<div class="detail-section"><div class="title">Debug</div><div class="meta">injected_buckets=' + JSON.stringify(p.injected_bucket_ids) + ' | recalled=' + (p.recalled_moment_count || 0) + ' | suppressed=' + (p.suppressed_bucket_count || 0) + ' | diffused=' + (p.diffused_item_count || 0) + ' | handoff_first=' + (pt.needs_handoff_first || false) + ' | handoff_rr_rcvd=' + (pt.handoff_recent_rounds_received || false) + ' | handoff_rr_chars=' + (pt.handoff_recent_rounds_chars || 0) + ' | handoff_block_chars=' + (pt.handoff_block_chars || 0) + '</div></div>' +
         '</div>' +
       '</div>';
     }

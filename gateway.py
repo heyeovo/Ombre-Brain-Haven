@@ -2801,9 +2801,13 @@ class GatewayService:
                 handoff_block = await self._build_handoff_block(all_buckets, session_id, bucket_ids=handoff_bucket_ids)
                 if handoff_block.strip():
                     self._session_handoff_blocks[session_id] = handoff_block
+                    self.state_store.save_handoff_block(session_id, handoff_block)
                 mark_step("handoff_block", stage_started_at)
             elif session_id in self._session_handoff_blocks:
                 handoff_block = self._session_handoff_blocks[session_id]
+            elif (cached := self.state_store.load_handoff_block(session_id)):
+                handoff_block = cached
+                self._session_handoff_blocks[session_id] = cached
             elif date_recall_requested:
                 query_planner_debug["skip_reason"] = "date_recall"
                 stage_started_at = time.perf_counter()

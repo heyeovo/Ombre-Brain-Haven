@@ -138,8 +138,38 @@ class GatewayStateStore:
             ON upstream_usage (session_id, id DESC)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS handoff_blocks (
+                session_id TEXT PRIMARY KEY,
+                handoff_block TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         conn.commit()
         conn.close()
+
+    def save_handoff_block(self, session_id: str, handoff_block: str) -> None:
+        from utils import now_iso
+        conn = self._connect()
+        conn.execute(
+            "INSERT OR REPLACE INTO handoff_blocks (session_id, handoff_block, created_at) VALUES (?, ?, ?)",
+            (session_id, handoff_block, now_iso()),
+        )
+        conn.commit()
+        conn.close()
+
+    def load_handoff_block(self, session_id: str) -> str | None:
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT handoff_block FROM handoff_blocks WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        conn.close()
+        if row:
+            return str(row[0])
+        return None
 
     def record_success(
         self,

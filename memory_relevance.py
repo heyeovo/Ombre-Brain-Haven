@@ -175,6 +175,24 @@ QUERY_WATER_STOPWORDS = frozenset(
     - QUERY_KEEPWORDS
 )
 QUERY_TERM_STOPWORDS = QUERY_WATER_STOPWORDS
+# 元指令词组：用户在讲检索系统本身（「你自动浮现一下」），不是在讲话题。
+# 这些词分词后可能连写成一个 token，所以允许子串剪除；这是唯一允许子串剪除的表。
+# 刻意排除「记忆」「召回」等兼具话题身份的词 —— 元指令漏过只是多搜一次，
+# 真话题被吞则彻底搜不到，两者代价不对等。
+META_PHRASE_STOP_TERMS = tuple(
+    sorted(
+        (
+            term
+            for term in RECALL_SYSTEM_META_TERMS
+            if len(term) > 1
+            and re.fullmatch(r"[一-鿿]+", term)
+            and term not in QUERY_KEEPWORDS
+            and term not in {"召回", "记忆", "长记忆", "原文", "原话", "关键词", "关键字"}
+        ),
+        key=len,
+        reverse=True,
+    )
+)
 
 DEFAULT_QUERY_EXPANSIONS = {
     "embodiment": ("hardware_protocol",),
@@ -1484,11 +1502,17 @@ def _query_terms(query: str, *, allow_single_cjk: bool = False) -> list[str]:
         if not normalized or normalized in seen:
             continue
         compact = re.sub(r"[^0-9a-z\u4e00-\u9fff_.:-]+", "", normalized)
-        if not compact or compact in QUERY_TERM_STOPWORDS:
+        if not compact:
+            continue
+        if compact in QUERY_TERM_STOPWORDS and not re.fullmatch(r"\d+", compact):
             continue
         if not re.search(r"[0-9a-z\u4e00-\u9fff]", compact):
             continue
-        if re.fullmatch(r"[a-z0-9_\-]+", normalized) and len(normalized) < 3:
+        if (
+            re.fullmatch(r"[a-z0-9_\-]+", normalized)
+            and not re.fullmatch(r"\d+", normalized)
+            and len(normalized) < 3
+        ):
             continue
         if re.fullmatch(r"[\u4e00-\u9fff]+", normalized) and len(normalized) < 2 and not allow_single_cjk:
             continue
@@ -1538,32 +1562,19 @@ def _strip_query_water_terms(
         return ""
     options = options or memory_relevance_options_from_config()
     stop_terms = set(QUERY_TERM_STOPWORDS)
-    keep_terms = set(QUERY_KEEPWORDS)
     if include_context:
         stop_terms.update(str(term or "").strip().lower() for term in options.context_terms or ())
-    protected_cjk_stop_terms = {
-        char
-        for term in keep_terms
-        if re.fullmatch(r"[\u4e00-\u9fff]+", term)
-        for char in term
-    }
-    stop_terms.difference_update(protected_cjk_stop_terms)
-    fragment_stop_terms = set(QUERY_EXTRA_STOPWORDS)
-    fragment_stop_terms.difference_update(protected_cjk_stop_terms)
     tokens: list[str] = []
     removed_water = False
     scan_text = text
-    phrase_stop_terms = [
-        term
-        for term in QUERY_EXTRA_STOPWORDS
-        if len(term) > 1 and re.fullmatch(r"[\u4e00-\u9fff]+", term)
-    ]
-    for term in sorted(phrase_stop_terms, key=len, reverse=True):
+    # \u53ea\u6709\u300c\u5143\u6307\u4ee4\u300d\u8bcd\u7ec4\u505a\u5b50\u4e32\u526a\u9664\uff08\u7528\u6237\u5728\u8bf4\u7cfb\u7edf\u672c\u8eab\uff0c\u4e0d\u662f\u5728\u8bf4\u8bdd\u9898\uff09\u3002
+    # \u5176\u4f59\u505c\u7528\u8bcd\u4e00\u5f8b\u5728\u5206\u8bcd\u540e\u6309\u6574\u8bcd\u5224\u65ad\uff0c\u907f\u514d\u628a\u300c\u8bb0\u5fc6\u7cfb\u7edf\u300d\u300c\u90a3\u5929\u300d\u8fd9\u7c7b\u5b9e\u8bcd\u524a\u6210\u788e\u7247\u3002
+    for term in META_PHRASE_STOP_TERMS:
         if term in scan_text:
             scan_text = scan_text.replace(term, " ")
             removed_water = True
     for part in jieba.lcut(scan_text, cut_all=False):
-        for token in re.findall(r"[A-Za-z]+[A-Za-z0-9_.:-]*|\d+(?:\.\d+)+|[\u4e00-\u9fff]+", str(part or "")):
+        for token in re.findall(r"[A-Za-z]+[A-Za-z0-9_.:-]*|\d+(?:[.:-]\d+)*|[\u4e00-\u9fff]+", str(part or "")):
             raw_token = str(token or "").strip()
             normalized = _normalize_alias(raw_token)
             if not normalized:
@@ -1572,45 +1583,18 @@ def _strip_query_water_terms(
             compact_value = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_.:-]+", "", raw_token)
             if not compact_key:
                 continue
-            if compact_key in stop_terms:
+            if compact_key in stop_terms and not re.fullmatch(r"\d+", compact_key):
                 removed_water = True
                 continue
-            if re.fullmatch(r"[\u4e00-\u9fff]+", compact_key):
-                stripped = _strip_cjk_water_fragments(compact_key, fragment_stop_terms)
-                if stripped != compact_key:
-                    removed_water = True
-                compact_key = stripped
-                compact_value = stripped
-                if not compact_key or compact_key in stop_terms:
-                    continue
             if re.fullmatch(r"[a-z0-9_.:-]+", compact_key):
-                if re.fullmatch(r"[\d.:-]+", compact_key):
+                if re.fullmatch(r"[.:-]+", compact_key):
                     continue
             tokens.append(compact_value or compact_key)
     if not removed_water:
         return text
     if not tokens:
         return ""
-    if all(re.fullmatch(r"[\u4e00-\u9fff]+", token) for token in tokens):
-        return "".join(tokens)
     return " ".join(tokens)
-
-
-def _strip_cjk_water_fragments(text: str, stop_terms: set[str]) -> str:
-    cleaned = str(text or "")
-    if not cleaned:
-        return ""
-    cjk_stop_terms = [
-        term
-        for term in stop_terms
-        if term and re.fullmatch(r"[\u4e00-\u9fff]+", term)
-    ]
-    for term in sorted(cjk_stop_terms, key=len, reverse=True):
-        if term and term != cleaned:
-            cleaned = cleaned.replace(term, "")
-            if not cleaned:
-                return ""
-    return cleaned
 
 
 def _list_text(value: Any) -> list[str]:

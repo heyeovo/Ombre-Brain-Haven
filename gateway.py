@@ -12972,15 +12972,9 @@ class GatewayService:
             )
             return debug
         if not self.domain_sentinel_llm_enabled:
-            domains = debug.get("domains", []) or []
-            is_general = not domains or domains == ["general"]
-            if is_general:
-                debug.update(
-                    should_recall=False,
-                    confidence=0.7,
-                    message_type="ordinary_chat",
-                    reason="rule_passthrough",
-                )
+            # 规则引擎认不出领域 == "不知道"，不等于"不需要召回"。
+            # 这里不再伪造 should_recall=False / confidence=0.7，
+            # 交回下游按常规流程决定，避免静默吞掉召回。
             return debug
         if self._domain_sentinel_should_skip_recall(debug, query):
             return debug

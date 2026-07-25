@@ -161,6 +161,11 @@ def probe_hook(base_url: str, token: str, query: str, session_id: str) -> dict:
     # （gateway.py:2460），domain_sentinel_debug 在那里面
     debug = payload.get("debug") or {}
     sentinel = debug.get("domain_sentinel_debug") or {}
+    # 注意：规则模式下 domain_sentinel_debug 里没有 reason 这个键（gateway.py:12884
+    # 只在显式记忆需求 / LLM 哨兵分支才写），所以 sentinel_reason 为空是常态，
+    # 不代表被门控拦了。真正的跳过理由在 query_planner_debug.skip_reason。
+    planner = debug.get("query_planner_debug") or {}
+    hook_debug = debug.get("hook_recall_debug") or {}
     return {
         "ok": True,
         "error": "",
@@ -171,6 +176,7 @@ def probe_hook(base_url: str, token: str, query: str, session_id: str) -> dict:
         "domains": list(debug.get("domains") or []),
         "recalled_ids": list(payload.get("recalled_ids") or []),
         "sentinel_reason": str(sentinel.get("reason") or ""),
+        "skip_reason": str(planner.get("skip_reason") or hook_debug.get("skip_reason") or ""),
         "search_query": str(debug.get("query") or ""),
     }
 
@@ -339,7 +345,8 @@ def main() -> int:
     extras = [r for r in rows if not r[2] and r[3]["ok"] and r[3]["chars"] > 0]
     print(f"该召回没召回: {len(misses)} 条" + ("  <<< 门控还有问题" if misses else "  ✓"))
     for _, text, _, hook, _ in misses:
-        print(f"  · {text}   sentinel_reason={hook.get('sentinel_reason') or '(空)'} "
+        print(f"  · {text}   skip_reason={hook.get('skip_reason') or '(无)'} "
+              f"sentinel_reason={hook.get('sentinel_reason') or '(空·规则模式下正常)'} "
               f"domains={hook.get('domains')}")
     if extras:
         print(f"对照组多余召回: {len(extras)} 条（不一定是问题，看内容是否离题）")

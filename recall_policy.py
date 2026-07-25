@@ -23,6 +23,7 @@ from memory_relevance import (
 )
 from identity import identity_names
 from query_terms import GENERIC_LEXICAL_STOPWORDS, RECALL_SYSTEM_META_TERMS, identity_address_terms
+from utils import parse_human_date_reference
 from query_understanding import query_intent_terms
 
 
@@ -785,6 +786,11 @@ LOCATABLE_QUESTION_TAIL_TERMS = (
     "是谁",
     "什么",
     "谁",
+)
+# 光有日期不够，还要有"在回忆"的动作，否则「今晚吃什么」「昨晚睡得怎么样」
+# 这种当下闲聊也会被放行。刻意不收「什么」「怎么样」这类纯疑问词。
+RELATIVE_DATE_RECALL_VERBS = (
+    "聊", "说", "提", "讲", "发生", "记得", "回忆", "想起", "那件事", "那次", "的事",
 )
 LOW_SIGNAL_QUERY_SHELL_MARKERS = frozenset(
     {
@@ -1564,6 +1570,9 @@ class RecallPolicy:
             and not self.is_detail_read_query(text)
             and not self.requires_topic_evidence(text)
             and not query_has_facet(text, "embodiment", self.options)
+            # 相对日期本身就是定位条件，跟绝对日期（「7月20」会进 locatable_terms）
+            # 一样应该放行，只是它不长得像实体词。
+            and not self._query_has_relative_date_recall_hint(text)
         ):
             return True, "no_locatable_terms"
         return False, ""
@@ -1621,6 +1630,10 @@ class RecallPolicy:
             return True
         if query_has_explicit_entity_marker(text) or query_has_technical_recall_marker(text):
             return False
+        # 相对日期（昨天/前天/…）跟绝对日期（7月20号）是同一种需求，但不算实体锚点，
+        # 上面那条放不过它，会一路掉到 _query_has_low_signal_shell 被判模糊。
+        if self._query_has_relative_date_recall_hint(text):
+            return False
         if self._is_affection_only_query(text):
             return True
         if self._is_affect_only_query(text):
@@ -1658,6 +1671,22 @@ class RecallPolicy:
         if not compact:
             return False
         return any(self._compact_marker_text(marker) in compact for marker in DETAIL_READ_QUERY_MARKERS)
+
+    def _query_has_relative_date_recall_hint(self, query: str) -> bool:
+        """「昨天我们聊了什么」这类相对日期回忆句。
+
+        日期解析复用 utils.parse_human_date_reference，只认它已支持的
+        大前天/前天/昨晚/昨天/昨日/今晚/今天。光有日期词不算，还要有回忆
+        动作，否则「今晚吃什么」这类当下闲聊也会被放行。
+        """
+        text = str(query or "").strip()
+        if not text:
+            return False
+        hint = parse_human_date_reference(text)
+        label = str((hint or {}).get("label") or "")
+        if not label:
+            return False
+        return any(marker in text for marker in RELATIVE_DATE_RECALL_VERBS)
 
     def _query_has_low_signal_shell(self, query: str) -> bool:
         text = str(query or "").strip().lower()

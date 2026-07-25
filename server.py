@@ -15100,6 +15100,12 @@ if __name__ == "__main__":
                 return await _gw_service.handle_preview_handoff(request)
             async def _gw_debug_dashboard(request):
                 return await _gw_service.handle_debug_dashboard(request)
+            async def _gw_hook_recall(request):
+                return await _gw_service.handle_hook_recall(request)
+            async def _gw_recall_eval_debug(request):
+                return await _gw_service.handle_recall_eval_debug(request)
+            async def _gw_upstream_usage_debug(request):
+                return await _gw_service.handle_upstream_usage_debug(request)
             _app.routes.extend([
                 _GwRoute("/gateway/health", _gw_health, methods=["GET"]),
                 _GwRoute("/gateway/api/config", _gw_config, methods=["GET"]),
@@ -15108,6 +15114,9 @@ if __name__ == "__main__":
                 _GwRoute("/gateway/v1/messages", _gw_anthropic, methods=["POST"]),
                 _GwRoute("/gateway/v1/models", _gw_models, methods=["GET"]),
                 _GwRoute("/gateway/api/debug/injections", _gw_injection_debug, methods=["GET"]),
+                _GwRoute("/gateway/api/hook/recall", _gw_hook_recall, methods=["POST"]),
+                _GwRoute("/gateway/api/debug/recall-eval", _gw_recall_eval_debug, methods=["GET"]),
+                _GwRoute("/gateway/api/debug/upstream-usage", _gw_upstream_usage_debug, methods=["GET"]),
                 _GwRoute("/gateway/api/preview-handoff", _gw_preview_handoff, methods=["GET"]),
                 _GwRoute("/gateway/debug", _gw_debug_dashboard, methods=["GET"]),
             ])

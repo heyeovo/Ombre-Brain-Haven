@@ -7858,7 +7858,13 @@ class GatewayService:
 
     @staticmethod
     def _dedupe_date_recall_topic_terms(terms: list[str]) -> list[str]:
-        stop = {"工作吗", "状态", "怎么样", "如何", "知道", "当前", "现在", "最近", "career"}
+        stop = {
+            "工作吗", "状态", "怎么样", "如何", "知道", "当前", "现在", "最近", "career",
+            # 纯指代残渣：日期已经圈定了范围，再拿这些字去当天素材里做子串匹配只会全灭。
+            # 过滤掉后 topic_terms 变空，_date_recall_text_has_topic_terms 放行整天素材。
+            "那天", "这天", "那件", "那个", "这个", "那次", "这次", "那事", "件事", "事情",
+            "那件事", "这件事", "那个事", "这个事",
+        }
         candidates = []
         seen = set()
         for index, term in enumerate(terms or []):

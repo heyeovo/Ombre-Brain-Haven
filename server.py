@@ -15106,6 +15106,12 @@ if __name__ == "__main__":
                 return await _gw_service.handle_recall_eval_debug(request)
             async def _gw_upstream_usage_debug(request):
                 return await _gw_service.handle_upstream_usage_debug(request)
+            async def _gw_conversation_turn(request):
+                return await _gw_service.handle_conversation_turn(request)
+            async def _gw_conversation_sessions(request):
+                return await _gw_service.handle_conversation_sessions(request)
+            async def _gw_conversation_turns(request):
+                return await _gw_service.handle_conversation_turns(request)
             _app.routes.extend([
                 _GwRoute("/gateway/health", _gw_health, methods=["GET"]),
                 _GwRoute("/gateway/api/config", _gw_config, methods=["GET"]),
@@ -15117,6 +15123,9 @@ if __name__ == "__main__":
                 _GwRoute("/gateway/api/hook/recall", _gw_hook_recall, methods=["POST"]),
                 _GwRoute("/gateway/api/debug/recall-eval", _gw_recall_eval_debug, methods=["GET"]),
                 _GwRoute("/gateway/api/debug/upstream-usage", _gw_upstream_usage_debug, methods=["GET"]),
+                _GwRoute("/gateway/api/conversation/turn", _gw_conversation_turn, methods=["POST"]),
+                _GwRoute("/gateway/api/conversation/sessions", _gw_conversation_sessions, methods=["GET"]),
+                _GwRoute("/gateway/api/conversation/turns", _gw_conversation_turns, methods=["GET"]),
                 _GwRoute("/gateway/api/preview-handoff", _gw_preview_handoff, methods=["GET"]),
                 _GwRoute("/gateway/debug", _gw_debug_dashboard, methods=["GET"]),
             ])

@@ -21,6 +21,22 @@ class GatewayStateStore:
         conn.row_factory = sqlite3.Row
         return conn
 
+    @staticmethod
+    def _ensure_columns(
+        conn: sqlite3.Connection,
+        table: str,
+        columns: dict[str, str],
+    ) -> None:
+        """给已存在的表补列（幂等）。老库升级用，不重建表。"""
+        existing = {
+            str(row["name"])
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for name, ddl in columns.items():
+            if name in existing:
+                continue
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
     def _init_db(self) -> None:
         conn = self._connect()
         conn.execute(
@@ -99,6 +115,17 @@ class GatewayStateStore:
                 UNIQUE(profile_id, session_id, round_id)
             )
             """
+        )
+        # 老库补列：conversation_turns 建表时没有 source / raw_json，
+        # 新前端（cc 引擎）写入要靠它们区分来源、留一份原始 JSON。
+        # 不重建表、不动已有行 —— 已有数据的 source 落到默认值 'gateway'。
+        self._ensure_columns(
+            conn,
+            "conversation_turns",
+            {
+                "source": "TEXT NOT NULL DEFAULT 'gateway'",
+                "raw_json": "TEXT NOT NULL DEFAULT ''",
+            },
         )
         conn.execute(
             """
@@ -353,6 +380,8 @@ class GatewayStateStore:
         model: str = "",
         client: str = "",
         route: str = "",
+        source: str = "gateway",
+        raw_json: str = "",
         created_at: datetime | None = None,
         max_entries: int = 500,
     ) -> int:
@@ -364,8 +393,9 @@ class GatewayStateStore:
         cursor = conn.execute(
             """
             INSERT OR REPLACE INTO conversation_turns
-            (profile_id, session_id, round_id, created_at, user_text, assistant_text, model, client, route)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (profile_id, session_id, round_id, created_at, user_text, assistant_text,
+             model, client, route, source, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 safe_profile_id,
@@ -377,6 +407,8 @@ class GatewayStateStore:
                 str(model or ""),
                 str(client or ""),
                 str(route or ""),
+                str(source or "gateway").strip() or "gateway",
+                str(raw_json or ""),
             ),
         )
         if max_entries > 0:
@@ -420,7 +452,7 @@ class GatewayStateStore:
         rows = conn.execute(
             f"""
             SELECT id, profile_id, session_id, round_id, created_at,
-                   user_text, assistant_text, model, client, route
+                   user_text, assistant_text, model, client, route, source
             FROM conversation_turns
             WHERE {where_clause}
             ORDER BY id DESC
@@ -441,6 +473,7 @@ class GatewayStateStore:
                 "model": row["model"] or "",
                 "client": row["client"] or "",
                 "route": row["route"] or "",
+                "source": row["source"] or "gateway",
             }
             for row in rows
         ]
@@ -459,7 +492,7 @@ class GatewayStateStore:
         rows = conn.execute(
             """
             SELECT id, profile_id, session_id, round_id, created_at,
-                   user_text, assistant_text, model, client, route
+                   user_text, assistant_text, model, client, route, source
             FROM conversation_turns
             WHERE profile_id = ?
             ORDER BY id DESC
@@ -519,9 +552,146 @@ class GatewayStateStore:
                 "model": row["model"] or "",
                 "client": row["client"] or "",
                 "route": row["route"] or "",
+                "source": row["source"] or "gateway",
             }
             for row in filtered
         ]
+
+    def next_conversation_round_id(self, *, profile_id: str, session_id: str) -> int:
+        """
+        同 session 里的下一个 round_id。
+        cc 引擎那条路没有 request_rounds 的注入冷却语义，所以不走 record_success，
+        直接按这张表自己算 —— date_recall 拼原文时按 (session_id, round_id) 排序，
+        口径跟 /v1/messages 那条链一致。
+        """
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "default").strip() or "default"
+        conn = self._connect()
+        row = conn.execute(
+            """
+            SELECT COALESCE(MAX(round_id), 0) AS current_round
+            FROM conversation_turns
+            WHERE profile_id = ? AND session_id = ?
+            """,
+            (safe_profile_id, safe_session_id),
+        ).fetchone()
+        conn.close()
+        return int(row["current_round"] or 0) + 1
+
+    def list_conversation_sessions(
+        self,
+        *,
+        profile_id: str,
+        limit: int = 50,
+        source: str = "",
+    ) -> list[dict[str, Any]]:
+        """会话列表：每个 session_id 一行，带轮数、时间范围和第一句用户原话做标题。"""
+        safe_limit = max(1, min(200, int(limit or 50)))
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_source = str(source or "").strip()
+        where_clause = "profile_id = ?"
+        params: list[Any] = [safe_profile_id]
+        if safe_source:
+            where_clause += " AND source = ?"
+            params.append(safe_source)
+        params.append(safe_limit)
+        conn = self._connect()
+        rows = conn.execute(
+            f"""
+            SELECT session_id,
+                   COUNT(*) AS turn_count,
+                   MIN(created_at) AS first_at,
+                   MAX(created_at) AS last_at,
+                   MAX(id) AS last_id,
+                   MIN(id) AS first_id
+            FROM conversation_turns
+            WHERE {where_clause}
+            GROUP BY session_id
+            ORDER BY last_id DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        sessions = []
+        for row in rows:
+            head = conn.execute(
+                """
+                SELECT user_text, model, client, route, source
+                FROM conversation_turns
+                WHERE id = ?
+                """,
+                (row["first_id"],),
+            ).fetchone()
+            title = ((head["user_text"] if head else "") or "").strip().replace("\n", " ")
+            sessions.append(
+                {
+                    "session_id": row["session_id"],
+                    "turn_count": int(row["turn_count"] or 0),
+                    "first_at": row["first_at"],
+                    "last_at": row["last_at"],
+                    "title": title[:80],
+                    "model": (head["model"] if head else "") or "",
+                    "client": (head["client"] if head else "") or "",
+                    "route": (head["route"] if head else "") or "",
+                    "source": (head["source"] if head else "") or "gateway",
+                }
+            )
+        conn.close()
+        return sessions
+
+    def list_conversation_turns_by_session(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        limit: int = 200,
+        before_id: int | None = None,
+        include_raw: bool = False,
+    ) -> list[dict[str, Any]]:
+        """某个会话的消息，按时间正序返回（界面直接顺着渲染）。"""
+        safe_limit = max(1, min(500, int(limit or 200)))
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "").strip()
+        if not safe_session_id:
+            return []
+        where_clause = "profile_id = ? AND session_id = ?"
+        params: list[Any] = [safe_profile_id, safe_session_id]
+        if before_id is not None:
+            where_clause += " AND id < ?"
+            params.append(int(before_id))
+        params.append(safe_limit)
+        conn = self._connect()
+        rows = conn.execute(
+            f"""
+            SELECT id, profile_id, session_id, round_id, created_at,
+                   user_text, assistant_text, model, client, route, source, raw_json
+            FROM conversation_turns
+            WHERE {where_clause}
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        conn.close()
+        turns = [
+            {
+                "id": row["id"],
+                "profile_id": row["profile_id"],
+                "session_id": row["session_id"],
+                "round_id": row["round_id"],
+                "created_at": row["created_at"],
+                "user_text": row["user_text"] or "",
+                "assistant_text": row["assistant_text"] or "",
+                "model": row["model"] or "",
+                "client": row["client"] or "",
+                "route": row["route"] or "",
+                "source": row["source"] or "gateway",
+                **({"raw_json": row["raw_json"] or ""} if include_raw else {}),
+            }
+            for row in rows
+        ]
+        turns.reverse()
+        return turns
 
     def list_injection_debug(
         self,

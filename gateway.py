@@ -2636,6 +2636,171 @@ class GatewayService:
             }
         )
 
+    # ── 对话存储对外接口（第 3 步） ───────────────────────────────────────
+    # 新前端（cc 引擎）没走 /v1/messages，所以写库要自己调。这三条走的是
+    # **同一张 conversation_turns 表**，不是另起一张 —— 跨窗口注入、date_recall、
+    # 人格引擎取近期对话都是从这张表读，另起表那三处就全看不到新前端的对话。
+
+    @property
+    def _conversation_profile_id(self) -> str:
+        return str(getattr(self.persona_engine, "profile_id", "") or "default")
+
+    async def handle_conversation_turn(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid conversation turn request"}, status_code=400)
+
+        user_text = str(body.get("user_text") or body.get("user") or "")
+        assistant_text = str(body.get("assistant_text") or body.get("assistant") or "")
+        if not user_text.strip() and not assistant_text.strip():
+            return JSONResponse(
+                {"error": "user_text or assistant_text is required"}, status_code=400
+            )
+
+        session_id = str(
+            body.get("session_id")
+            or request.headers.get("X-Ombre-Session-Id")
+            or ""
+        ).strip()
+        if not session_id:
+            return JSONResponse({"error": "session_id is required"}, status_code=400)
+
+        source = str(body.get("source") or "cc").strip() or "cc"
+        model = str(body.get("model") or "")
+        client = str(body.get("client") or "")
+        route = str(body.get("route") or "")
+
+        raw_json = ""
+        raw = body.get("raw")
+        if raw is None:
+            raw = body.get("raw_json")
+        if isinstance(raw, str):
+            raw_json = raw
+        elif raw is not None:
+            try:
+                raw_json = json.dumps(raw, ensure_ascii=False)
+            except (TypeError, ValueError):
+                raw_json = ""
+        # 原始 JSON 留一份是为了将来转换丢东西时能重来（工具调用、附件、分支）。
+        # 不能走 _clip_text —— 那个会把空白压成一行，JSON 字符串里的换行会被吃掉。
+        # 超长就整体换成一个可解析的存根，别存半截坏 JSON。
+        raw_limit = 200_000
+        if len(raw_json) > raw_limit:
+            raw_json = json.dumps(
+                {
+                    "_truncated": True,
+                    "original_chars": len(raw_json),
+                    "head": raw_json[:2000],
+                },
+                ensure_ascii=False,
+            )
+
+        profile_id = self._conversation_profile_id
+        round_id = body.get("round_id")
+        try:
+            round_id_int = int(round_id)
+        except (TypeError, ValueError):
+            round_id_int = 0
+        if round_id_int <= 0:
+            round_id_int = self.state_store.next_conversation_round_id(
+                profile_id=profile_id,
+                session_id=session_id,
+            )
+
+        turn_id = self._record_conversation_turn(
+            session_id=session_id,
+            round_id=round_id_int,
+            user_message=user_text,
+            assistant_message={"content": assistant_text},
+            model=model,
+            client=client,
+            route=route,
+            source=source,
+            raw_json=raw_json,
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "stored": bool(turn_id),
+                "turn_id": turn_id,
+                "profile_id": profile_id,
+                "session_id": session_id,
+                "round_id": round_id_int,
+                "source": source,
+                "raw_chars": len(raw_json),
+            }
+        )
+
+    async def handle_conversation_sessions(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+
+        try:
+            limit = int(request.query_params.get("limit", "50"))
+        except ValueError:
+            limit = 50
+        source = str(request.query_params.get("source", "") or "").strip()
+        profile_id = self._conversation_profile_id
+        return JSONResponse(
+            {
+                "profile_id": profile_id,
+                "sessions": self.state_store.list_conversation_sessions(
+                    profile_id=profile_id,
+                    limit=limit,
+                    source=source,
+                ),
+            }
+        )
+
+    async def handle_conversation_turns(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+
+        session_id = str(
+            request.query_params.get("session_id", "")
+            or request.headers.get("X-Ombre-Session-Id")
+            or ""
+        ).strip()
+        if not session_id:
+            return JSONResponse({"error": "session_id is required"}, status_code=400)
+        try:
+            limit = int(request.query_params.get("limit", "200"))
+        except ValueError:
+            limit = 200
+        before_id: int | None = None
+        raw_before = str(request.query_params.get("before_id", "") or "").strip()
+        if raw_before:
+            try:
+                before_id = int(raw_before)
+            except ValueError:
+                before_id = None
+        include_raw = self._truthy_header(request.query_params.get("include_raw"))
+        profile_id = self._conversation_profile_id
+        turns = self.state_store.list_conversation_turns_by_session(
+            profile_id=profile_id,
+            session_id=session_id,
+            limit=limit,
+            before_id=before_id,
+            include_raw=include_raw,
+        )
+        return JSONResponse(
+            {
+                "profile_id": profile_id,
+                "session_id": session_id,
+                "count": len(turns),
+                "turns": turns,
+            }
+        )
+
     async def _list_gateway_buckets(self, *, include_archive: bool = False) -> list[dict]:
         ttl = self.bucket_list_cache_ttl_seconds
         key = bool(include_archive)
@@ -3909,20 +4074,24 @@ class GatewayService:
         model: str,
         client: str,
         route: str,
-    ) -> None:
+        source: str = "gateway",
+        raw_json: str = "",
+    ) -> int:
+        # source / raw_json 默认值 = /v1/messages 那条链的原有行为，
+        # 只有新前端（cc 引擎）那条路会显式传别的值。
         if not user_message.strip():
-            return
+            return 0
         assistant_text = ""
         if isinstance(assistant_message, dict):
             assistant_text = self._coerce_message_text(assistant_message.get("content")).strip()
             if not assistant_text and assistant_message.get("tool_calls"):
-                return
+                return 0
         user_text = self._clean_conversation_turn_text(user_message)
         assistant_text = self._clean_conversation_turn_text(assistant_text)
         user_text = self._conversation_turn_original_text(user_text, role="user")
         assistant_text = self._conversation_turn_original_text(assistant_text, role="assistant")
         if not user_text and not assistant_text:
-            return
+            return 0
         profile_id = str(getattr(self.persona_engine, "profile_id", "") or "default")
         if self._is_recent_duplicate_conversation_turn(
             profile_id=profile_id,
@@ -3938,9 +4107,10 @@ class GatewayService:
                 session_id,
                 round_id,
             )
-            return
+            return 0
+        turn_id = 0
         try:
-            self.state_store.record_conversation_turn(
+            turn_id = self.state_store.record_conversation_turn(
                 profile_id=profile_id,
                 session_id=session_id,
                 round_id=round_id,
@@ -3949,6 +4119,8 @@ class GatewayService:
                 model=model,
                 client=client,
                 route=route,
+                source=source,
+                raw_json=raw_json,
                 max_entries=self.conversation_turns_max_entries,
             )
         except Exception as exc:
@@ -3967,6 +4139,7 @@ class GatewayService:
             client=client,
             route=route,
         )
+        return turn_id
 
     def _is_recent_duplicate_conversation_turn(
         self,
@@ -20720,6 +20893,15 @@ def create_gateway_app(
     async def upstream_usage_debug(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_upstream_usage_debug(request)
 
+    async def conversation_turn(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_conversation_turn(request)
+
+    async def conversation_sessions(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_conversation_sessions(request)
+
+    async def conversation_turns(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_conversation_turns(request)
+
     app = Starlette(
         debug=False,
         routes=[
@@ -20729,6 +20911,11 @@ def create_gateway_app(
             Route("/api/hook/recall", hook_recall, methods=["POST"]),
             Route("/api/debug/recall-eval", recall_eval_debug, methods=["GET"]),
             Route("/api/debug/upstream-usage", upstream_usage_debug, methods=["GET"]),
+            # ⚠️ 加路由必须同时加进 server.py 的 /gateway/* 转发表，
+            # 否则公网打过去 404（第 2 步已经踩过一次）。
+            Route("/api/conversation/turn", conversation_turn, methods=["POST"]),
+            Route("/api/conversation/sessions", conversation_sessions, methods=["GET"]),
+            Route("/api/conversation/turns", conversation_turns, methods=["GET"]),
             Route("/v1/models", models, methods=["GET"]),
             Route("/v1/chat/completions", chat_completions, methods=["POST"]),
             Route("/v1/messages", anthropic_messages, methods=["POST"]),

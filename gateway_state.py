@@ -213,6 +213,19 @@ class GatewayStateStore:
                 "write_dirs": "TEXT NOT NULL DEFAULT '[]'",
             },
         )
+        # cc 前端的「上游模型配置」（5.2）。整个配置就一个对象，所以一行 JSON，
+        # 不建结构化表 —— 里面是中转站清单 + 订阅侧可选模型 + 新对话的默认值，
+        # 字段还会变，拆成列每次加东西都要补列迁移。
+        # ⚠️ token 明文存在这里。跟 cc_personas 一样属于「只有本人用」的私有库。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cc_upstream_config (
+                id TEXT PRIMARY KEY,
+                payload TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
         conn.commit()
         conn.close()
 
@@ -400,6 +413,53 @@ class GatewayStateStore:
         conn.commit()
         conn.close()
         return self.get_cc_persona(safe_id)
+
+    # ------------------------------------------------------------------
+    # cc 前端上游模型配置（5.2）
+    # ------------------------------------------------------------------
+
+    _CC_UPSTREAM_ID = "default"
+
+    def load_cc_upstream_config(self) -> dict[str, Any]:
+        """整份配置读回来。没存过 / 坏数据都返回空 dict，前端自己套默认值。"""
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT payload, updated_at FROM cc_upstream_config WHERE id = ?",
+            (self._CC_UPSTREAM_ID,),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return {}
+        try:
+            value = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError):
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        value["updated_at"] = row["updated_at"] or ""
+        return value
+
+    def save_cc_upstream_config(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """
+        整份覆盖，不做 PATCH 合并 —— 这一份是「一个表单一次保存」，
+        跟协作者那边按 tab 分开存不一样。
+        """
+        from utils import now_iso
+
+        now = now_iso()
+        safe = payload if isinstance(payload, dict) else {}
+        safe = {k: v for k, v in safe.items() if k != "updated_at"}
+        conn = self._connect()
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO cc_upstream_config (id, payload, updated_at)
+            VALUES (?, ?, ?)
+            """,
+            (self._CC_UPSTREAM_ID, json.dumps(safe, ensure_ascii=False), now),
+        )
+        conn.commit()
+        conn.close()
+        return self.load_cc_upstream_config()
 
     def delete_cc_persona(self, persona_id: str) -> bool:
         safe_id = str(persona_id or "").strip()

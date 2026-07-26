@@ -15118,6 +15118,10 @@ if __name__ == "__main__":
                 if request.method == "DELETE":
                     return await _gw_service.handle_cc_personas_delete(request)
                 return await _gw_service.handle_cc_personas_list(request)
+            async def _gw_cc_upstream(request):
+                if request.method == "POST":
+                    return await _gw_service.handle_cc_upstream_save(request)
+                return await _gw_service.handle_cc_upstream_get(request)
             _app.routes.extend([
                 _GwRoute("/gateway/health", _gw_health, methods=["GET"]),
                 _GwRoute("/gateway/api/config", _gw_config, methods=["GET"]),
@@ -15133,6 +15137,7 @@ if __name__ == "__main__":
                 _GwRoute("/gateway/api/conversation/sessions", _gw_conversation_sessions, methods=["GET"]),
                 _GwRoute("/gateway/api/conversation/turns", _gw_conversation_turns, methods=["GET"]),
                 _GwRoute("/gateway/api/cc/personas", _gw_cc_personas, methods=["GET", "POST", "DELETE"]),
+                _GwRoute("/gateway/api/cc/upstream", _gw_cc_upstream, methods=["GET", "POST"]),
                 _GwRoute("/gateway/api/preview-handoff", _gw_preview_handoff, methods=["GET"]),
                 _GwRoute("/gateway/debug", _gw_debug_dashboard, methods=["GET"]),
             ])

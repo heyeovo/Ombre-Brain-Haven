@@ -12,11 +12,28 @@ domain_sentinel 门控。这个脚本用同一批句子分别打两条路，输�
     export OMBRE_GATEWAY_TOKEN=<网关密码>
     python scripts/compare_recall_paths.py
     python scripts/compare_recall_paths.py --skip-messages   # 只测 hook，不花上游钱
+    python scripts/compare_recall_paths.py --no-semantic     # hook 不开语义（复现默认行为）
     python scripts/compare_recall_paths.py --verbose         # 打印注入原文
     python scripts/compare_recall_paths.py --case "你还记得那次吗"
 
 /v1/messages 那条会真的请求上游模型（max_tokens 压到最小），所以默认
 每个用例只跑一次。加 --skip-messages 可以完全不产生上游费用。
+
+⚠️ 看结果前必须知道这四个坑（都踩过，2026-07-26）：
+  1. hook **没有 date_recall 子系统**（按日期捞当天原始对话），它只挂在
+     prepare_payload（gateway.py:2821）。所以「昨天/前天」这类相对日期用例
+     在 --skip-messages 下必然 0 条，要看链路那一列才验得到。
+  2. hook 默认 allow_semantic=false，只做关键词匹配。本脚本默认帮你开着
+     （单次 4-6s），--no-semantic 可以关掉复现默认行为。
+  3. **判定看条数，不看字数。** dynamic_context 是注入总壳，一条记忆都没
+     召回时它也有 208 字固定框架文字。拿字数判会让「嗯」显示 208 字、
+     判成"多余召回"。所以字数只作参考，判定用 id 列表条数。
+  4. **新 session 第一轮走换窗交接**（skip_reason=session_start_handoff），
+     压根不做召回。所以链路每条用例先发一句「在吗」热身，第二轮才是真实
+     场景。--no-warmup 可以关掉，但结果不可用。
+
+/api/debug/injections 的字段名和层级可以用 scripts/probe_injection_keys.py
+随时重新确认 —— 注入内容在 item["payload"] 里，不在顶层。
 """
 
 from __future__ import annotations
@@ -66,7 +83,11 @@ BUCKET_ID_CASES_TEMPLATE: list[tuple[str, str, bool]] = [
 ]
 
 
-def build_cases(bucket_id: str | None, only: str | None) -> list[tuple[str, str, bool]]:
+def build_cases(
+    bucket_id: str | None,
+    only: str | None,
+    only_group: str | None = None,
+) -> list[tuple[str, str, bool]]:
     if only:
         return [("自定义", only, True)]
     cases = list(CASES)
@@ -75,6 +96,10 @@ def build_cases(bucket_id: str | None, only: str | None) -> list[tuple[str, str,
             (label, text.format(bid=bucket_id), expect)
             for label, text, expect in BUCKET_ID_CASES_TEMPLATE
         ]
+    # --only-group 按分类名子串筛，只改一处判定时不用把 16 条全跑一遍
+    if only_group:
+        needle = only_group.strip()
+        cases = [c for c in cases if needle in c[0]]
     return cases
 
 
@@ -141,19 +166,35 @@ def get_json(url: str, token: str, timeout: float = 30.0) -> tuple[int, dict | s
         return status, raw
 
 
-def probe_hook(base_url: str, token: str, query: str, session_id: str) -> dict:
-    """打 /api/hook/recall，返回 {ok, chars, cards, domains, error}。"""
+def probe_hook(
+    base_url: str,
+    token: str,
+    query: str,
+    session_id: str,
+    *,
+    semantic: bool = True,
+) -> dict:
+    """打 /api/hook/recall，返回 {ok, chars, cards, domains, error}。
+
+    semantic=True 时显式打开 allow_semantic / allow_rerank / allow_query_planner。
+    hook 默认这三个都是关的，即只做关键词匹配、不跑向量检索 —— 不传的话
+    「帮我回忆一下…记忆系统…」这类语义命中的桶会全部显示 0 张卡，看起来像
+    门控在拦，实际是没开检索。单次耗时会从 <1s 涨到 4-6s。
+    """
     started = time.time()
-    status, payload = post_json(
-        f"{base_url}/api/hook/recall",
-        token,
-        {
-            "query": query,
-            "session_id": session_id,
-            "include_debug": "1",
-            "_session_id": session_id,
-        },
-    )
+    body = {
+        "query": query,
+        "session_id": session_id,
+        "include_debug": "1",
+        "_session_id": session_id,
+    }
+    if semantic:
+        body.update(
+            allow_semantic="1",
+            allow_rerank="1",
+            allow_query_planner="1",
+        )
+    status, payload = post_json(f"{base_url}/api/hook/recall", token, body)
     elapsed = time.time() - started
     if status != 200 or not isinstance(payload, dict):
         return {
@@ -192,12 +233,32 @@ def probe_hook(base_url: str, token: str, query: str, session_id: str) -> dict:
 
 # /api/debug/injections 里跟召回相关的字段（不同版本字段名可能不同，
 # 存在就取，不存在跳过）
+# ⚠️ 这些字段在 item["payload"] 里，不在 item 顶层。
+# 顶层只有 created_at / id / payload / round_id / session_id —— 之前直接
+# item.get(key) 取，链路那一列必然全是 0，看起来像"链路完全不召回"。
+# 用 scripts/probe_injection_keys.py 可以随时重新确认真实字段名。
+#
+# ⚠️⚠️ 刻意**不含** dynamic_context。那个字段是注入总壳，里面有 200 多字
+# 固定框架说明（"Live private context for the current turn..."），一条记忆
+# 都没召回时它也有 208 字。拿它算字数会让「嗯」「今天天气不错」全部显示
+# 200+ 字、判成"多余召回"，全是假数。
 INJECTION_RECALL_KEYS = (
     "recalled_memory",
     "diffused_memory",
     "date_recall",
-    "dynamic_context",
     "just_now_context",
+    # bucket_id 精确取记忆的内容落在这个字段，不在上面那几个里
+    "targeted_memory_detail",
+)
+
+# 判"有没有召回"用 id 列表条数，比字数可靠：字数会被框架文字污染，
+# id 列表是空就是空。
+INJECTION_ID_KEYS = (
+    "injected_bucket_ids",
+    "recalled_bucket_ids",
+    "date_recall_bucket_ids",
+    "diffused_bucket_ids",
+    "recalled_moment_ids",
 )
 
 
@@ -237,6 +298,8 @@ def probe_messages(base_url: str, token: str, query: str, session_id: str, model
             "elapsed": elapsed,
             "context": "",
             "parts": {},
+            "cards": 0,
+            "ids": {},
         }
 
     dbg_status, dbg = get_json(
@@ -251,6 +314,8 @@ def probe_messages(base_url: str, token: str, query: str, session_id: str, model
             "elapsed": elapsed,
             "context": "",
             "parts": {},
+            "cards": 0,
+            "ids": {},
         }
     items = dbg.get("items") or []
     if not items:
@@ -261,31 +326,64 @@ def probe_messages(base_url: str, token: str, query: str, session_id: str, model
             "elapsed": elapsed,
             "context": "",
             "parts": {},
+            "cards": 0,
+            "ids": {},
         }
     item = items[0] if isinstance(items[0], dict) else {}
+    # 注入内容在 payload 子字典里，不在顶层
+    source = item.get("payload") if isinstance(item.get("payload"), dict) else item
     parts: dict[str, int] = {}
     chunks: list[str] = []
     for key in INJECTION_RECALL_KEYS:
-        text = _flatten_text(item.get(key)).strip()
+        text = _flatten_text(source.get(key)).strip()
         if text:
             parts[key] = len(text)
             chunks.append(f"--- {key} ---\n{text}")
+    ids: dict[str, int] = {}
+    for key in INJECTION_ID_KEYS:
+        value = source.get(key)
+        if isinstance(value, list) and value:
+            ids[key] = len(value)
+    # date_recall 捞的是当天的原始对话，不是记忆桶，压根没有 bucket id 可数。
+    # 上一轮就因为只数 id，把已经注入 643 字的「昨天我们聊了什么」判成了 MISS。
+    # 有正文就按一条算。
+    if parts.get("date_recall") and not ids.get("date_recall_bucket_ids"):
+        ids["date_recall(原始对话)"] = 1
+    planner = source.get("query_planner_debug") or {}
+    date_dbg = source.get("date_recall_debug") or {}
     return {
         "ok": True,
         "error": "",
         "chars": sum(parts.values()),
+        "cards": sum(ids.values()),
+        "ids": ids,
         "elapsed": elapsed,
         "context": "\n".join(chunks),
         "parts": parts,
+        "skip_reason": str((planner or {}).get("skip_reason") or ""),
+        # date_recall 是按日期捞当天原始对话的子系统，只在链路这条路上有。
+        # 相对日期用例要看它的 status/skip_reason 才知道有没有真正触发。
+        "date_status": str((date_dbg or {}).get("status") or ""),
+        "date_skip": str((date_dbg or {}).get("skip_reason") or ""),
+        "date_label": str((date_dbg or {}).get("label") or ""),
     }
 
 
-def verdict(expect_recall: bool, hook_chars: int) -> str:
-    if expect_recall and hook_chars > 0:
-        return "OK"
-    if expect_recall and hook_chars == 0:
-        return "MISS <<<"     # 该召回却是空的 —— 门控又吞了
-    if not expect_recall and hook_chars == 0:
+def verdict(expect_recall: bool, hook_cards: int, chain_cards: int = -1) -> str:
+    """判定看**召回条数**，不看字数。
+
+    字数会被注入框架文字污染（dynamic_context 空手也有 208 字），
+    条数是空就是空。chain_cards < 0 表示链路被跳过（--skip-messages）。
+
+    任一条路召回到就算成功：hook 能力比链路少（没有 date_recall），
+    只看 hook 会把"链路其实召回了"误报成 MISS。
+    """
+    got = hook_cards > 0 or chain_cards > 0
+    if expect_recall:
+        if got:
+            return "OK" if hook_cards > 0 else "OK(仅链路)"
+        return "MISS <<<"
+    if not got:
         return "OK(静默)"
     return "多余"              # 对照组反而召回了
 
@@ -303,8 +401,26 @@ def main() -> int:
     parser.add_argument("--token", default=os.environ.get("OMBRE_GATEWAY_TOKEN", ""))
     parser.add_argument("--model", default=os.environ.get("OMBRE_TEST_MODEL", ""))
     parser.add_argument("--skip-messages", action="store_true", help="只测 hook，不打上游")
+    parser.add_argument(
+        "--no-semantic",
+        dest="semantic",
+        action="store_false",
+        help="hook 不开语义检索（复现 hook 的默认行为，只做关键词匹配）",
+    )
+    parser.set_defaults(semantic=True)
+    parser.add_argument(
+        "--no-warmup",
+        dest="warmup",
+        action="store_false",
+        help="链路不发热身轮（会测在 session_start_handoff 交接轮上，结果不可用）",
+    )
+    parser.set_defaults(warmup=True)
     parser.add_argument("--verbose", action="store_true", help="打印注入原文")
     parser.add_argument("--case", default="", help="只测这一句")
+    parser.add_argument(
+        "--only-group", default="",
+        help="只测分类名含此字串的用例，如 --only-group 相对日期",
+    )
     parser.add_argument("--bucket-id", default="", help="bucket_id 用例用的 id，默认从本地 buckets/ 挑一个")
     parser.add_argument("--session-prefix", default="recall-compare")
     args = parser.parse_args()
@@ -315,14 +431,25 @@ def main() -> int:
 
     base_url = args.base_url.rstrip("/")
     bucket_id = args.bucket_id or pick_sample_bucket_id()
-    cases = build_cases(bucket_id, args.case or None)
+    cases = build_cases(bucket_id, args.case or None, args.only_group or None)
+    if not cases:
+        print(f"--only-group {args.only_group!r} 没匹配到任何用例", file=sys.stderr)
+        return 2
 
     print(f"网关: {base_url}")
     print(f"用例: {len(cases)} 条" + (f"（bucket_id 样本 {bucket_id}）" if bucket_id else ""))
     print(f"请求链路: {'跳过' if args.skip_messages else '开启（max_tokens=1）'}")
+    print(f"hook 语义检索: {'开' if args.semantic else '关（只关键词）'}")
+    if not args.skip_messages:
+        print(f"链路热身轮: {'开（每条用例先发一句「在吗」）' if args.warmup else '关'}")
+    print("判定看**召回条数**，不看字数（字数含注入框架文字，空手也有 200+ 字）")
+    if args.skip_messages:
+        print("⚠️  只测 hook。hook 这条路没有 date_recall 子系统（它只挂在 prepare_payload，")
+        print("   见 gateway.py:2821），所以「昨天/前天」这类相对日期用例在 hook 上 0 字是")
+        print("   预期，要去掉 --skip-messages 看链路那一列才验得到。")
     print()
 
-    header = f"{'分类':<16} {'期望':<5} {'hook字数':>9} {'链路字数':>9}  {'判定':<10} 句子"
+    header = f"{'分类':<16} {'期望':<5} {'hook条数':>9} {'链路条/字':>11}  {'判定':<10} 句子"
     print(header)
     print("-" * len(header))
 
@@ -330,19 +457,26 @@ def main() -> int:
     for index, (label, text, expect) in enumerate(cases):
         # 每个用例用独立 session，避免 Haven 的去重/冷却互相干扰
         session_id = f"{args.session_prefix}-{index}-{int(time.time())}"
-        hook = probe_hook(base_url, args.token, text, session_id)
-        chain = (
-            {"ok": True, "chars": -1, "context": "", "error": "skipped", "parts": {}}
-            if args.skip_messages
-            else probe_messages(base_url, args.token, text, session_id + "-chain", args.model or None)
-        )
-        mark = verdict(expect, hook["chars"]) if hook["ok"] else "ERR"
-        chain_display = "-" if chain["chars"] < 0 else str(chain["chars"])
+        hook = probe_hook(base_url, args.token, text, session_id, semantic=args.semantic)
+        if args.skip_messages:
+            chain = {"ok": True, "chars": -1, "cards": -1, "ids": {},
+                     "context": "", "error": "skipped", "parts": {}}
+        else:
+            chain_session = session_id + "-chain"
+            # 新 session 的第一轮走「换窗交接」分支（skip_reason=session_start_handoff），
+            # 压根不做召回。先发一句无关的把这一轮用掉，第二轮才是日常聊天的
+            # 真实召回场景。不热身的话每条用例都测在交接轮上，全是假数。
+            if args.warmup:
+                probe_messages(base_url, args.token, "在吗", chain_session, args.model or None)
+            chain = probe_messages(base_url, args.token, text, chain_session, args.model or None)
+        mark = verdict(expect, hook["cards"], chain["cards"]) if hook["ok"] else "ERR"
+        chain_display = "-" if chain["cards"] < 0 else f"{chain['cards']}/{chain['chars']}"
         print(
             f"{label:<16} {'要':<5} " if expect else f"{label:<16} {'不要':<4} ",
             end="",
         )
-        print(f"{hook['chars']:>9} {chain_display:>9}  {mark:<10} {text[:34]}")
+        hook_display = f"{hook['cards']}/{hook['chars']}"
+        print(f"{hook_display:>9} {chain_display:>11}  {mark:<10} {text[:34]}")
         if hook.get("error"):
             print(f"{'':<16} hook 错误: {hook['error']}")
         if chain.get("error") and chain["error"] != "skipped":
@@ -350,26 +484,58 @@ def main() -> int:
         rows.append((label, text, expect, hook, chain))
 
     print()
-    misses = [r for r in rows if r[2] and r[3]["ok"] and r[3]["chars"] == 0]
-    extras = [r for r in rows if not r[2] and r[3]["ok"] and r[3]["chars"] > 0]
-    print(f"该召回没召回: {len(misses)} 条" + ("  <<< 门控还有问题" if misses else "  ✓"))
-    for _, text, _, hook, _ in misses:
+    # 两条路都空才算真 MISS。hook 空但链路有内容不算 —— hook 能力本来就少
+    # （没有 date_recall），只看 hook 会把"链路其实召回了"误报成漏召回。
+    def both_empty(hook: dict, chain: dict) -> bool:
+        if not hook["ok"] or hook["cards"] != 0:
+            return False
+        return chain["cards"] <= 0
+    misses = [r for r in rows if r[2] and both_empty(r[3], r[4])]
+    extras = [
+        r for r in rows
+        if not r[2] and r[3]["ok"] and (r[3]["cards"] > 0 or r[4]["cards"] > 0)
+    ]
+    print(f"该召回没召回: {len(misses)} 条（两条路都空）")
+    for label, text, _, hook, chain in misses:
         print(f"  · {text}   skip_reason={hook.get('skip_reason') or '(无)'} "
               f"sentinel_reason={hook.get('sentinel_reason') or '(空·规则模式下正常)'} "
               f"domains={hook.get('domains')}")
+        if not args.skip_messages:
+            print(f"      链路 skip_reason={chain.get('skip_reason') or '(无)'} "
+                  f"date_recall: status={chain.get('date_status') or '-'} "
+                  f"skip={chain.get('date_skip') or '-'} "
+                  f"label={chain.get('date_label') or '-'}")
+    if misses:
+        # skip_reason 是唯一能区分这两种情况的字段：
+        #   有值 = 闸拦下了，属于门控问题
+        #   (无) = 闸放行了，是检索捞不到，属于检索/覆盖面问题
+        # ⚠️ 必须两条路都看。上一轮只看 hook 侧，印出「被闸拦下 0 条」，
+        # 而链路侧明明有 low_signal_auto_recall / auto_vague_query，就打印在上面一行。
+        gated = [
+            r for r in misses
+            if r[3].get("skip_reason") or r[4].get("skip_reason")
+        ]
+        print(f"    其中被闸拦下 {len(gated)} 条（任一条路 skip_reason 有值），"
+              f"闸放行但检索空 {len(misses) - len(gated)} 条")
     if extras:
         print(f"对照组多余召回: {len(extras)} 条（不一定是问题，看内容是否离题）")
-        for _, text, _, _, _ in extras:
-            print(f"  · {text}")
+        for _, text, _, hook, chain in extras:
+            print(f"  · {text}   hook={hook['cards']} 条  链路={chain['cards']} 条 "
+                  f"{chain.get('ids') or ''}")
 
     if not args.skip_messages:
-        both = [r for r in rows if r[3]["ok"] and r[4]["ok"] and r[4]["chars"] >= 0]
+        both = [r for r in rows if r[3]["ok"] and r[4]["ok"] and r[4]["cards"] >= 0]
         if both:
             print()
-            print("两条路的规模对比（字数，不代表内容相同）:")
+            print("链路侧召回来源分布（哪个子系统出的内容）:")
             for label, text, _, hook, chain in both:
-                ratio = "-" if chain["chars"] == 0 else f"{hook['chars'] / chain['chars']:.2f}x"
-                print(f"  {label:<16} hook={hook['chars']:>6}  链路={chain['chars']:>6}  比值={ratio}  {text[:26]}")
+                src = chain.get("ids") or {}
+                fields = chain.get("parts") or {}
+                summary = ", ".join(f"{k}={v}" for k, v in src.items()) or "无"
+                field_summary = ", ".join(f"{k}:{v}字" for k, v in fields.items()) or "无正文"
+                print(f"  {label:<16} {text[:22]}")
+                print(f"      id: {summary}")
+                print(f"      正文: {field_summary}")
 
     if args.verbose:
         print()

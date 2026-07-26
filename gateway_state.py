@@ -179,6 +179,8 @@ class GatewayStateStore:
         # memory_entries / dirs 存 JSON 数组；engine 取值 subscription | api | selfhost。
         # dirs = 这个协作者能读哪些目录（第一个当 cwd，其余作附加目录）。
         # 空数组 = 用前端那边的默认值，不是「什么都不能读」。
+        # write_dirs = 能**改**哪些目录里的文件（第 5 步加）。规则跟 dirs 相反：
+        # 空数组 = 一个文件都不能改。读错了只是浪费钱，写错了会把文件改坏。
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS cc_personas (
@@ -192,6 +194,7 @@ class GatewayStateStore:
                 prompt TEXT NOT NULL DEFAULT '',
                 memory_entries TEXT NOT NULL DEFAULT '[]',
                 dirs TEXT NOT NULL DEFAULT '[]',
+                write_dirs TEXT NOT NULL DEFAULT '[]',
                 recall_on INTEGER NOT NULL DEFAULT 1,
                 semantic_on INTEGER NOT NULL DEFAULT 1,
                 engine TEXT NOT NULL DEFAULT 'api',
@@ -201,11 +204,14 @@ class GatewayStateStore:
             )
             """
         )
-        # cc_personas 建表时（4.5b 第一版）没有 dirs，已经落过库的要补上。
+        # cc_personas 建表时（4.5b 第一版）没有 dirs / write_dirs，已经落过库的要补上。
         self._ensure_columns(
             conn,
             "cc_personas",
-            {"dirs": "TEXT NOT NULL DEFAULT '[]'"},
+            {
+                "dirs": "TEXT NOT NULL DEFAULT '[]'",
+                "write_dirs": "TEXT NOT NULL DEFAULT '[]'",
+            },
         )
         conn.commit()
         conn.close()
@@ -261,8 +267,11 @@ class GatewayStateStore:
     def _cc_persona_row_to_dict(cls, row: sqlite3.Row) -> dict[str, Any]:
         keys = row.keys()
         entries = cls._cc_persona_json_list(row["memory_entries"])
-        # dirs 是后加的列，老库补列前读到的 row 里可能没有
+        # dirs / write_dirs 是后加的列，老库补列前读到的 row 里可能没有
         dirs = cls._cc_persona_json_list(row["dirs"]) if "dirs" in keys else []
+        write_dirs = (
+            cls._cc_persona_json_list(row["write_dirs"]) if "write_dirs" in keys else []
+        )
         return {
             "id": str(row["id"]),
             "name": row["name"] or "",
@@ -274,6 +283,7 @@ class GatewayStateStore:
             "prompt": row["prompt"] or "",
             "memory_entries": entries,
             "dirs": dirs,
+            "write_dirs": write_dirs,
             "recall_on": bool(row["recall_on"]),
             "semantic_on": bool(row["semantic_on"]),
             "engine": row["engine"] or "api",
@@ -337,12 +347,16 @@ class GatewayStateStore:
                 ]
             else:
                 merged["memory_entries"] = []
-        if "dirs" in persona:
-            raw_dirs = persona.get("dirs")
+        for dir_field in ("dirs", "write_dirs"):
+            if dir_field not in persona:
+                continue
+            raw_dirs = persona.get(dir_field)
             if isinstance(raw_dirs, list):
-                merged["dirs"] = [str(item).strip() for item in raw_dirs if str(item).strip()]
+                merged[dir_field] = [
+                    str(item).strip() for item in raw_dirs if str(item).strip()
+                ]
             else:
-                merged["dirs"] = []
+                merged[dir_field] = []
 
         merged.setdefault("recall_on", True)
         merged.setdefault("semantic_on", True)
@@ -350,6 +364,7 @@ class GatewayStateStore:
         merged.setdefault("sort_order", 0)
         merged.setdefault("memory_entries", [])
         merged.setdefault("dirs", [])
+        merged.setdefault("write_dirs", [])
         for field in self._CC_PERSONA_TEXT_FIELDS:
             merged.setdefault(field, "")
 
@@ -358,9 +373,9 @@ class GatewayStateStore:
             """
             INSERT OR REPLACE INTO cc_personas
             (id, name, initial, tint, user_name, purpose, description, prompt,
-             memory_entries, dirs, recall_on, semantic_on, engine, sort_order,
+             memory_entries, dirs, write_dirs, recall_on, semantic_on, engine, sort_order,
              created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 safe_id,
@@ -373,6 +388,7 @@ class GatewayStateStore:
                 merged["prompt"],
                 json.dumps(merged["memory_entries"], ensure_ascii=False),
                 json.dumps(merged["dirs"], ensure_ascii=False),
+                json.dumps(merged["write_dirs"], ensure_ascii=False),
                 1 if merged["recall_on"] else 0,
                 1 if merged["semantic_on"] else 0,
                 merged["engine"] or "api",

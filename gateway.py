@@ -2801,6 +2801,58 @@ class GatewayService:
             }
         )
 
+    # ------------------------------------------------------------------
+    # cc 前端协作者配置（4.5b）
+    # 存这里而不是浏览器，是为了所有入口（电脑 / 手机 / 以后的自建引擎）读同一份。
+    # ------------------------------------------------------------------
+
+    async def handle_cc_personas_list(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        personas = self.state_store.list_cc_personas()
+        return JSONResponse({"ok": True, "count": len(personas), "personas": personas})
+
+    async def handle_cc_personas_save(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid persona payload"}, status_code=400)
+
+        persona_id = str(body.get("id") or "").strip()
+        if not persona_id:
+            return JSONResponse({"error": "id is required"}, status_code=400)
+
+        saved = self.state_store.save_cc_persona(body)
+        if saved is None:
+            return JSONResponse({"error": "save failed"}, status_code=500)
+        return JSONResponse({"ok": True, "persona": saved})
+
+    async def handle_cc_personas_delete(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+
+        persona_id = str(request.query_params.get("id", "") or "").strip()
+        if not persona_id:
+            try:
+                body = await request.json()
+            except Exception:
+                body = None
+            if isinstance(body, dict):
+                persona_id = str(body.get("id") or "").strip()
+        if not persona_id:
+            return JSONResponse({"error": "id is required"}, status_code=400)
+
+        deleted = self.state_store.delete_cc_persona(persona_id)
+        return JSONResponse({"ok": True, "deleted": deleted, "id": persona_id})
+
     async def _list_gateway_buckets(self, *, include_archive: bool = False) -> list[dict]:
         ttl = self.bucket_list_cache_ttl_seconds
         key = bool(include_archive)
@@ -20902,6 +20954,14 @@ def create_gateway_app(
     async def conversation_turns(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_conversation_turns(request)
 
+    async def cc_personas(request: Request) -> Response:
+        service = request.app.state.gateway_service
+        if request.method == "POST":
+            return await service.handle_cc_personas_save(request)
+        if request.method == "DELETE":
+            return await service.handle_cc_personas_delete(request)
+        return await service.handle_cc_personas_list(request)
+
     app = Starlette(
         debug=False,
         routes=[
@@ -20916,6 +20976,7 @@ def create_gateway_app(
             Route("/api/conversation/turn", conversation_turn, methods=["POST"]),
             Route("/api/conversation/sessions", conversation_sessions, methods=["GET"]),
             Route("/api/conversation/turns", conversation_turns, methods=["GET"]),
+            Route("/api/cc/personas", cc_personas, methods=["GET", "POST", "DELETE"]),
             Route("/v1/models", models, methods=["GET"]),
             Route("/v1/chat/completions", chat_completions, methods=["POST"]),
             Route("/v1/messages", anthropic_messages, methods=["POST"]),

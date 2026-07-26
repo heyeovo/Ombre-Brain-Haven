@@ -174,6 +174,30 @@ class GatewayStateStore:
             )
             """
         )
+        # cc 前端的协作者配置（4.5b）。存这里而不是浏览器 localStorage，
+        # 是为了避免 Polaris 那个「手机和 PC 两份数据」的坑 —— 所有入口读同一份。
+        # memory_entries 存 JSON 数组；engine 取值 subscription | api | selfhost。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cc_personas (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL DEFAULT '',
+                initial TEXT NOT NULL DEFAULT '',
+                tint TEXT NOT NULL DEFAULT '',
+                user_name TEXT NOT NULL DEFAULT '',
+                purpose TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                prompt TEXT NOT NULL DEFAULT '',
+                memory_entries TEXT NOT NULL DEFAULT '[]',
+                recall_on INTEGER NOT NULL DEFAULT 1,
+                semantic_on INTEGER NOT NULL DEFAULT 1,
+                engine TEXT NOT NULL DEFAULT 'api',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
         conn.commit()
         conn.close()
 
@@ -197,6 +221,153 @@ class GatewayStateStore:
         if row:
             return str(row[0])
         return None
+
+    # ------------------------------------------------------------------
+    # cc 前端协作者配置（4.5b）
+    # ------------------------------------------------------------------
+
+    _CC_PERSONA_TEXT_FIELDS = (
+        "name",
+        "initial",
+        "tint",
+        "user_name",
+        "purpose",
+        "description",
+        "prompt",
+        "engine",
+    )
+
+    @staticmethod
+    def _cc_persona_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            entries = json.loads(row["memory_entries"] or "[]")
+        except (TypeError, ValueError):
+            entries = []
+        if not isinstance(entries, list):
+            entries = []
+        return {
+            "id": str(row["id"]),
+            "name": row["name"] or "",
+            "initial": row["initial"] or "",
+            "tint": row["tint"] or "",
+            "user_name": row["user_name"] or "",
+            "purpose": row["purpose"] or "",
+            "description": row["description"] or "",
+            "prompt": row["prompt"] or "",
+            "memory_entries": [str(item) for item in entries if str(item).strip()],
+            "recall_on": bool(row["recall_on"]),
+            "semantic_on": bool(row["semantic_on"]),
+            "engine": row["engine"] or "api",
+            "sort_order": int(row["sort_order"] or 0),
+            "created_at": row["created_at"] or "",
+            "updated_at": row["updated_at"] or "",
+        }
+
+    def list_cc_personas(self) -> list[dict[str, Any]]:
+        conn = self._connect()
+        rows = conn.execute(
+            """
+            SELECT * FROM cc_personas
+            ORDER BY sort_order ASC, created_at ASC, id ASC
+            """
+        ).fetchall()
+        conn.close()
+        return [self._cc_persona_row_to_dict(row) for row in rows]
+
+    def get_cc_persona(self, persona_id: str) -> dict[str, Any] | None:
+        safe_id = str(persona_id or "").strip()
+        if not safe_id:
+            return None
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT * FROM cc_personas WHERE id = ?", (safe_id,)
+        ).fetchone()
+        conn.close()
+        return self._cc_persona_row_to_dict(row) if row else None
+
+    def save_cc_persona(self, persona: dict[str, Any]) -> dict[str, Any] | None:
+        """
+        upsert 一个协作者。已存在时只更新 payload 里出现的字段（PATCH 语义），
+        没出现的保持原值 —— 界面按 tab 分开保存，不能因为某个 tab 没送就把别的清空。
+        """
+        from utils import now_iso
+
+        safe_id = str(persona.get("id") or "").strip()
+        if not safe_id:
+            return None
+        existing = self.get_cc_persona(safe_id)
+        now = now_iso()
+
+        merged: dict[str, Any] = dict(existing or {})
+        for field in self._CC_PERSONA_TEXT_FIELDS:
+            if field in persona:
+                merged[field] = str(persona.get(field) or "")
+        for field in ("recall_on", "semantic_on"):
+            if field in persona:
+                merged[field] = bool(persona.get(field))
+        if "sort_order" in persona:
+            try:
+                merged["sort_order"] = int(persona.get("sort_order") or 0)
+            except (TypeError, ValueError):
+                merged["sort_order"] = 0
+        if "memory_entries" in persona:
+            raw_entries = persona.get("memory_entries")
+            if isinstance(raw_entries, list):
+                merged["memory_entries"] = [
+                    str(item).strip() for item in raw_entries if str(item).strip()
+                ]
+            else:
+                merged["memory_entries"] = []
+
+        merged.setdefault("recall_on", True)
+        merged.setdefault("semantic_on", True)
+        merged.setdefault("engine", "api")
+        merged.setdefault("sort_order", 0)
+        merged.setdefault("memory_entries", [])
+        for field in self._CC_PERSONA_TEXT_FIELDS:
+            merged.setdefault(field, "")
+
+        conn = self._connect()
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO cc_personas
+            (id, name, initial, tint, user_name, purpose, description, prompt,
+             memory_entries, recall_on, semantic_on, engine, sort_order,
+             created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                safe_id,
+                merged["name"],
+                merged["initial"],
+                merged["tint"],
+                merged["user_name"],
+                merged["purpose"],
+                merged["description"],
+                merged["prompt"],
+                json.dumps(merged["memory_entries"], ensure_ascii=False),
+                1 if merged["recall_on"] else 0,
+                1 if merged["semantic_on"] else 0,
+                merged["engine"] or "api",
+                int(merged["sort_order"] or 0),
+                (existing or {}).get("created_at") or now,
+                now,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return self.get_cc_persona(safe_id)
+
+    def delete_cc_persona(self, persona_id: str) -> bool:
+        safe_id = str(persona_id or "").strip()
+        if not safe_id:
+            return False
+        conn = self._connect()
+        cursor = conn.execute("DELETE FROM cc_personas WHERE id = ?", (safe_id,))
+        deleted = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return deleted
 
     def record_success(
         self,

@@ -2384,6 +2384,13 @@ class GatewayService:
             "false",
             "no",
         }
+        # date_recall 默认开：hook 那条路以前完全没有这块能力，
+        # 「昨天我们聊了什么」全靠它。要关就显式传 0。
+        allow_date_recall = str(body.get("allow_date_recall", "1")).strip().lower() not in {
+            "0",
+            "false",
+            "no",
+        }
         include_context_debug = str(body.get("include_context", "0")).strip().lower() in {
             "1",
             "true",
@@ -2408,7 +2415,7 @@ class GatewayService:
         )
 
         try:
-            cards, recalled_ids, debug_payload = await self._hook_recall_fast_cards(
+            cards, recalled_ids, debug_payload, date_recall_text = await self._hook_recall_fast_cards(
                 query,
                 session_id,
                 max_cards=max_cards,
@@ -2418,6 +2425,7 @@ class GatewayService:
                 allow_query_planner=allow_query_planner,
                 allow_semantic_session_dedupe=allow_semantic_session_dedupe,
                 allow_rerank=allow_rerank,
+                allow_date_recall=allow_date_recall,
             )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
@@ -2438,8 +2446,10 @@ class GatewayService:
             "session_id": session_id,
             "cards": cards,
             "notes": cards,
-            "additional_context": self._render_hook_recall_additional_context(cards),
+            "additional_context": self._render_hook_recall_additional_context(cards, date_recall_text),
             "recalled_ids": list(recalled_ids or []),
+            "date_recall": date_recall_text,
+            "date_recall_chars": len(date_recall_text or ""),
             "debug": minimal_debug,
         }
         if include_debug:
@@ -18798,13 +18808,40 @@ class GatewayService:
         allow_query_planner: bool,
         allow_semantic_session_dedupe: bool,
         allow_rerank: bool,
-    ) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
+        allow_date_recall: bool = True,
+    ) -> tuple[list[dict[str, Any]], list[str], dict[str, Any], str]:
         memory_sentinel_debug = self._memory_sentinel_debug_base(query)
         memory_sentinel_debug["searchable_residue_terms"] = self._memory_sentinel_searchable_residue_terms(query)
         query_planner_debug = self._query_planner_debug_base(query)
         domain_sentinel_debug = await self._route_domain_sentinel(query)
+
+        # date_recall 走独立通道：不受桶检索的准入闸影响，也不替换桶检索的结果。
+        # 「昨天我们聊了什么」这类问题 BM25 搜不到（记忆正文写的是绝对日期），
+        # 只能靠这一段按时间范围直接捞当天原始对话。
+        all_buckets: list[dict] | None = None
+        date_recall_text = ""
+        date_recall_debug: dict[str, Any] = self._date_recall_debug_base(query)
+        date_recall_requested = bool(
+            allow_date_recall
+            and self.date_recall_enabled
+            and self._query_requests_date_recall(query)
+        )
+        if date_recall_requested:
+            all_buckets = await self._list_gateway_buckets(include_archive=False)
+            date_recall_text, date_recall_debug, _ = self._build_date_recall_context(query, all_buckets)
+
+        def finish(
+            cards: list[dict[str, Any]],
+            recalled_ids: list[str],
+            debug: dict[str, Any],
+        ) -> tuple[list[dict[str, Any]], list[str], dict[str, Any], str]:
+            debug["date_recall"] = date_recall_text
+            debug["date_recall_debug"] = date_recall_debug
+            debug["date_recall_requested"] = date_recall_requested
+            return cards, recalled_ids, debug, date_recall_text
+
         if max_cards <= 0:
-            return [], [], {
+            return finish([], [], {
                 "query_preview": self._clip_text(query, 500),
                 "domain_sentinel_debug": domain_sentinel_debug,
                 "query_planner_debug": query_planner_debug,
@@ -18813,11 +18850,11 @@ class GatewayService:
                 "recalled_moment_debug": [],
                 "diffused_moment_debug": [],
                 "hook_recall_debug": {"mode": "fast", "skip_reason": "max_cards_zero"},
-            }
+            })
         query_plan = self._recall_query_plan(query)
         if getattr(query_plan, "skip_reason", "") == "recall_meta_without_target":
             query_planner_debug["skip_reason"] = "recall_meta_without_target"
-            return [], [], {
+            return finish([], [], {
                 "query_preview": self._clip_text(query, 500),
                 "domain_sentinel_debug": domain_sentinel_debug,
                 "query_planner_debug": query_planner_debug,
@@ -18835,14 +18872,15 @@ class GatewayService:
                     "skip_reason": query_planner_debug["skip_reason"],
                     "candidate_count": 0,
                 },
-            }
+            })
 
-        all_buckets = await self._list_gateway_buckets(include_archive=False)
+        if all_buckets is None:
+            all_buckets = await self._list_gateway_buckets(include_archive=False)
         domain_query = str(domain_sentinel_debug.get("query") or "").strip()
         if self._domain_sentinel_should_skip_recall(domain_sentinel_debug, query):
             domain_sentinel_debug["skip_applied"] = True
             query_planner_debug["skip_reason"] = "domain_sentinel_skip"
-            return [], [], {
+            return finish([], [], {
                 "query_preview": self._clip_text(query, 500),
                 "domain_sentinel_debug": domain_sentinel_debug,
                 "query_planner_debug": query_planner_debug,
@@ -18861,7 +18899,7 @@ class GatewayService:
                     "domain_query": domain_query,
                     "candidate_count": 0,
                 },
-            }
+            })
         search_query = self._dynamic_recall_search_query(domain_query or query, memory_sentinel_debug)
         selected_buckets, suppressed_buckets, query_planner_debug = await self._select_dynamic_buckets(
             query,
@@ -18928,7 +18966,7 @@ class GatewayService:
                 "candidate_count": len(selected_buckets or []) + len(suppressed_buckets or []),
             },
         }
-        return cards, recalled_ids, debug_payload
+        return finish(cards, recalled_ids, debug_payload)
 
     def _hook_recall_card_from_bucket(
         self,
@@ -19282,8 +19320,14 @@ class GatewayService:
         }
 
     @staticmethod
-    def _render_hook_recall_additional_context(cards: list[dict[str, Any]]) -> str:
-        if not cards:
+    def _render_hook_recall_additional_context(
+        cards: list[dict[str, Any]],
+        date_recall: str = "",
+    ) -> str:
+        # date_recall 单独一段：它是当天对话原文，换行有意义，
+        # 不能当 memory_card 塞进去（卡片文本会被压成一行）。
+        date_block = str(date_recall or "").strip()
+        if not cards and not date_block:
             return ""
         how_to_apply = GatewayService._hook_recall_how_to_apply()
         parts = [
@@ -19291,6 +19335,10 @@ class GatewayService:
             "Retrieved memory notes. Treat them as private context.",
             f"how_to_apply: {how_to_apply}",
         ]
+        if date_block:
+            parts.append("[date_recall]")
+            parts.extend(date_block.splitlines())
+            parts.append("[/date_recall]")
         for card in cards:
             text = str(card.get("text") or "").strip()
             parts.extend(

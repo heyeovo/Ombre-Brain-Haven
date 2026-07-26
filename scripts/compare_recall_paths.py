@@ -20,9 +20,11 @@ domain_sentinel 门控。这个脚本用同一批句子分别打两条路，输�
 每个用例只跑一次。加 --skip-messages 可以完全不产生上游费用。
 
 ⚠️ 看结果前必须知道这四个坑（都踩过，2026-07-26）：
-  1. hook **没有 date_recall 子系统**（按日期捞当天原始对话），它只挂在
-     prepare_payload（gateway.py:2821）。所以「昨天/前天」这类相对日期用例
-     在 --skip-messages 下必然 0 条，要看链路那一列才验得到。
+  1. hook **现在有 date_recall 了**（2026-07-26 接上，见 _hook_recall_fast_cards
+     开头）。所以「昨天/前天」这类相对日期用例在 --skip-messages 下也能验，
+     不用再去掉它看链路那一列。但注意 date_recall **不产卡** —— 它是
+     additional_context 里独立的 [date_recall] 段，本脚本按 date_recall_chars
+     补算 1 条，否则会误报 MISS。
   2. hook 默认 allow_semantic=false，只做关键词匹配。本脚本默认帮你开着
      （单次 4-6s），--no-semantic 可以关掉复现默认行为。
   3. **判定看条数，不看字数。** dynamic_context 是注入总壳，一条记忆都没
@@ -216,11 +218,24 @@ def probe_hook(
     # 不代表被门控拦了。真正的跳过理由在 query_planner_debug.skip_reason。
     planner = debug.get("query_planner_debug") or {}
     hook_debug = debug.get("hook_recall_debug") or {}
+    # date_recall（2026-07-26 接到 hook 路径上）捞的是当天原始对话，**不产卡** ——
+    # 它在 additional_context 里是独立的 [date_recall] 段，不走 memory_card。
+    # 所以只数 cards 会把已经注入 800+ 字对话原文的「昨天我们聊了什么」判成 MISS。
+    # date_recall_chars 是纯正文长度，不含 [Ombre Gateway Hook Recall] 那三行框架，
+    # 可以放心当命中信号用（框架文字污染的是 chars，不是这个字段）。
+    date_dbg = debug.get("date_recall_debug") or {}
+    date_chars = int(payload.get("date_recall_chars") or 0)
+    date_cards = 1 if date_chars > 0 else 0
     return {
         "ok": True,
         "error": "",
         "chars": len(context),
-        "cards": len(payload.get("cards") or []),
+        "cards": len(payload.get("cards") or []) + date_cards,
+        "bucket_cards": len(payload.get("cards") or []),
+        "date_chars": date_chars,
+        "date_status": str(date_dbg.get("status") or ""),
+        "date_skip": str(date_dbg.get("skip_reason") or ""),
+        "date_label": str(date_dbg.get("label") or ""),
         "elapsed": elapsed,
         "context": context,
         "domains": list(debug.get("domains") or []),
@@ -444,9 +459,9 @@ def main() -> int:
         print(f"链路热身轮: {'开（每条用例先发一句「在吗」）' if args.warmup else '关'}")
     print("判定看**召回条数**，不看字数（字数含注入框架文字，空手也有 200+ 字）")
     if args.skip_messages:
-        print("⚠️  只测 hook。hook 这条路没有 date_recall 子系统（它只挂在 prepare_payload，")
-        print("   见 gateway.py:2821），所以「昨天/前天」这类相对日期用例在 hook 上 0 字是")
-        print("   预期，要去掉 --skip-messages 看链路那一列才验得到。")
+        print("ℹ️  只测 hook。hook 自 2026-07-26 起也有 date_recall（按日期捞当天原始对话），")
+        print("   所以「昨天/前天」这类相对日期用例这一列就能验，不用去掉 --skip-messages。")
+        print("   date_recall 不产卡，本脚本按 date_recall_chars 补算 1 条（hook条数列的 +日 标记）。")
     print()
 
     header = f"{'分类':<16} {'期望':<5} {'hook条数':>9} {'链路条/字':>11}  {'判定':<10} 句子"
@@ -475,7 +490,11 @@ def main() -> int:
             f"{label:<16} {'要':<5} " if expect else f"{label:<16} {'不要':<4} ",
             end="",
         )
+        # 「+日」= 这一条里有 date_recall 段（它不产卡，条数是脚本补算的），
+        # 免得看到 1/885 以为是桶检索出的卡
         hook_display = f"{hook['cards']}/{hook['chars']}"
+        if hook.get("date_chars"):
+            hook_display += "+日"
         print(f"{hook_display:>9} {chain_display:>11}  {mark:<10} {text[:34]}")
         if hook.get("error"):
             print(f"{'':<16} hook 错误: {hook['error']}")
@@ -484,8 +503,9 @@ def main() -> int:
         rows.append((label, text, expect, hook, chain))
 
     print()
-    # 两条路都空才算真 MISS。hook 空但链路有内容不算 —— hook 能力本来就少
-    # （没有 date_recall），只看 hook 会把"链路其实召回了"误报成漏召回。
+    # 两条路都空才算真 MISS。保留"任一条路有内容就不算漏"这个口径：
+    # 两条路的 date_recall 触发条件相同，但桶检索那一侧仍有差别（默认开关、
+    # 替换 vs 并存），只看 hook 还是可能把"链路其实召回了"误报成漏召回。
     def both_empty(hook: dict, chain: dict) -> bool:
         if not hook["ok"] or hook["cards"] != 0:
             return False
@@ -500,6 +520,11 @@ def main() -> int:
         print(f"  · {text}   skip_reason={hook.get('skip_reason') or '(无)'} "
               f"sentinel_reason={hook.get('sentinel_reason') or '(空·规则模式下正常)'} "
               f"domains={hook.get('domains')}")
+        # 相对日期用例返空时，date_recall_debug 才说得清是没触发还是那天没数据
+        if hook.get("date_status") or hook.get("date_skip"):
+            print(f"      hook date_recall: status={hook.get('date_status') or '-'} "
+                  f"skip={hook.get('date_skip') or '-'} "
+                  f"label={hook.get('date_label') or '-'}")
         if not args.skip_messages:
             print(f"      链路 skip_reason={chain.get('skip_reason') or '(无)'} "
                   f"date_recall: status={chain.get('date_status') or '-'} "

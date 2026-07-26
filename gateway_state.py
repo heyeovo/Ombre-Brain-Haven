@@ -176,7 +176,9 @@ class GatewayStateStore:
         )
         # cc 前端的协作者配置（4.5b）。存这里而不是浏览器 localStorage，
         # 是为了避免 Polaris 那个「手机和 PC 两份数据」的坑 —— 所有入口读同一份。
-        # memory_entries 存 JSON 数组；engine 取值 subscription | api | selfhost。
+        # memory_entries / dirs 存 JSON 数组；engine 取值 subscription | api | selfhost。
+        # dirs = 这个协作者能读哪些目录（第一个当 cwd，其余作附加目录）。
+        # 空数组 = 用前端那边的默认值，不是「什么都不能读」。
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS cc_personas (
@@ -189,6 +191,7 @@ class GatewayStateStore:
                 description TEXT NOT NULL DEFAULT '',
                 prompt TEXT NOT NULL DEFAULT '',
                 memory_entries TEXT NOT NULL DEFAULT '[]',
+                dirs TEXT NOT NULL DEFAULT '[]',
                 recall_on INTEGER NOT NULL DEFAULT 1,
                 semantic_on INTEGER NOT NULL DEFAULT 1,
                 engine TEXT NOT NULL DEFAULT 'api',
@@ -197,6 +200,12 @@ class GatewayStateStore:
                 updated_at TEXT NOT NULL DEFAULT ''
             )
             """
+        )
+        # cc_personas 建表时（4.5b 第一版）没有 dirs，已经落过库的要补上。
+        self._ensure_columns(
+            conn,
+            "cc_personas",
+            {"dirs": "TEXT NOT NULL DEFAULT '[]'"},
         )
         conn.commit()
         conn.close()
@@ -238,13 +247,22 @@ class GatewayStateStore:
     )
 
     @staticmethod
-    def _cc_persona_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    def _cc_persona_json_list(raw: Any) -> list[str]:
+        """存成 JSON 数组的那两列（memory_entries / dirs）读回来。坏数据当空。"""
         try:
-            entries = json.loads(row["memory_entries"] or "[]")
+            value = json.loads(raw or "[]")
         except (TypeError, ValueError):
-            entries = []
-        if not isinstance(entries, list):
-            entries = []
+            return []
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    @classmethod
+    def _cc_persona_row_to_dict(cls, row: sqlite3.Row) -> dict[str, Any]:
+        keys = row.keys()
+        entries = cls._cc_persona_json_list(row["memory_entries"])
+        # dirs 是后加的列，老库补列前读到的 row 里可能没有
+        dirs = cls._cc_persona_json_list(row["dirs"]) if "dirs" in keys else []
         return {
             "id": str(row["id"]),
             "name": row["name"] or "",
@@ -254,7 +272,8 @@ class GatewayStateStore:
             "purpose": row["purpose"] or "",
             "description": row["description"] or "",
             "prompt": row["prompt"] or "",
-            "memory_entries": [str(item) for item in entries if str(item).strip()],
+            "memory_entries": entries,
+            "dirs": dirs,
             "recall_on": bool(row["recall_on"]),
             "semantic_on": bool(row["semantic_on"]),
             "engine": row["engine"] or "api",
@@ -318,12 +337,19 @@ class GatewayStateStore:
                 ]
             else:
                 merged["memory_entries"] = []
+        if "dirs" in persona:
+            raw_dirs = persona.get("dirs")
+            if isinstance(raw_dirs, list):
+                merged["dirs"] = [str(item).strip() for item in raw_dirs if str(item).strip()]
+            else:
+                merged["dirs"] = []
 
         merged.setdefault("recall_on", True)
         merged.setdefault("semantic_on", True)
         merged.setdefault("engine", "api")
         merged.setdefault("sort_order", 0)
         merged.setdefault("memory_entries", [])
+        merged.setdefault("dirs", [])
         for field in self._CC_PERSONA_TEXT_FIELDS:
             merged.setdefault(field, "")
 
@@ -332,9 +358,9 @@ class GatewayStateStore:
             """
             INSERT OR REPLACE INTO cc_personas
             (id, name, initial, tint, user_name, purpose, description, prompt,
-             memory_entries, recall_on, semantic_on, engine, sort_order,
+             memory_entries, dirs, recall_on, semantic_on, engine, sort_order,
              created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 safe_id,
@@ -346,6 +372,7 @@ class GatewayStateStore:
                 merged["description"],
                 merged["prompt"],
                 json.dumps(merged["memory_entries"], ensure_ascii=False),
+                json.dumps(merged["dirs"], ensure_ascii=False),
                 1 if merged["recall_on"] else 0,
                 1 if merged["semantic_on"] else 0,
                 merged["engine"] or "api",

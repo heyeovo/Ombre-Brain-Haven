@@ -17694,7 +17694,9 @@ class GatewayService:
 
     @staticmethod
     def _clip_text(text: str, max_chars: int) -> str:
-        compact = " ".join(strip_wikilinks(str(text or "")).split())
+        stripped = strip_wikilinks(str(text or "")).strip()
+        compact = re.sub(r"[^\S\n]+", " ", stripped)
+        compact = re.sub(r"\n{3,}", "\n\n", compact)
         if len(compact) <= max_chars:
             return compact
         return compact[:max_chars].rstrip() + "..."

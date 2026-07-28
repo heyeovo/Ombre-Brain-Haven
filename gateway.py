@@ -8368,7 +8368,7 @@ class GatewayService:
                 cleaned = str(cleaner(cleaned) or "").strip()
             except Exception:
                 pass
-        return re.sub(r"\s+", " ", cleaned).strip()
+        return re.sub(r"[^\S\n]+", " ", cleaned).strip()
 
     def _query_date_hint(self, query: str) -> dict[str, str] | None:
         text = str(query or "").strip()

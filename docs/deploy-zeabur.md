@@ -100,6 +100,8 @@ Port: 8000
 OMBRE_TRANSPORT=streamable-http
 OMBRE_BUCKETS_DIR=/data
 OMBRE_STATE_DIR=/state
+OMBRE_RUNTIME_CONFIG_PATH=/state/config.runtime.yaml
+OMBRE_ENV_PATH=/state/.env
 ```
 
 Volumes：
@@ -186,6 +188,11 @@ same config.yaml
    - `reflection`
    - `dream`
 3. 在 Zeabur 里通过文件管理 / 配置编辑 / 启动命令写入 `/app/config.yaml`。
+
+`/app/config.yaml` 是部署时的基础配置。Dashboard 保存的普通配置写入
+`/state/config.runtime.yaml`，密钥写入 `/state/.env`；两者都必须位于 `/state`
+持久卷。启动时平台环境变量优先，持久化 `.env` 只补充平台没有设置的密钥。
+不要把 `/state/.env` 下载、提交到仓库或暴露给浏览器。
 
 如果只能使用环境变量，不方便挂 `config.yaml`，不要硬部署完整二改版。当前配置项太多，全部环境变量化会比 VPS 复杂。
 

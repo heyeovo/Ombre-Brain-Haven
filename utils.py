@@ -11,6 +11,7 @@
 
 import os
 import re
+import json
 import uuid
 import yaml
 import logging
@@ -20,6 +21,40 @@ from zoneinfo import ZoneInfo
 
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _load_env_file(path: str) -> None:
+    """Load a dashboard-managed env file without overriding process env."""
+    env_path = Path(path).expanduser()
+    if not env_path.is_file():
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        logging.warning("Failed to read env file %s: %s", env_path, exc)
+        return
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            continue
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                value = value[1:-1]
+        elif len(value) >= 2 and value[0] == value[-1] == "'":
+            value = value[1:-1]
+        os.environ.setdefault(key, str(value))
 
 
 def _date_hint(year: int, month: int, day: int, label: str, tz=LOCAL_TZ) -> dict[str, str] | None:
@@ -120,9 +155,15 @@ def load_config(config_path: str = None) -> dict:
     Load configuration file.
     加载配置文件。
 
-    Priority: environment variables > config.yaml > built-in defaults.
-    优先级：环境变量 > config.yaml > 内置默认值。
+    Priority: process env > persisted env > runtime YAML > config.yaml > defaults.
+    优先级：进程环境变量 > 持久密钥文件 > 运行时 YAML > config.yaml > 内置默认值。
     """
+    env_path = os.environ.get(
+        "OMBRE_ENV_PATH",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+    )
+    _load_env_file(env_path)
+
     # --- Built-in defaults (fallback so it runs even without config.yaml) ---
     # --- 内置默认配置（兜底，保证即使没有 config.yaml 也能跑）---
     defaults = {

@@ -215,9 +215,12 @@ async def _fire_webhook(event: str, payload: dict) -> None:
 embedding_engine = EmbeddingEngine(config)            # Embedding engine first (BucketManager depends on it)
 bucket_mgr = BucketManager(config, embedding_engine=embedding_engine)  # Bucket manager / 记忆桶管理器
 
-# --- Load runtime scoring overrides from runtime_config.json ---
-# --- 从 runtime_config.json 加载运行时评分覆盖 ---
-_runtime_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runtime_config.json")
+# --- Load runtime scoring overrides from persistent state ---
+# --- 从持久化 state 目录加载运行时评分覆盖 ---
+_runtime_path = os.path.join(
+    config.get("state_dir") or os.path.dirname(os.path.abspath(__file__)),
+    "runtime_config.json",
+)
 if os.path.exists(_runtime_path):
     try:
         with open(_runtime_path, "r", encoding="utf-8") as _f:
@@ -283,7 +286,12 @@ def _split_csv(value: str | None) -> list[str]:
 def _dashboard_env_path() -> str:
     return os.environ.get(
         "OMBRE_ENV_PATH",
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+        os.path.join(
+            os.environ.get("OMBRE_STATE_DIR")
+            or config.get("state_dir")
+            or os.path.dirname(os.path.abspath(__file__)),
+            ".env",
+        ),
     )
 
 
@@ -12575,6 +12583,28 @@ async def api_daily_chat_memory_confirm(request):
     if err:
         return err
 
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    action = str(body.get("action") or "confirm").strip().lower()
+    required = "REJECT" if action == "reject" else "WRITE"
+    if body.get("confirm") != required:
+        return JSONResponse({"error": f"confirmation required: {required}"}, status_code=400)
+    ids = body.get("candidate_ids", [])
+    if not isinstance(ids, list) or not ids:
+        return JSONResponse({"error": "candidate_ids must be a non-empty list"}, status_code=400)
+    result = await reflection_engine.confirm_daily_chat_memory(
+        [str(item or "") for item in ids],
+        bucket_mgr,
+        embedding_engine=embedding_engine,
+        action=action,
+        edits=body.get("edits") if isinstance(body.get("edits"), dict) else None,
+    )
+    return JSONResponse(result)
+
 
 # --- Hit stats & search tracing / 命中统计 & 检索追溯 ---
 @mcp.custom_route("/api/hit-stats", methods=["GET"])
@@ -12645,45 +12675,26 @@ async def api_set_scoring_config(request):
         return JSONResponse({"error": "invalid json body"}, status_code=400)
     if not isinstance(body, dict):
         return JSONResponse({"error": "json body must be an object"}, status_code=400)
-    action = str(body.get("action") or "confirm").strip().lower()
-    required = "REJECT" if action == "reject" else "WRITE"
-    if body.get("confirm") != required:
-        return JSONResponse({"error": f"confirmation required: {required}"}, status_code=400)
-    ids = body.get("candidate_ids", [])
-    if not isinstance(ids, list) or not ids:
-        return JSONResponse({"error": "candidate_ids must be a non-empty list"}, status_code=400)
-    result = await reflection_engine.confirm_daily_chat_memory(
-        [str(item or "") for item in ids],
-        bucket_mgr,
-        embedding_engine=embedding_engine,
-        action=action,
-        edits=body.get("edits") if isinstance(body.get("edits"), dict) else None,
-    )
-    return JSONResponse(result)
 
-
-
-
-    # Persist to runtime_config.json
-    import json as _json
-    import os as _os
-    rt_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "runtime_config.json")
+    # Persist to the same state-backed file loaded at startup.
+    rt_path = _runtime_path
     rt = {}
     try:
-        if _os.path.exists(rt_path):
+        if os.path.exists(rt_path):
             with open(rt_path, "r", encoding="utf-8") as f:
-                rt = _json.load(f) or {}
+                rt = json.load(f) or {}
     except Exception:
         pass
     rt["scoring"] = dict(rt.get("scoring", {}))
     for k, v in body.items():
         if k in bucket_mgr.SCORING_OVERRIDE_DEFAULTS:
             rt["scoring"][k] = v
+    os.makedirs(os.path.dirname(rt_path), exist_ok=True)
     try:
         with open(rt_path, "w", encoding="utf-8") as f:
-            _json.dump(rt, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+            json.dump(rt, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        return JSONResponse({"error": f"scoring persist failed: {e}"}, status_code=500)
     bucket_mgr.apply_runtime_scoring_overrides(body)
     return JSONResponse({"ok": True, "current": bucket_mgr.current_scoring_overrides()})
 
@@ -12692,112 +12703,26 @@ async def api_set_scoring_config(request):
 async def api_reset_scoring_config(request):
     """Reset scoring knobs to defaults."""
     from starlette.responses import JSONResponse
-    import json as _json
-    import os as _os
     err = _require_dashboard_auth(request)
     if err: return err
-    rt_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "runtime_config.json")
+    rt_path = _runtime_path
     try:
-        if _os.path.exists(rt_path):
+        if os.path.exists(rt_path):
             rt = {}
             try:
                 with open(rt_path, "r", encoding="utf-8") as f:
-                    rt = _json.load(f) or {}
+                    rt = json.load(f) or {}
             except Exception:
                 pass
             rt.pop("scoring", None)
+            os.makedirs(os.path.dirname(rt_path), exist_ok=True)
             with open(rt_path, "w", encoding="utf-8") as f:
-                _json.dump(rt, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+                json.dump(rt, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        return JSONResponse({"error": f"scoring reset persist failed: {e}"}, status_code=500)
     bucket_mgr.apply_runtime_scoring_overrides(dict(bucket_mgr.SCORING_OVERRIDE_DEFAULTS))
     return JSONResponse({"ok": True, "current": bucket_mgr.current_scoring_overrides()})
 
-
-@mcp.custom_route("/api/config", methods=["GET"])
-async def api_get_config(request):
-    from starlette.responses import JSONResponse
-    err = _require_dashboard_auth(request)
-    if err: return err
-    # Return full Gateway config when available (dashboard.html config tabs)
-    gws = _resolve_gateway_config_service()
-    if gws:
-        cfg = gws.config
-        return JSONResponse({
-            "gateway": gws._gateway_memory_config_payload(),
-            "memory_diffusion": gws._memory_diffusion_config_payload(),
-            "reranker": gws._reranker_config_payload(),
-            "persona": gws._persona_config_payload(),
-            "dream": gws._dream_config_payload(),
-            "dehydration": {
-                **{k: v for k, v in cfg.get("dehydration", {}).items() if k != "api_key"},
-                "api_key_masked": "***" if cfg.get("dehydration", {}).get("api_key") else "",
-            },
-            "embedding": {
-                "enabled": bool(cfg.get("embedding", {}).get("enabled")),
-                "model": cfg.get("embedding", {}).get("model", ""),
-                "base_url": cfg.get("embedding", {}).get("base_url", ""),
-                "has_own_api_key": bool(cfg.get("embedding", {}).get("api_key")),
-                "api_key_masked": "***" if cfg.get("embedding", {}).get("api_key") else "",
-            },
-            "merge_threshold": cfg.get("merge_threshold", 90),
-            "fuzzy_threshold": bucket_mgr.fuzzy_threshold,
-            "max_results": bucket_mgr.max_results,
-        })
-    return JSONResponse({
-        "fuzzy_threshold": bucket_mgr.fuzzy_threshold,
-        "max_results": bucket_mgr.max_results,
-    })
-
-@mcp.custom_route("/api/config", methods=["POST"])
-async def api_update_config(request):
-    from starlette.responses import JSONResponse
-    err = _require_dashboard_auth(request)
-    if err: return err
-    gws = _resolve_gateway_config_service()
-    if gws:
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse({"error": "invalid JSON"}, status_code=400)
-        if not isinstance(body, dict):
-            return JSONResponse({"error": "invalid config"}, status_code=400)
-        # Apply each config section through gateway service
-        updated: list[str] = []
-        if isinstance(body.get("dehydration"), dict):
-            updated.extend(gws._apply_dehydration_config(body["dehydration"]))
-        if isinstance(body.get("reranker"), dict):
-            updated.extend(gws._apply_reranker_config(body["reranker"]))
-        if isinstance(body.get("memory_diffusion"), dict):
-            updated.extend(gws._apply_memory_diffusion_config(body["memory_diffusion"]))
-        if isinstance(body.get("persona"), dict):
-            updated.extend(gws._apply_persona_config(body["persona"]))
-        if isinstance(body.get("dream"), dict):
-            updated.extend(gws._apply_dream_config(body["dream"]))
-        if isinstance(body.get("gateway"), dict):
-            updated.extend(gws._apply_gateway_memory_config(body["gateway"]))
-        if updated:
-            gws._save_gateway_runtime_config()
-        return JSONResponse({
-            "ok": True,
-            "updated": updated,
-            "gateway": gws._gateway_memory_config_payload(),
-            "dehydration": gws.config.get("dehydration", {}),
-            "reranker": gws.config.get("reranker", {}),
-            "memory_diffusion": gws.config.get("memory_diffusion", {}),
-            "persona": gws.config.get("persona", {}),
-            "dream": gws.config.get("dream", {}),
-        })
-    # Fallback: simple config (fuzzy_threshold only)
-    try:
-        body = await request.json()
-        if "fuzzy_threshold" in body:
-            val = int(body["fuzzy_threshold"])
-            if 0 <= val <= 100:
-                bucket_mgr.fuzzy_threshold = val
-        return JSONResponse({"ok": True, "fuzzy_threshold": bucket_mgr.fuzzy_threshold})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
 
 @mcp.custom_route("/api/gateway-injections", methods=["GET"])
 async def api_gateway_injections(request):
@@ -13934,15 +13859,15 @@ async def api_config_update(request):
     if hot_update_status:
         updated.append(hot_update_status)
 
-    # --- Persist to config.yaml if requested ---
+    # --- Persist non-secret settings to the state-backed runtime overlay ---
     if body.get("persist", False):
-        config_path = os.environ.get(
-            "OMBRE_CONFIG_PATH",
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml"),
-        )
         runtime_config_path = config.get("_runtime_config_path") or os.environ.get("OMBRE_RUNTIME_CONFIG_PATH", "")
         if not runtime_config_path:
-            runtime_config_path = os.path.join(config.get("state_dir") or os.path.dirname(config_path), "config.runtime.yaml")
+            runtime_config_path = os.path.join(
+                config.get("state_dir") or os.path.dirname(os.path.abspath(__file__)),
+                "config.runtime.yaml",
+            )
+        runtime_config_path = os.path.abspath(runtime_config_path)
 
         def _apply_dashboard_config(save_config: dict) -> dict:
             save_config = save_config or {}
@@ -14341,41 +14266,22 @@ async def api_config_update(request):
             return save_config
 
         try:
-            save_config = {}
-            if os.path.exists(config_path):
-                with open(config_path, "r", encoding="utf-8") as f:
-                    save_config = yaml.safe_load(f) or {}
-            save_config = _apply_dashboard_config(save_config)
-
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(save_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-            updated.append("persisted_to_yaml")
+            runtime_config = {}
             if os.path.exists(runtime_config_path):
-                runtime_config = {}
                 with open(runtime_config_path, "r", encoding="utf-8") as f:
                     runtime_config = yaml.safe_load(f) or {}
-                runtime_config = _apply_dashboard_config(runtime_config)
-                os.makedirs(os.path.dirname(runtime_config_path), exist_ok=True)
-                with open(runtime_config_path, "w", encoding="utf-8") as f:
-                    yaml.dump(runtime_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-                updated.append("runtime_yaml_synced")
+            runtime_config = _apply_dashboard_config(runtime_config)
+            os.makedirs(os.path.dirname(runtime_config_path), exist_ok=True)
+            temporary_path = f"{runtime_config_path}.tmp"
+            with open(temporary_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(runtime_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            os.replace(temporary_path, runtime_config_path)
+            updated.append("persisted_to_runtime_yaml")
         except Exception as e:
-            try:
-                runtime_config = {}
-                if os.path.exists(runtime_config_path):
-                    with open(runtime_config_path, "r", encoding="utf-8") as f:
-                        runtime_config = yaml.safe_load(f) or {}
-                runtime_config = _apply_dashboard_config(runtime_config)
-                os.makedirs(os.path.dirname(runtime_config_path), exist_ok=True)
-                with open(runtime_config_path, "w", encoding="utf-8") as f:
-                    yaml.dump(runtime_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-                updated.append("persisted_to_runtime_yaml")
-                updated.append(f"config_yaml_unwritable:{type(e).__name__}")
-            except Exception as fallback_e:
-                return JSONResponse(
-                    {"error": f"persist failed: {e}; runtime persist failed: {fallback_e}", "updated": updated},
-                    status_code=500,
-                )
+            return JSONResponse(
+                {"error": f"runtime persist failed: {e}", "updated": updated},
+                status_code=500,
+            )
 
     if body.get("persist_env", False):
         if "OMBRE_API_KEY" not in env_updates:

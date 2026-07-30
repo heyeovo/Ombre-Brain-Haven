@@ -238,6 +238,18 @@ class GatewayStateStore:
             )
             """
         )
+        # cc 前端的永久工具权限。只保存明确批准过的细粒度 allow 规则，
+        # 例如 Bash(npm run build:*) / WebFetch(domain:example.com)。
+        # 会话级批准仍留在 dashboard 进程内，不写库。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cc_permission_config (
+                id TEXT PRIMARY KEY,
+                payload TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
         conn.commit()
         conn.close()
 
@@ -472,6 +484,50 @@ class GatewayStateStore:
         conn.commit()
         conn.close()
         return self.load_cc_upstream_config()
+
+    # ------------------------------------------------------------------
+    # cc 前端永久工具权限
+    # ------------------------------------------------------------------
+
+    _CC_PERMISSION_ID = "default"
+
+    def load_cc_permission_config(self) -> dict[str, Any]:
+        """读回永久工具权限；未保存或数据损坏时返回空配置。"""
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT payload, updated_at FROM cc_permission_config WHERE id = ?",
+            (self._CC_PERMISSION_ID,),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return {}
+        try:
+            value = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError):
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        value["updated_at"] = row["updated_at"] or ""
+        return value
+
+    def save_cc_permission_config(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """整份覆盖永久权限配置；updated_at 由服务端生成。"""
+        from utils import now_iso
+
+        now = now_iso()
+        safe = payload if isinstance(payload, dict) else {}
+        safe = {k: v for k, v in safe.items() if k != "updated_at"}
+        conn = self._connect()
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO cc_permission_config (id, payload, updated_at)
+            VALUES (?, ?, ?)
+            """,
+            (self._CC_PERMISSION_ID, json.dumps(safe, ensure_ascii=False), now),
+        )
+        conn.commit()
+        conn.close()
+        return self.load_cc_permission_config()
 
     # ------------------------------------------------------------------
     # cc 前端 MCP 配置（第 7 步）

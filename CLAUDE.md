@@ -154,6 +154,8 @@ POST /api/config { fuzzy_threshold }  # 更新（重启恢复）
 GET  /api/prompts                     # 读 prompt
 POST /api/prompts                     # 写 prompt
 POST /api/prompts/test                # 测试 prompt
+GET  /gateway/api/cc/mcp              # 读 cc MCP 配置（Bearer 网关认证）
+POST /gateway/api/cc/mcp              # 整份覆盖 cc MCP 配置（Bearer 网关认证）
 ```
 
 ### Hooks

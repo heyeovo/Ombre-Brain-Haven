@@ -2882,6 +2882,33 @@ class GatewayService:
         saved = self.state_store.save_cc_upstream_config(payload)
         return JSONResponse({"ok": True, "config": saved})
 
+    # ------------------------------------------------------------------
+    # cc 前端 MCP 配置（第 7 步）
+    # 一份全局 JSON；密钥只在 dashboard 服务端和 Haven 之间传输。
+    # ------------------------------------------------------------------
+
+    async def handle_cc_mcp_get(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        return JSONResponse({"ok": True, "config": self.state_store.load_cc_mcp_config()})
+
+    async def handle_cc_mcp_save(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid MCP config payload"}, status_code=400)
+
+        payload = body.get("config") if isinstance(body.get("config"), dict) else body
+        saved = self.state_store.save_cc_mcp_config(payload)
+        return JSONResponse({"ok": True, "config": saved})
+
     async def _list_gateway_buckets(self, *, include_archive: bool = False) -> list[dict]:
         ttl = self.bucket_list_cache_ttl_seconds
         key = bool(include_archive)
@@ -20999,6 +21026,12 @@ def create_gateway_app(
             return await service.handle_cc_upstream_save(request)
         return await service.handle_cc_upstream_get(request)
 
+    async def cc_mcp(request: Request) -> Response:
+        service = request.app.state.gateway_service
+        if request.method == "POST":
+            return await service.handle_cc_mcp_save(request)
+        return await service.handle_cc_mcp_get(request)
+
     app = Starlette(
         debug=False,
         routes=[
@@ -21015,6 +21048,7 @@ def create_gateway_app(
             Route("/api/conversation/turns", conversation_turns, methods=["GET"]),
             Route("/api/cc/personas", cc_personas, methods=["GET", "POST", "DELETE"]),
             Route("/api/cc/upstream", cc_upstream, methods=["GET", "POST"]),
+            Route("/api/cc/mcp", cc_mcp, methods=["GET", "POST"]),
             Route("/v1/models", models, methods=["GET"]),
             Route("/v1/chat/completions", chat_completions, methods=["POST"]),
             Route("/v1/messages", anthropic_messages, methods=["POST"]),

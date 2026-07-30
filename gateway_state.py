@@ -226,6 +226,18 @@ class GatewayStateStore:
             )
             """
         )
+        # cc 前端的 MCP 配置（第 7 步）。跟上游模型配置一样是一份会继续扩展的 JSON：
+        # 服务、transport、权限、工具目录和密钥都放在 payload，避免每加字段就迁表。
+        # 这份配置必须跨设备 / 跨部署保留，不能落在 Vercel 本地文件。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cc_mcp_config (
+                id TEXT PRIMARY KEY,
+                payload TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
         conn.commit()
         conn.close()
 
@@ -460,6 +472,50 @@ class GatewayStateStore:
         conn.commit()
         conn.close()
         return self.load_cc_upstream_config()
+
+    # ------------------------------------------------------------------
+    # cc 前端 MCP 配置（第 7 步）
+    # ------------------------------------------------------------------
+
+    _CC_MCP_ID = "default"
+
+    def load_cc_mcp_config(self) -> dict[str, Any]:
+        """整份 MCP 配置读回来；尚未保存时返回空 dict，由前端完成一次默认值初始化。"""
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT payload, updated_at FROM cc_mcp_config WHERE id = ?",
+            (self._CC_MCP_ID,),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return {}
+        try:
+            value = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError):
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        value["updated_at"] = row["updated_at"] or ""
+        return value
+
+    def save_cc_mcp_config(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """整份覆盖 MCP 配置；密钥由受网关认证保护的调用方原样保存。"""
+        from utils import now_iso
+
+        now = now_iso()
+        safe = payload if isinstance(payload, dict) else {}
+        safe = {k: v for k, v in safe.items() if k != "updated_at"}
+        conn = self._connect()
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO cc_mcp_config (id, payload, updated_at)
+            VALUES (?, ?, ?)
+            """,
+            (self._CC_MCP_ID, json.dumps(safe, ensure_ascii=False), now),
+        )
+        conn.commit()
+        conn.close()
+        return self.load_cc_mcp_config()
 
     def delete_cc_persona(self, persona_id: str) -> bool:
         safe_id = str(persona_id or "").strip()

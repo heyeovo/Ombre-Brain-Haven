@@ -795,7 +795,7 @@ class GatewayStateStore:
         source: str = "gateway",
         raw_json: str = "",
         created_at: datetime | None = None,
-        max_entries: int = 500,
+        max_entries: int = 0,
     ) -> int:
         created_at = created_at or datetime.now(timezone.utc)
         created_iso = created_at.isoformat(timespec="seconds")
@@ -831,22 +831,9 @@ class GatewayStateStore:
             """,
             (safe_profile_id, safe_session_id, created_iso),
         )
-        if max_entries > 0:
-            conn.execute(
-                """
-                DELETE FROM conversation_turns
-                WHERE profile_id = ?
-                  AND source != 'polaris'
-                  AND id NOT IN (
-                    SELECT id FROM conversation_turns
-                    WHERE profile_id = ?
-                      AND source != 'polaris'
-                    ORDER BY id DESC
-                    LIMIT ?
-                  )
-                """,
-                (safe_profile_id, safe_profile_id, max(1, int(max_entries))),
-            )
+        # conversation_turns 现在是 cc / Polaris / API 共用的长期原文存储。
+        # max_entries 参数为兼容旧调用保留，但不再据此删除历史；读取量由分页控制。
+        _ = max_entries
         conn.commit()
         turn_id = int(cursor.lastrowid or 0)
         conn.close()

@@ -545,10 +545,9 @@ class GatewayService:
             min(8, int(self.gateway_cfg.get("just_now_context_max_turns", 5))),
         )
         self.just_now_context_budget = max(0, int(self.gateway_cfg.get("just_now_context_budget", 420)))
-        self.conversation_turns_max_entries = max(
-            0,
-            int(self.gateway_cfg.get("conversation_turns_max_entries", 500)),
-        )
+        # 对话原文是跨设备长期数据，不再按条数裁剪；读取量由前端分页控制。
+        self.conversation_turns_max_entries = 0
+        self.gateway_cfg["conversation_turns_max_entries"] = 0
         self.memory_sentinel_enabled = self._bool_config_value(
             self.gateway_cfg.get("memory_sentinel_enabled"),
             True,
@@ -1342,8 +1341,9 @@ class GatewayService:
             self.gateway_cfg["just_now_context_budget"] = self.just_now_context_budget
             updated.append("gateway.just_now_context_budget")
         if "conversation_turns_max_entries" in payload:
-            self.conversation_turns_max_entries = max(0, int(payload["conversation_turns_max_entries"]))
-            self.gateway_cfg["conversation_turns_max_entries"] = self.conversation_turns_max_entries
+            # 旧配置字段保留兼容，但长期原文禁止再开启自动删除。
+            self.conversation_turns_max_entries = 0
+            self.gateway_cfg["conversation_turns_max_entries"] = 0
             updated.append("gateway.conversation_turns_max_entries")
         if "memory_sentinel_enabled" in payload:
             self.memory_sentinel_enabled = self._bool_config_value(

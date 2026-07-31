@@ -16,7 +16,11 @@
 | `breath` | **每次对话最开头**调用一次（`is_session_start=True`）——先恢复自我入口、用户画像、关系画像、近期连续性和少量必要锚点。有明确话题时传 `query` 关键词检索；有明确日期时可传 `date` 或在 query 里写日期。传 `domain="feel"` 读取旧独立 feel；传 `domain="whisper"` 读取悄悄话；传 `domain="daily_impression"` 才读取日印象；传 `domain="journal"` 读取日记（含上锁检测）；传 `domain="journey"` 读取轨迹桶；传 `domain="self_anchor"` 读取你自己留下的锚点。`max_tokens` 控制返回总 token 上限（默认 10000），`max_results` 控制最大返回条数（默认 20） |
 | `read_bucket` | 按 bucket_id 精确读取完整记忆；准备追细节、写年轮、修改或删除前先读 |
 | `comment_bucket` | 给已有记忆追加年轮/评论；读到旧记忆后的新感受或补充，用它挂回源 bucket。`kind="feel"` 时 content 只写第一人称感受，不写分段标题 |
-| `hold` | 写单条长期记忆；`date` 可传事件日期；显式 `domain` 会覆盖自动领域；显式 `valence/arousal` 会覆盖自动情绪；`whisper=True` 写无源碎碎念；`journal=True` 写独立日记（`author` 区分作者，`locked=True` + `unlock_hint` 上锁）；`wish=True` 长期悬念标签（15% 概率随机浮现）；`todo`/`todo_done` 附着待办。旧记忆的新感受优先用 `comment_bucket`；`feel=True` / `whisper=True` 的 content 只写第一人称感受 |
+| `hold` | 写单条长期记忆；`date` 可传事件日期；显式 `domain` 会覆盖自动领域；显式 `valence/arousal` 会覆盖自动情绪；`whisper=True` 写无源碎碎念；`journal=True` 写独立日记（`author` 区分作者，`locked=True` + `unlock_hint` 上锁）；`wish=True` 长期悬念标签（15% 概率随机浮现）；附带桶 Todo 时同时传 `todo` 和 `todo_domain="tech"` / `"emotional"`。旧记忆的新感受优先用 `comment_bucket`；`feel=True` / `whisper=True` 的 content 只写第一人称感受 |
+| `create_todo` | 创建独立 Todo；`domain` 必须是 `tech` / `emotional`。没有关联桶时 `context` 必填；`source_bucket` 只是背景关联，不会写入桶 Todo |
+| `list_todos` | 主动查询 Todo；合并独立 Todo 与非归档桶 Todo，可按 `domain` / `done` 筛选。返回的方括号 ID 可直接交给 `set_todo_done` |
+| `set_todo_done` | 完成或重新打开 Todo。独立 Todo 传自身 ID；桶 Todo 必须原样传 `bucket:<桶ID>`，不要删掉 `bucket:`，也不要改用 `trace(todo_done=...)` |
+| `reminder_create / list / update` | 照顾备忘：有提醒时间、重复和注入规则；与 Todo 分开存储、互不转换 |
 | `darkroom_enter` | 写入未想透、不该给用户看、不该进普通记忆的内在反思；note 默认用第一人称，不用第三人称称呼自己，除非引用外部事实或当前用户原话；默认新开房间，`new_room=false` 才续写当前 active 房间；可带 `lock_for="5m"` / `"6h"` / `"3d"`（分钟/小时/天）；只返回门口状态（房间号、版本号、锁时间），不回显正文 |
 | `darkroom_rooms` | 只读列出暗房门牌，不返回正文；返回每个房间的 room_id、修订次数、最后写入时间、锁状态 |
 | `darkroom_view` | 只读查看一条已解锁的暗房内容，含正文和修订历史；锁门未到期不返回正文只返回解锁时间 |
@@ -34,6 +38,8 @@
 - **提到过去**：用户说"上次"、"之前"、"还记得"时，用 `breath(query="关键词")` 检索
 - **提到日期**：用户说"6月15日聊了什么"、"2026.06.15 那天"、"昨天做了什么"时，用 `breath(date="日期")` 或 `breath(query="日期 + 主题")`；无年份的“6月15日”默认按今年查
 - **新信息**：用 `hold` 留住你想留下的事实、承诺、偏好或经历；无源碎碎念用 `hold(whisper=True)`
+- **主动查待办**：用 `list_todos`，不要等待桶被 breath 顺带召回；完成或重新打开统一用 `set_todo_done`
+- **新建待办**：能独立存在的用 `create_todo`；与某条新记忆强绑定的，才在 `hold` 中同时传 `todo` 和 `todo_domain`
 - **旧记忆的新感受**：先 `read_bucket(bucket_id)`，再用 `comment_bucket(...)` 写成年轮；年轮只写第一人称感受，不写分段标题
 - **日记/总结摘记**：一天结束或用户发来大段日记/总结时，只把你想长期记住的事件、偏好、承诺或项目状态用 `hold` 或 `grow` 写入 Ombre；单条用 `hold`，多个已筛选记忆点才用 `grow`
 
@@ -75,7 +81,7 @@
 - `related="id1,id2"`：手动关联桶（逗号分隔 ID），常与 `read_bucket` 配合
 - 其余字段（name/domain/valence/arousal/importance/tags）：只传需要改的，-1 或空串表示不改
 - `wish=1`：长期悬念标签，低概率随机浮现；`wish=0` 取消
-- `todo="内容"` / `todo_done=1`：附着待办/标记完成
+- `todo="内容"` + `todo_domain="tech"或"emotional"`：新增或修改桶附属 Todo；仅切换完成状态统一用 `set_todo_done`
 
 ### hold vs grow
 - 一句话的事 → `hold`（"我喜欢吃饺子"）
@@ -86,7 +92,7 @@
 - 没有源头、只是突然冒出的碎碎念 → `hold(whisper=True)`
 - 写日记/私人记录，不想进普通浮现 → `hold(journal=True, author="言之"或"小羊"或"共同")`；可加 `locked=True, unlock_hint="2026-08-01"` 上锁
 - 想标记某条记忆为长期悬念，偶尔想起 → `hold(wish=True)` 或 `trace(bucket_id, wish=1)`
-- 想给记忆附上待办 → `hold(todo="明天打电话问进度", todo_done=False)`
+- 想给记忆附上待办 → `hold(todo="明天打电话问进度", todo_domain="emotional")`
 - 一大段但已经筛过、确实包含多个长期记忆点的内容 → `grow`
 - `grow` 的输入里如果有称呼、昵称、互称、自称或原话，必须原样保留；不要把“老公/哥哥/宝宝/老婆”等改成“用户/AI/assistant”，也不要仅凭称呼推断稳定画像事实
 - 整篇日记、一天流水、完整情绪过程 → 不要原样 `grow`；只摘出你想长期记住的部分
@@ -121,6 +127,14 @@
 - **一次 grow 胜过多次 hold**：要存多条长期记忆时，先筛掉流水，再合成一段文本调用一次 grow
 - **对话太长时建议用户换窗口**：同一窗口聊越久，每次工具调用的底价越高（因为要重新读完整对话历史）
 - **工具返回值很短，无需复述**：收到 `新建→桶名 域名` 后直接跟用户说，无需展开解释
+
+### Todo 与照顾备忘
+- 独立 Todo：`create_todo(content, domain, source_bucket?, context?)`。没有 `source_bucket` 时 `context` 必填
+- 桶 Todo：随记忆用 `hold(todo="...", todo_domain="tech|emotional")` 写入；没有独立数据库 ID
+- 查询：统一调用 `list_todos(domain?, done?)`，它会合并独立 Todo 与非归档桶 Todo
+- 改状态：统一调用 `set_todo_done(todo_id, done)`。独立 Todo 使用自身 ID；桶 Todo 使用 `bucket:<桶ID>` 虚拟操作 ID
+- 必须原样复制 `list_todos` 方括号里的 ID，例如 `set_todo_done(todo_id="bucket:d85ae354ba16", done=False)`
+- Reminder：需要时间、重复、稍后提醒或主动注入时使用 `reminder_create / reminder_list / reminder_update`；不要和 Todo 互转或混存
 
 ### 核心准则桶（pinned）
 - `hold(content="...", pinned=True)` 创建钉选桶——不衰减、不合并、importance 锁定 10

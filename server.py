@@ -7142,7 +7142,7 @@ async def create_todo(
     source_bucket: str = "",
     context: str = "",
 ) -> str:
-    """创建独立待办。domain 必须是 tech 或 emotional；没有 source_bucket 时 context 必填。关联桶只提供背景，不会写入桶的 todo 字段。"""
+    """创建独立待办。domain 必须是 tech 或 emotional；没有 source_bucket 时 context 必填。关联桶只提供背景，不会写入桶的 todo 字段，也不会生成 bucket: 前缀 ID。"""
     bucket_id = _coerce_memory_id(source_bucket) if source_bucket else ""
     if source_bucket and not bucket_id:
         return "创建失败: source_bucket 无效"
@@ -7162,7 +7162,7 @@ async def create_todo(
 
 @mcp.tool()
 async def list_todos(domain: str = "", done: bool | None = None, limit: int = 50) -> str:
-    """主动查询待办，合并独立 Todo 与非归档桶 Todo。domain 可用 tech/emotional/空；done 可传 true/false，省略时返回全部。"""
+    """主动查询待办，合并独立 Todo 与非归档桶 Todo。domain 可用 tech/emotional/空；done 可传 true/false，省略时返回全部。方括号内是可直接传给 set_todo_done 的 todo_id：独立 Todo 使用自身 ID，桶 Todo 使用 bucket:<桶ID>，不要删掉 bucket: 前缀。"""
     try:
         items = await _list_todo_items(domain=domain, done=done, limit=_int_between(limit, 50, 1, 200))
     except ValueError as exc:
@@ -7192,7 +7192,7 @@ async def list_todos(domain: str = "", done: bool | None = None, limit: int = 50
 
 @mcp.tool()
 async def set_todo_done(todo_id: str, done: bool = True) -> str:
-    """完成或重新打开一条 Todo；todo_id 使用 list_todos 返回的 ID。"""
+    """完成或重新打开一条 Todo。todo_id 必须原样使用 list_todos 返回的 ID：独立 Todo 直接传自身 ID，桶 Todo 传 bucket:<桶ID>。不要把裸桶 ID 当 todo_id，也无需改用 trace(todo_done=...)。"""
     item = await _set_todo_item_done(todo_id, done)
     if not item:
         return f"未找到 Todo: {todo_id}"
@@ -8768,6 +8768,7 @@ async def hold(
     unlock_hint: str = "",
     event_time: str = "",
 ) -> str:
+    """写入一条长期记忆；附带 todo 时必须同时传 todo_domain="tech" 或 "emotional"。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -9492,7 +9493,7 @@ async def trace(
     unlock_hint: str = "",    # 解锁提示(日期或密码)
     related: str = "",        # 关联桶id,逗号分隔
 ) -> str:
-    """修改已有记忆，不创建新桶。tags/domain/content 是替换；date 可改事件日期；改前先 read_bucket。resolved/digested 让旧事沉底。只改元数据/date 不重建 embedding，改 content/name 才重建。"""
+    """修改已有记忆，不创建新桶。tags/domain/content 是替换；date 可改事件日期；改前先 read_bucket。resolved/digested 让旧事沉底。只改元数据/date 不重建 embedding，改 content/name 才重建。新增或修改桶 todo 时必须同时传 todo_domain；仅切换 Todo 完成状态优先使用 set_todo_done。"""
 
 
     bucket_id = _coerce_memory_id(bucket_id)

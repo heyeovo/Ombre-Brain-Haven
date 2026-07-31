@@ -130,6 +130,7 @@ from raw_events import RawEventStore
 from reflection_engine import ReflectionEngine
 from recall_diagnostics import RecallDiagnosticsLogger
 from reminder_store import ReminderStore
+from todo_store import TODO_DOMAINS, TodoStore
 from reranker_engine import RerankerEngine
 from self_anchor import SELF_ANCHOR_TAG, is_self_anchor_bucket, is_self_anchor_metadata
 from scripts.migrate_affect_anchor_sections import plan_bucket_migration
@@ -254,6 +255,7 @@ darkroom_store = DarkroomStore(config)                  # Private reflection roo
 gateway_state_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gateway_state.db"))
 raw_event_store = RawEventStore(config)                  # Raw dialogue archive / 原文保险箱
 reminder_store = ReminderStore(config)                    # Standalone care memos / 独立照顾备忘
+todo_store = TodoStore(config)                            # Standalone todos / 独立待办
 
 # --- event_time migration: backfill missing event_time for existing buckets ---
 # See bucket_manager.py __init__ — runs sync at import time, no await needed
@@ -4115,6 +4117,7 @@ async def _merge_or_create(
     *,
     wish: bool = False,
     todo: str = "",
+    todo_domain: str = "",
     todo_done: bool = False,
     author: str = "",
     locked: bool = False,
@@ -4169,6 +4172,7 @@ async def _merge_or_create(
                 if todo:
                     update_kwargs["todo"] = todo
                     update_kwargs["todo_done"] = todo_done
+                    update_kwargs["extra_metadata"] = {"todo_domain": todo_domain}
                 await bucket_mgr.update(bucket["id"], **update_kwargs)
                 # --- Update embedding after merge ---
                 try:
@@ -4191,6 +4195,7 @@ async def _merge_or_create(
         wish=wish,
         todo=todo,
         todo_done=todo_done,
+        extra_metadata={"todo_domain": todo_domain} if todo else None,
         author=author,
         locked=locked,
         unlock_hint=unlock_hint,
@@ -7059,6 +7064,142 @@ def _has_active_facets(facets: dict | None) -> bool:
 
 
 # =============================================================
+# Tool 0.75: todos — standalone + bucket-attached
+# 工具 0.75：待办 — 独立待办 + 桶附属待办
+# =============================================================
+def _todo_bucket_payload(bucket: dict) -> dict | None:
+    metadata = bucket.get("metadata") or {}
+    content = str(metadata.get("todo") or "").strip()
+    if not content:
+        return None
+    bucket_id = str(bucket.get("id") or "").strip()
+    domain = str(metadata.get("todo_domain") or "").strip().lower()
+    if domain not in TODO_DOMAINS:
+        domain = "unclassified"
+    return {
+        "id": f"bucket:{bucket_id}",
+        "source": "bucket",
+        "content": content,
+        "domain": domain,
+        "source_bucket": bucket_id,
+        "source_bucket_name": str(metadata.get("name") or "").strip(),
+        "context": "",
+        "done": bool(metadata.get("todo_done", False)),
+        "created_at": str(metadata.get("created") or ""),
+        "updated_at": str(metadata.get("updated") or metadata.get("created") or ""),
+    }
+
+
+async def _list_todo_items(
+    *,
+    domain: str = "",
+    done: bool | None = None,
+    limit: int = 200,
+) -> list[dict]:
+    safe_domain = str(domain or "").strip().lower()
+    if safe_domain and safe_domain not in TODO_DOMAINS:
+        raise ValueError("domain must be tech or emotional")
+    safe_limit = max(1, min(500, int(limit or 200)))
+    buckets = await bucket_mgr.list_all(include_archive=False)
+    bucket_map = {str(item.get("id") or ""): item for item in buckets}
+    standalone = todo_store.list(domain=safe_domain, done=done, limit=safe_limit)
+    for item in standalone:
+        source_bucket = str(item.get("source_bucket") or "")
+        source = bucket_map.get(source_bucket)
+        if source:
+            item["source_bucket_name"] = str((source.get("metadata") or {}).get("name") or "")
+    attached = []
+    for bucket in buckets:
+        item = _todo_bucket_payload(bucket)
+        if not item:
+            continue
+        if safe_domain and item["domain"] != safe_domain:
+            continue
+        if done is not None and item["done"] is not done:
+            continue
+        attached.append(item)
+    rows = standalone + attached
+    rows.sort(key=lambda item: (bool(item.get("done")), str(item.get("created_at") or "")), reverse=False)
+    return rows[:safe_limit]
+
+
+async def _set_todo_item_done(todo_id: str, done: bool) -> dict | None:
+    safe_id = str(todo_id or "").strip()
+    if safe_id.startswith("bucket:"):
+        bucket_id = safe_id.split(":", 1)[1]
+        bucket = await bucket_mgr.get(bucket_id)
+        if not bucket or not str((bucket.get("metadata") or {}).get("todo") or "").strip():
+            return None
+        await bucket_mgr.update(bucket_id, todo_done=bool(done))
+        return _todo_bucket_payload(await bucket_mgr.get(bucket_id) or bucket)
+    return todo_store.set_done(safe_id, bool(done))
+
+
+@mcp.tool()
+async def create_todo(
+    content: str,
+    domain: str,
+    source_bucket: str = "",
+    context: str = "",
+) -> str:
+    """创建独立待办。domain 必须是 tech 或 emotional；没有 source_bucket 时 context 必填。关联桶只提供背景，不会写入桶的 todo 字段。"""
+    bucket_id = _coerce_memory_id(source_bucket) if source_bucket else ""
+    if source_bucket and not bucket_id:
+        return "创建失败: source_bucket 无效"
+    if bucket_id and not await bucket_mgr.get(bucket_id):
+        return f"创建失败: 未找到关联桶 {bucket_id}"
+    try:
+        item = todo_store.create(
+            content=content,
+            domain=domain,
+            source_bucket=bucket_id,
+            context=context,
+        )
+    except ValueError as exc:
+        return f"创建失败: {exc}"
+    return f"已创建 {item['domain']} 待办 [{item['id']}] {item['content']}"
+
+
+@mcp.tool()
+async def list_todos(domain: str = "", done: bool | None = None, limit: int = 50) -> str:
+    """主动查询待办，合并独立 Todo 与非归档桶 Todo。domain 可用 tech/emotional/空；done 可传 true/false，省略时返回全部。"""
+    try:
+        items = await _list_todo_items(domain=domain, done=done, limit=_int_between(limit, 50, 1, 200))
+    except ValueError as exc:
+        return f"查询失败: {exc}"
+    if not items:
+        return "没有符合条件的 Todo。"
+    labels = {"tech": "技术", "emotional": "情感", "unclassified": "未分类"}
+    groups: dict[str, list[dict]] = {}
+    for item in items:
+        groups.setdefault(str(item.get("domain") or "unclassified"), []).append(item)
+    lines = [f"Todo 共 {len(items)} 条"]
+    for group in ("tech", "emotional", "unclassified"):
+        rows = groups.get(group) or []
+        if not rows:
+            continue
+        lines.append(f"\n[{labels[group]}]")
+        for item in rows:
+            mark = "✅" if item.get("done") else "⬜"
+            source = ""
+            if item.get("source_bucket"):
+                source_name = item.get("source_bucket_name") or item["source_bucket"]
+                source = f" · 桶:{source_name} ({item['source_bucket']})"
+            context_line = f"\n  背景: {item['context']}" if item.get("context") else ""
+            lines.append(f"- {mark} [{item['id']}] {item['content']}{source}{context_line}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def set_todo_done(todo_id: str, done: bool = True) -> str:
+    """完成或重新打开一条 Todo；todo_id 使用 list_todos 返回的 ID。"""
+    item = await _set_todo_item_done(todo_id, done)
+    if not item:
+        return f"未找到 Todo: {todo_id}"
+    return f"已{'完成' if done else '重新打开'} Todo [{todo_id}] {item['content']}"
+
+
+# =============================================================
 # Tool 0.8: reminders — standalone care memos
 # 工具 0.8：reminders — 独立照顾备忘
 # =============================================================
@@ -7277,7 +7418,7 @@ async def breath(
         )
 
     if _is_pending_followup_domain(domain_key) or (not domain_key and _breath_query_requests_pending_followups(query)):
-        return "旧 followup/todo 派生待办已停用；请使用 reminder_list 或 /api/reminders 查看独立照顾备忘。"
+        return "旧 followup 派生待办已停用；请使用 list_todos 主动查询 Todo。照顾备忘请继续使用 reminder_list。"
 
     # --- Feel/whisper retrieval: independent read-only channels ---
     # --- Feel/whisper 检索：独立只读入口 ---
@@ -8619,6 +8760,7 @@ async def hold(
     journey: bool = False,
     wish: bool = False,
     todo: str = "",
+    todo_domain: str = "",
     todo_done: bool = False,
     journal: bool = False,
     author: str = "",
@@ -8631,6 +8773,9 @@ async def hold(
     # --- Input validation / 输入校验 ---
     if not content or not content.strip():
         return "内容为空，无法存储。"
+    if todo and str(todo_domain or "").strip().lower() not in TODO_DOMAINS:
+        return "附带 todo 时，todo_domain 必须是 tech 或 emotional。"
+    todo_domain = str(todo_domain or "").strip().lower()
 
     importance = max(1, min(10, importance))
     extra_tags = [t.strip() for t in tags.split(",") if t.strip()]
@@ -8808,6 +8953,7 @@ async def hold(
             wish=wish,
             todo=todo,
             todo_done=todo_done,
+            extra_metadata={"todo_domain": todo_domain} if todo else None,
             author=author,
             locked=locked,
             unlock_hint=unlock_hint,
@@ -8831,6 +8977,7 @@ async def hold(
             allow_merge=False,
             wish=wish,
             todo=todo,
+            todo_domain=todo_domain,
             todo_done=todo_done,
             author=author,
             locked=locked,
@@ -9338,6 +9485,7 @@ async def trace(
     ripple: bool = False,     # 新增：完整激活+涟漪（仅 touch=True 时有效）
     wish: int = -1,           # 1=打上wish标签(长期悬念),0=取消
     todo: str = "",           # 附着在桶上的待办内容
+    todo_domain: str = "",    # tech / emotional；修改 todo 时必填
     todo_done: int = -1,      # 1=待办已完成,0=未完成
     author: str = "",         # 日记作者:言之/小羊/共同
     locked: int = -1,         # 日记上锁:1=锁,0=解锁
@@ -9350,6 +9498,8 @@ async def trace(
     bucket_id = _coerce_memory_id(bucket_id)
     if not bucket_id:
         return "请提供有效的 bucket_id。"
+    if todo and str(todo_domain or "").strip().lower() not in TODO_DOMAINS:
+        return "修改 todo 时，todo_domain 必须是 tech 或 emotional。"
 
     # --- Touch / activate ---
     if touch:
@@ -9411,6 +9561,7 @@ async def trace(
         updates["wish"] = bool(wish)
     if todo:
         updates["todo"] = todo
+        updates["extra_metadata"] = {"todo_domain": str(todo_domain).strip().lower()}
     if todo_done in (0, 1):
         updates["todo_done"] = bool(todo_done)
     if author:
@@ -11222,32 +11373,114 @@ async def api_moments(request):
 
 @mcp.custom_route("/api/todos", methods=["GET"])
 async def api_todos(request):
-    """Deprecated: derived followup/todo items are disabled."""
+    """List standalone and non-archived bucket todos."""
     from starlette.responses import JSONResponse
     err = _require_dashboard_auth(request)
     if err:
         return err
-    return JSONResponse(
-        {
-            "count": 0,
-            "todos": [],
-            "disabled": True,
-            "message": "Derived followup/todo items are disabled. Use /api/reminders instead.",
-        }
-    )
+    domain = str(request.query_params.get("domain", "") or "").strip().lower()
+    done_text = str(request.query_params.get("done", "") or "").strip().lower()
+    done = None
+    if done_text in {"1", "true", "done"}:
+        done = True
+    elif done_text in {"0", "false", "pending"}:
+        done = False
+    try:
+        items = await _list_todo_items(
+            domain=domain,
+            done=done,
+            limit=_int_between(request.query_params.get("limit"), 200, 1, 500),
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse({"count": len(items), "todos": items})
+
+
+@mcp.custom_route("/api/todos", methods=["POST"])
+async def api_todo_create(request):
+    """Create one standalone todo without modifying bucket metadata."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    source_bucket = _coerce_memory_id(str(body.get("source_bucket") or "")) if body.get("source_bucket") else ""
+    if body.get("source_bucket") and not source_bucket:
+        return JSONResponse({"error": "invalid source_bucket"}, status_code=400)
+    if source_bucket and not await bucket_mgr.get(source_bucket):
+        return JSONResponse({"error": "source_bucket not found"}, status_code=404)
+    try:
+        item = todo_store.create(
+            content=str(body.get("content") or ""),
+            domain=str(body.get("domain") or ""),
+            source_bucket=source_bucket,
+            context=str(body.get("context") or ""),
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse({"status": "created", "todo": item})
 
 
 @mcp.custom_route("/api/todos/{todo_id}", methods=["PATCH"])
 async def api_todo_update(request):
-    """Deprecated: derived followup/todo items are disabled."""
+    """Update standalone todo fields or a bucket todo and its todo_domain metadata."""
     from starlette.responses import JSONResponse
     err = _require_dashboard_auth(request)
     if err:
         return err
-    return JSONResponse(
-        {"error": "derived followup/todo items are disabled; use /api/reminders instead"},
-        status_code=410,
-    )
+    todo_id = str(request.path_params.get("todo_id") or "").strip()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    try:
+        if todo_id.startswith("bucket:"):
+            bucket_id = todo_id.split(":", 1)[1]
+            bucket = await bucket_mgr.get(bucket_id)
+            if not bucket:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            updates = {}
+            extra_metadata = {}
+            if "content" in body:
+                content = str(body.get("content") or "").strip()
+                if not content:
+                    raise ValueError("content is required")
+                updates["todo"] = content
+            if "domain" in body:
+                extra_metadata["todo_domain"] = TodoStore.normalize_domain(str(body.get("domain") or ""))
+            if "done" in body:
+                updates["todo_done"] = bool(body.get("done"))
+            if extra_metadata:
+                updates["extra_metadata"] = extra_metadata
+            if not updates:
+                raise ValueError("no recognized fields")
+            await bucket_mgr.update(bucket_id, **updates)
+            item = _todo_bucket_payload(await bucket_mgr.get(bucket_id) or bucket)
+        else:
+            item = todo_store.update(
+                todo_id,
+                content=body.get("content") if "content" in body else None,
+                domain=body.get("domain") if "domain" in body else None,
+                source_bucket=body.get("source_bucket") if "source_bucket" in body else None,
+                context=body.get("context") if "context" in body else None,
+                done=bool(body.get("done")) if "done" in body else None,
+            )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    if not item:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"status": "updated", "todo": item})
 
 
 @mcp.custom_route("/api/todos/{todo_id}/writeback", methods=["POST"])

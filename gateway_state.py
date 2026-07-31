@@ -153,6 +153,20 @@ class GatewayStateStore:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS conversation_import_archives (
+                profile_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_conversation_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                imported_at TEXT NOT NULL,
+                raw_json TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (profile_id, source, source_conversation_id),
+                UNIQUE (profile_id, session_id)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS upstream_usage (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
@@ -822,9 +836,11 @@ class GatewayStateStore:
                 """
                 DELETE FROM conversation_turns
                 WHERE profile_id = ?
+                  AND source != 'polaris'
                   AND id NOT IN (
                     SELECT id FROM conversation_turns
                     WHERE profile_id = ?
+                      AND source != 'polaris'
                     ORDER BY id DESC
                     LIMIT ?
                   )
@@ -835,6 +851,131 @@ class GatewayStateStore:
         turn_id = int(cursor.lastrowid or 0)
         conn.close()
         return turn_id
+
+    def import_conversation_archive(
+        self,
+        *,
+        profile_id: str,
+        source: str,
+        source_conversation_id: str,
+        session_id: str,
+        title: str,
+        raw_json: str,
+        turns: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """幂等导入一段历史对话；固定 session/round，不触发运行态历史裁剪。"""
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_source = str(source or "").strip()
+        safe_source_id = str(source_conversation_id or "").strip()
+        safe_session_id = str(session_id or "").strip()
+        if not safe_source or not safe_source_id or not safe_session_id:
+            raise ValueError("source/source_conversation_id/session_id is required")
+
+        imported_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        conn = self._connect()
+        try:
+            foreign_turn = conn.execute(
+                """
+                SELECT 1 FROM conversation_turns
+                WHERE profile_id = ? AND session_id = ? AND source != ?
+                LIMIT 1
+                """,
+                (safe_profile_id, safe_session_id, safe_source),
+            ).fetchone()
+            if foreign_turn is not None:
+                raise ValueError("session already contains non-imported turns")
+
+            existed = conn.execute(
+                """
+                SELECT 1 FROM conversation_import_archives
+                WHERE profile_id = ? AND source = ? AND source_conversation_id = ?
+                """,
+                (safe_profile_id, safe_source, safe_source_id),
+            ).fetchone() is not None
+
+            conn.execute(
+                """
+                INSERT INTO conversation_import_archives
+                (profile_id, source, source_conversation_id, session_id, imported_at, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(profile_id, source, source_conversation_id) DO UPDATE SET
+                    session_id = excluded.session_id,
+                    imported_at = excluded.imported_at,
+                    raw_json = excluded.raw_json
+                """,
+                (
+                    safe_profile_id,
+                    safe_source,
+                    safe_source_id,
+                    safe_session_id,
+                    imported_at,
+                    str(raw_json or ""),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO conversation_sessions
+                (profile_id, session_id, title, deleted_at, updated_at)
+                VALUES (?, ?, ?, NULL, ?)
+                ON CONFLICT(profile_id, session_id) DO UPDATE SET
+                    title = CASE
+                        WHEN conversation_sessions.title = '' THEN excluded.title
+                        ELSE conversation_sessions.title
+                    END,
+                    updated_at = excluded.updated_at
+                """,
+                (safe_profile_id, safe_session_id, str(title or "")[:120], imported_at),
+            )
+
+            for turn in turns:
+                conn.execute(
+                    """
+                    INSERT INTO conversation_turns
+                    (profile_id, session_id, round_id, created_at, user_text, assistant_text,
+                     model, client, route, source, raw_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(profile_id, session_id, round_id) DO UPDATE SET
+                        created_at = excluded.created_at,
+                        user_text = excluded.user_text,
+                        assistant_text = excluded.assistant_text,
+                        model = excluded.model,
+                        client = excluded.client,
+                        route = excluded.route,
+                        source = excluded.source,
+                        raw_json = excluded.raw_json
+                    """,
+                    (
+                        safe_profile_id,
+                        safe_session_id,
+                        int(turn["round_id"]),
+                        str(turn["created_at"]),
+                        str(turn.get("user_text") or ""),
+                        str(turn.get("assistant_text") or ""),
+                        str(turn.get("model") or ""),
+                        "polaris-import",
+                        "archive",
+                        safe_source,
+                        str(turn.get("raw_json") or ""),
+                    ),
+                )
+            conn.execute(
+                """
+                DELETE FROM conversation_turns
+                WHERE profile_id = ? AND session_id = ? AND source = ? AND round_id > ?
+                """,
+                (safe_profile_id, safe_session_id, safe_source, len(turns)),
+            )
+            conn.commit()
+            return {
+                "session_id": safe_session_id,
+                "turn_count": len(turns),
+                "reimported": existed,
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def list_recent_conversation_turns(
         self,

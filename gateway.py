@@ -2738,6 +2738,169 @@ class GatewayService:
             }
         )
 
+    async def handle_polaris_conversation_import(self, request: Request) -> JSONResponse:
+        """导入 Polaris v1 对话归档；只接收 chat conversations，不读取任何设置。"""
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid Polaris import request"}, status_code=400)
+        try:
+            export_version = int(body.get("version") or 0)
+        except (TypeError, ValueError):
+            export_version = 0
+        if body.get("format") != "polaris-export" or export_version != 1:
+            return JSONResponse({"error": "unsupported Polaris export format/version"}, status_code=400)
+
+        conversations = body.get("conversations")
+        if not isinstance(conversations, list) or not conversations:
+            return JSONResponse({"error": "conversations is required"}, status_code=400)
+        if len(conversations) > 200:
+            return JSONResponse({"error": "too many conversations"}, status_code=400)
+
+        def timestamp_iso(value: Any) -> str:
+            try:
+                timestamp = float(value)
+                if timestamp > 10_000_000_000:
+                    timestamp /= 1000
+                return datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec="seconds")
+            except (TypeError, ValueError, OSError, OverflowError):
+                return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+        profile_id = self._conversation_profile_id
+        results: list[dict[str, Any]] = []
+        total_turns = 0
+        reimported = 0
+        failed = 0
+
+        def conversation_sort_value(item: Any) -> float:
+            if not isinstance(item, dict):
+                return 0
+            try:
+                return float(item.get("updatedAt") or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        # session 列表按最后写入 id 排序；先写旧对话，确保最新对话最终排在上面。
+        indexed_conversations = list(enumerate(conversations))
+        indexed_conversations.sort(key=lambda pair: conversation_sort_value(pair[1]))
+
+        for index, conversation in indexed_conversations:
+            if not isinstance(conversation, dict):
+                failed += 1
+                results.append({"index": index, "ok": False, "error": "conversation must be an object"})
+                continue
+            source_id = str(conversation.get("id") or "").strip()
+            if not source_id:
+                failed += 1
+                results.append({"index": index, "ok": False, "error": "conversation id is required"})
+                continue
+            messages = conversation.get("messages")
+            if not isinstance(messages, list):
+                failed += 1
+                results.append({"index": index, "ok": False, "error": "messages must be an array"})
+                continue
+
+            turns: list[dict[str, Any]] = []
+            pending_system_ids: list[str] = []
+            current: dict[str, Any] | None = None
+
+            def finish_current() -> None:
+                nonlocal current
+                if current is None:
+                    return
+                assistant_parts = current.pop("assistant_parts")
+                assistant_text = "\n\n".join(part for part in assistant_parts if part.strip()).strip()
+                if not assistant_text and current.pop("has_tool_call"):
+                    assistant_text = "[工具调用记录]"
+                current["assistant_text"] = assistant_text
+                current["round_id"] = len(turns) + 1
+                current["raw_json"] = json.dumps(
+                    {
+                        "source_message_ids": current.pop("source_message_ids"),
+                        "system_message_ids": current.pop("system_message_ids"),
+                    },
+                    ensure_ascii=False,
+                )
+                if current["user_text"].strip():
+                    turns.append(current)
+                current = None
+
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                role = str(message.get("role") or "").strip().lower()
+                message_id = str(message.get("id") or "").strip()
+                if role == "system":
+                    pending_system_ids.append(message_id)
+                    continue
+                if role == "user":
+                    finish_current()
+                    current = {
+                        "created_at": timestamp_iso(message.get("timestamp")),
+                        "user_text": str(message.get("content") or ""),
+                        "assistant_parts": [],
+                        "has_tool_call": False,
+                        "model": "",
+                        "source_message_ids": [message_id],
+                        "system_message_ids": pending_system_ids,
+                    }
+                    pending_system_ids = []
+                    continue
+                if role == "assistant" and current is not None:
+                    current["assistant_parts"].append(str(message.get("content") or ""))
+                    current["has_tool_call"] = bool(
+                        current["has_tool_call"]
+                        or message.get("nativeToolCalls")
+                        or message.get("toolInvocation")
+                    )
+                    if not current["model"]:
+                        current["model"] = str(message.get("model") or "")
+                    current["source_message_ids"].append(message_id)
+            finish_current()
+
+            if not turns:
+                failed += 1
+                results.append({"index": index, "ok": False, "error": "conversation has no user turns"})
+                continue
+
+            session_id = f"polaris-{hashlib.sha256(source_id.encode('utf-8')).hexdigest()[:24]}"
+            try:
+                saved = self.state_store.import_conversation_archive(
+                    profile_id=profile_id,
+                    source="polaris",
+                    source_conversation_id=source_id,
+                    session_id=session_id,
+                    title=str(conversation.get("title") or "Polaris 对话"),
+                    raw_json=json.dumps(conversation, ensure_ascii=False),
+                    turns=turns,
+                )
+                total_turns += int(saved["turn_count"])
+                reimported += int(bool(saved["reimported"]))
+                results.append({"index": index, "ok": True, **saved})
+            except Exception as exc:
+                failed += 1
+                results.append({"index": index, "ok": False, "error": str(exc)[:300]})
+
+        status = 200 if failed == 0 else 207
+        return JSONResponse(
+            {
+                "ok": failed == 0,
+                "conversation_count": len(conversations),
+                "imported_conversations": len(conversations) - failed,
+                "imported_turns": total_turns,
+                "reimported_conversations": reimported,
+                "failed_conversations": failed,
+                "results": results,
+            },
+            status_code=status,
+        )
+
     async def handle_conversation_sessions(self, request: Request) -> JSONResponse:
         auth_result = self._authorize(request.headers.get("Authorization", ""))
         if auth_result is not None:
@@ -21103,6 +21266,9 @@ def create_gateway_app(
     async def conversation_turn(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_conversation_turn(request)
 
+    async def polaris_conversation_import(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_polaris_conversation_import(request)
+
     async def conversation_sessions(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_conversation_sessions(request)
 
@@ -21153,6 +21319,7 @@ def create_gateway_app(
             # ⚠️ 加路由必须同时加进 server.py 的 /gateway/* 转发表，
             # 否则公网打过去 404（第 2 步已经踩过一次）。
             Route("/api/conversation/turn", conversation_turn, methods=["POST"]),
+            Route("/api/conversation/import/polaris", polaris_conversation_import, methods=["POST"]),
             Route("/api/conversation/sessions", conversation_sessions, methods=["GET"]),
             Route("/api/conversation/turns", conversation_turns, methods=["GET"]),
             Route("/api/conversation/session", conversation_session, methods=["PATCH", "DELETE"]),

@@ -2801,6 +2801,76 @@ class GatewayService:
             }
         )
 
+    async def handle_conversation_session(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid conversation session request"}, status_code=400)
+        session_id = str(body.get("session_id") or "").strip()
+        if not session_id:
+            return JSONResponse({"error": "session_id is required"}, status_code=400)
+        profile_id = self._conversation_profile_id
+        if request.method == "DELETE":
+            metadata = self.state_store.soft_delete_conversation_session(
+                profile_id=profile_id,
+                session_id=session_id,
+            )
+            return JSONResponse({"ok": True, "deleted": True, "session": metadata})
+        title = " ".join(str(body.get("title") or "").strip().split())
+        if not title:
+            return JSONResponse({"error": "title is required"}, status_code=400)
+        metadata = self.state_store.set_conversation_session_title(
+            profile_id=profile_id,
+            session_id=session_id,
+            title=title,
+        )
+        return JSONResponse({"ok": True, "session": metadata})
+
+    async def handle_persona_exchange(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid persona exchange request"}, status_code=400)
+        session_id = str(body.get("session_id") or "").strip()
+        user_message = str(body.get("user_message") or "")
+        assistant_response = str(body.get("assistant_response") or "")
+        if not session_id:
+            return JSONResponse({"error": "session_id is required"}, status_code=400)
+        if not user_message.strip() or not assistant_response.strip():
+            return JSONResponse({"error": "user_message and assistant_response are required"}, status_code=400)
+        recalled_memory_ids = body.get("recalled_memory_ids")
+        if not isinstance(recalled_memory_ids, list):
+            recalled_memory_ids = []
+        recent_conversation_turns = self._recent_persona_conversation_turns(
+            session_id,
+            user_message,
+            assistant_response,
+        )
+        snapshot = await self.persona_engine.update_from_exchange(
+            session_id=session_id,
+            user_message=user_message,
+            assistant_response=assistant_response,
+            recalled_memory_ids=[str(item) for item in recalled_memory_ids if str(item).strip()],
+            tool_summary=str(body.get("tool_summary") or ""),
+            recent_conversation_turns=recent_conversation_turns,
+        )
+        return JSONResponse({
+            "ok": True,
+            "updated": bool(self.persona_engine.enabled),
+            "session_id": session_id,
+            "state": snapshot,
+        })
+
     # ------------------------------------------------------------------
     # cc 前端协作者配置（4.5b）
     # 存这里而不是浏览器，是为了所有入口（电脑 / 手机 / 以后的自建引擎）读同一份。
@@ -21039,6 +21109,12 @@ def create_gateway_app(
     async def conversation_turns(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_conversation_turns(request)
 
+    async def conversation_session(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_conversation_session(request)
+
+    async def persona_exchange(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_persona_exchange(request)
+
     async def cc_personas(request: Request) -> Response:
         service = request.app.state.gateway_service
         if request.method == "POST":
@@ -21079,6 +21155,8 @@ def create_gateway_app(
             Route("/api/conversation/turn", conversation_turn, methods=["POST"]),
             Route("/api/conversation/sessions", conversation_sessions, methods=["GET"]),
             Route("/api/conversation/turns", conversation_turns, methods=["GET"]),
+            Route("/api/conversation/session", conversation_session, methods=["PATCH", "DELETE"]),
+            Route("/api/persona/exchange", persona_exchange, methods=["POST"]),
             Route("/api/cc/personas", cc_personas, methods=["GET", "POST", "DELETE"]),
             Route("/api/cc/upstream", cc_upstream, methods=["GET", "POST"]),
             Route("/api/cc/permissions", cc_permissions, methods=["GET", "POST"]),

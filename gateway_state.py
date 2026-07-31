@@ -141,6 +141,18 @@ class GatewayStateStore:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS conversation_sessions (
+                profile_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                deleted_at TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (profile_id, session_id)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS upstream_usage (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
@@ -797,6 +809,14 @@ class GatewayStateStore:
                 str(raw_json or ""),
             ),
         )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO conversation_sessions
+            (profile_id, session_id, title, deleted_at, updated_at)
+            VALUES (?, ?, '', NULL, ?)
+            """,
+            (safe_profile_id, safe_session_id, created_iso),
+        )
         if max_entries > 0:
             conn.execute(
                 """
@@ -975,24 +995,31 @@ class GatewayStateStore:
         safe_limit = max(1, min(200, int(limit or 50)))
         safe_profile_id = str(profile_id or "default").strip() or "default"
         safe_source = str(source or "").strip()
-        where_clause = "profile_id = ?"
+        where_clause = (
+            "turns.profile_id = ? AND NOT EXISTS ("
+            "SELECT 1 FROM conversation_sessions meta "
+            "WHERE meta.profile_id = turns.profile_id "
+            "AND meta.session_id = turns.session_id "
+            "AND COALESCE(meta.deleted_at, '') <> ''"
+            ")"
+        )
         params: list[Any] = [safe_profile_id]
         if safe_source:
-            where_clause += " AND source = ?"
+            where_clause += " AND turns.source = ?"
             params.append(safe_source)
         params.append(safe_limit)
         conn = self._connect()
         rows = conn.execute(
             f"""
-            SELECT session_id,
+            SELECT turns.session_id,
                    COUNT(*) AS turn_count,
                    MIN(created_at) AS first_at,
                    MAX(created_at) AS last_at,
                    MAX(id) AS last_id,
                    MIN(id) AS first_id
-            FROM conversation_turns
+            FROM conversation_turns turns
             WHERE {where_clause}
-            GROUP BY session_id
+            GROUP BY turns.session_id
             ORDER BY last_id DESC
             LIMIT ?
             """,
@@ -1008,7 +1035,16 @@ class GatewayStateStore:
                 """,
                 (row["first_id"],),
             ).fetchone()
-            title = ((head["user_text"] if head else "") or "").strip().replace("\n", " ")
+            meta = conn.execute(
+                """
+                SELECT title FROM conversation_sessions
+                WHERE profile_id = ? AND session_id = ?
+                """,
+                (safe_profile_id, row["session_id"]),
+            ).fetchone()
+            custom_title = ((meta["title"] if meta else "") or "").strip()
+            automatic_title = ((head["user_text"] if head else "") or "").strip().replace("\n", " ")
+            title = custom_title or automatic_title
             sessions.append(
                 {
                     "session_id": row["session_id"],
@@ -1024,6 +1060,100 @@ class GatewayStateStore:
             )
         conn.close()
         return sessions
+
+    def set_conversation_session_title(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        title: str,
+    ) -> dict[str, Any]:
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "").strip()
+        safe_title = " ".join(str(title or "").strip().split())[:120]
+        if not safe_session_id or not safe_title:
+            return {}
+        updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        conn = self._connect()
+        conn.execute(
+            """
+            INSERT INTO conversation_sessions
+            (profile_id, session_id, title, deleted_at, updated_at)
+            VALUES (?, ?, ?, NULL, ?)
+            ON CONFLICT(profile_id, session_id) DO UPDATE SET
+                title = excluded.title,
+                updated_at = excluded.updated_at
+            """,
+            (safe_profile_id, safe_session_id, safe_title, updated_at),
+        )
+        conn.commit()
+        conn.close()
+        return {
+            "profile_id": safe_profile_id,
+            "session_id": safe_session_id,
+            "title": safe_title,
+            "deleted_at": None,
+            "updated_at": updated_at,
+        }
+
+    def soft_delete_conversation_session(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "").strip()
+        if not safe_session_id:
+            return {}
+        deleted_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        conn = self._connect()
+        conn.execute(
+            """
+            INSERT INTO conversation_sessions
+            (profile_id, session_id, title, deleted_at, updated_at)
+            VALUES (?, ?, '', ?, ?)
+            ON CONFLICT(profile_id, session_id) DO UPDATE SET
+                deleted_at = excluded.deleted_at,
+                updated_at = excluded.updated_at
+            """,
+            (safe_profile_id, safe_session_id, deleted_at, deleted_at),
+        )
+        conn.commit()
+        conn.close()
+        return {
+            "profile_id": safe_profile_id,
+            "session_id": safe_session_id,
+            "deleted_at": deleted_at,
+            "updated_at": deleted_at,
+        }
+
+    def list_conversation_session_metadata(
+        self,
+        *,
+        profile_id: str,
+    ) -> list[dict[str, Any]]:
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        conn = self._connect()
+        rows = conn.execute(
+            """
+            SELECT profile_id, session_id, title, deleted_at, updated_at
+            FROM conversation_sessions
+            WHERE profile_id = ?
+            """,
+            (safe_profile_id,),
+        ).fetchall()
+        conn.close()
+        return [
+            {
+                "profile_id": row["profile_id"],
+                "session_id": row["session_id"],
+                "title": row["title"] or "",
+                "deleted_at": row["deleted_at"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
 
     def list_conversation_turns_by_session(
         self,

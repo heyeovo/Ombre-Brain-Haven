@@ -13096,13 +13096,57 @@ async def api_persona_get(request):
         session_id = (request.query_params.get("session_id") or "").strip() or None
         events_limit = _bounded_int(request.query_params.get("events_limit"), 20, 1, 100)
         sessions_limit = _bounded_int(request.query_params.get("sessions_limit"), 20, 1, 100)
-        return JSONResponse(
-            persona_engine.get_dashboard_payload(
-                session_id=session_id,
-                events_limit=events_limit,
-                sessions_limit=sessions_limit,
-            )
+        payload = persona_engine.get_dashboard_payload(
+            session_id=session_id,
+            events_limit=events_limit,
+            sessions_limit=sessions_limit,
         )
+        gateway_service = _resolve_gateway_config_service()
+        if gateway_service and gateway_service.state_store:
+            profile_id = str(getattr(persona_engine, "profile_id", "") or "default")
+            metadata_rows = gateway_service.state_store.list_conversation_session_metadata(
+                profile_id=profile_id,
+            )
+            deleted_ids = {
+                str(row.get("session_id") or "")
+                for row in metadata_rows
+                if row.get("deleted_at")
+            }
+            conversation_rows = gateway_service.state_store.list_conversation_sessions(
+                profile_id=profile_id,
+                limit=max(200, sessions_limit),
+            )
+            titles = {
+                str(row.get("session_id") or ""): str(row.get("title") or "")
+                for row in conversation_rows
+            }
+
+            def decorate_sessions(value):
+                visible = []
+                for item in value if isinstance(value, list) else []:
+                    if not isinstance(item, dict):
+                        continue
+                    item_session_id = str(item.get("session_id") or "")
+                    if item_session_id in deleted_ids:
+                        continue
+                    cleaned = dict(item)
+                    cleaned["title"] = titles.get(item_session_id, "")
+                    visible.append(cleaned)
+                return visible
+
+            visible_sessions = decorate_sessions(payload.get("sessions"))
+            active_session_id = str(payload.get("active_session_id") or "")
+            if active_session_id in deleted_ids and visible_sessions:
+                payload = persona_engine.get_dashboard_payload(
+                    session_id=str(visible_sessions[0].get("session_id") or ""),
+                    events_limit=events_limit,
+                    sessions_limit=sessions_limit,
+                )
+                visible_sessions = decorate_sessions(payload.get("sessions"))
+            elif active_session_id in deleted_ids:
+                payload["active_session_id"] = ""
+            payload["sessions"] = visible_sessions
+        return JSONResponse(payload)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -15252,6 +15296,10 @@ if __name__ == "__main__":
                 return await _gw_service.handle_conversation_sessions(request)
             async def _gw_conversation_turns(request):
                 return await _gw_service.handle_conversation_turns(request)
+            async def _gw_conversation_session(request):
+                return await _gw_service.handle_conversation_session(request)
+            async def _gw_persona_exchange(request):
+                return await _gw_service.handle_persona_exchange(request)
             async def _gw_cc_personas(request):
                 if request.method == "POST":
                     return await _gw_service.handle_cc_personas_save(request)
@@ -15284,6 +15332,8 @@ if __name__ == "__main__":
                 _GwRoute("/gateway/api/conversation/turn", _gw_conversation_turn, methods=["POST"]),
                 _GwRoute("/gateway/api/conversation/sessions", _gw_conversation_sessions, methods=["GET"]),
                 _GwRoute("/gateway/api/conversation/turns", _gw_conversation_turns, methods=["GET"]),
+                _GwRoute("/gateway/api/conversation/session", _gw_conversation_session, methods=["PATCH", "DELETE"]),
+                _GwRoute("/gateway/api/persona/exchange", _gw_persona_exchange, methods=["POST"]),
                 _GwRoute("/gateway/api/cc/personas", _gw_cc_personas, methods=["GET", "POST", "DELETE"]),
                 _GwRoute("/gateway/api/cc/upstream", _gw_cc_upstream, methods=["GET", "POST"]),
                 _GwRoute("/gateway/api/cc/permissions", _gw_cc_permissions, methods=["GET", "POST"]),

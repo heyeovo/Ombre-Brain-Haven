@@ -144,6 +144,8 @@ POST /api/bucket/{bucket_id}/merge-commit?into={id}      # 确认合并（更新
 POST   /gateway/api/conversation/turn
        # 兼容旧写入；携带 request_id + expected_last_round_id + persona_id 时
        # 使用原子 compare-and-append，并可同轮记录 recalled_bucket_ids / created_bucket_ids
+GET    /gateway/api/conversation/turn?request_id=
+       # 按 profile + request_id 读回已提交轮次及 raw_json/persona_id，供调用端持久幂等重放
 GET    /gateway/api/conversation/turns?session_id=&after_round_id=&source=
        # 读取窗口历史；after_round_id + source=selfhost 供 cc 跨引擎补齐
 GET    /gateway/api/conversation/session?session_id=&include_bucket_exclusions=1
@@ -257,6 +259,7 @@ dashboards 的 `/api/gateway/[...path]` 代理到这些路由，Bearer 网关鉴
 - 一个 `session_id` 永久绑定一个 `persona_id`；旧窗口从首轮 `client="ob2-chat/<persona>"` 回填，无主历史归 `ombre`。
 - `local_engine_preference` 只保存用户的本地首选；Vercel 的 `effective_engine=selfhost` 不得写回。
 - 严格写入用 `request_id` 防重复，用 `expected_last_round_id` 拒绝基于旧历史的跨设备追加；SQLite `BEGIN IMMEDIATE` 内统一分配下一轮。
+- `/api/conversation/turn?request_id=` 可在进程重启或换设备后读回严格写入结果；调用端校验 session/persona/user 原文后重放已保存过程，不再请求上游。
 - `cc_seen_round_id` 是 Claude Code 已读到的 Haven 轮次书签，只在 cc 轮次成功写库后推进。
 - 已召回桶继续落 `injected_buckets`；本窗口新建桶落 `session_created_buckets`，二者并集为该 session 的排除集合。
 - 永久删除只清理带 `profile_id` 的窗口数据，不删除长期记忆桶；旧的无 profile 诊断/冷却表暂不清理。

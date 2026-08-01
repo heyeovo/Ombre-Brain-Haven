@@ -211,6 +211,37 @@ class GatewayStateContractsTest(unittest.TestCase):
             2,
         )
 
+    def test_committed_turn_can_be_read_by_request_id_for_replay(self):
+        store = self.make_store()
+        committed = store.commit_conversation_turn(
+            profile_id="default",
+            session_id="session-1",
+            persona_id="ombre",
+            request_id="request-replay",
+            expected_last_round_id=0,
+            user_text="hello",
+            assistant_text="saved reply",
+            model="model-a",
+            client="ob2-chat/ombre",
+            route="/api/cc-chat-selfhost",
+            source="selfhost",
+            raw_json='{"usage":{"inputTokens":12}}',
+        )
+
+        replay = store.get_conversation_turn_by_request_id(
+            profile_id="default", request_id="request-replay"
+        )
+        self.assertEqual(replay["id"], committed["turn"]["id"])
+        self.assertEqual(replay["persona_id"], "ombre")
+        self.assertEqual(replay["assistant_text"], "saved reply")
+        self.assertEqual(replay["raw_json"], '{"usage":{"inputTokens":12}}')
+        self.assertEqual(
+            store.get_conversation_turn_by_request_id(
+                profile_id="default", request_id="missing"
+            ),
+            {},
+        )
+
     def test_request_id_and_persona_cannot_be_reused(self):
         store = self.make_store()
         self.commit(store, request_id="request-1", expected=0)

@@ -243,6 +243,8 @@ Persona 不是事实记忆，不能回答“发生过什么”，也不应覆盖
 
 Gateway 会把成功完成的 user / assistant 轮次持久保存到 `conversation_turns`。这张表也是 cc、Polaris 历史导入和未来 API 聊天共用的对话原文层；它不再按 `conversation_turns_max_entries` 自动删除旧轮次，该旧参数只保留调用兼容，运行时始终覆盖为 `0`。旧 `config.yaml` / `config.example.yaml` 即使仍显示 `500` 也不会生效。当问题包含“刚才、刚刚、上一句、之前那个”等近指表达时，Gateway 会从已保存原文中优先选择最近相关轮次，拼成 `Just Now Chat Context`，而不是用长期语义记忆猜测。
 
+cc/selfhost 严格写入可以携带 `request_id`、`expected_last_round_id` 与 `persona_id`：Haven 在同一事务中检查幂等、窗口协作者归属和最后轮次，冲突时拒绝分叉。已提交轮次可通过 `GET /gateway/api/conversation/turn?request_id=...` 读回（含 `raw_json`），用于跨重启、跨设备的持久幂等重放。
+
 这里要区分三层限制：**存储层不按轮数裁剪**；列表和聊天页面可以分页读取（例如每页 100 轮），分页不会删除数据；Just Now、handoff 和模型请求仍会按各自的时间范围、条数与 token 预算选取一部分原文，避免把整库塞进一次请求。
 
 因此，这不是真正的无缝共享上下文。新窗口里的模型看不到旧窗口的隐藏上下文；系统只是从完整原文库中选择少量对话重新拼接进本轮输入。连续性取决于：

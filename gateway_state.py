@@ -1001,6 +1001,42 @@ class GatewayStateStore:
             "request_id": str(row["request_id"] or ""),
         }
 
+    def get_conversation_turn_by_request_id(
+        self,
+        *,
+        profile_id: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Read a committed turn for durable selfhost idempotent replay."""
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_request_id = str(request_id or "").strip()
+        if not safe_request_id:
+            return {}
+        conn = self._connect()
+        row = conn.execute(
+            """
+            SELECT turns.id, turns.profile_id, turns.session_id, turns.round_id,
+                   turns.created_at, turns.user_text, turns.assistant_text,
+                   turns.model, turns.client, turns.route, turns.source,
+                   turns.raw_json, turns.request_id,
+                   COALESCE(sessions.persona_id, 'ombre') AS persona_id
+            FROM conversation_turns AS turns
+            LEFT JOIN conversation_sessions AS sessions
+              ON sessions.profile_id = turns.profile_id
+             AND sessions.session_id = turns.session_id
+            WHERE turns.profile_id = ? AND turns.request_id = ?
+            """,
+            (safe_profile_id, safe_request_id),
+        ).fetchone()
+        conn.close()
+        if row is None:
+            return {}
+        return {
+            **self._conversation_turn_row_payload(row),
+            "persona_id": str(row["persona_id"] or "ombre"),
+            "raw_json": str(row["raw_json"] or ""),
+        }
+
     def commit_conversation_turn(
         self,
         *,

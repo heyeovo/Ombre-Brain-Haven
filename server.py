@@ -15331,7 +15331,7 @@ if __name__ == "__main__":
                 _GwRoute("/gateway/api/hook/recall", _gw_hook_recall, methods=["POST"]),
                 _GwRoute("/gateway/api/debug/recall-eval", _gw_recall_eval_debug, methods=["GET"]),
                 _GwRoute("/gateway/api/debug/upstream-usage", _gw_upstream_usage_debug, methods=["GET"]),
-                _GwRoute("/gateway/api/conversation/turn", _gw_conversation_turn, methods=["POST"]),
+                _GwRoute("/gateway/api/conversation/turn", _gw_conversation_turn, methods=["GET", "POST"]),
                 _GwRoute("/gateway/api/conversation/import/polaris", _gw_polaris_conversation_import, methods=["POST"]),
                 _GwRoute("/gateway/api/conversation/sessions", _gw_conversation_sessions, methods=["GET"]),
                 _GwRoute("/gateway/api/conversation/turns", _gw_conversation_turns, methods=["GET"]),

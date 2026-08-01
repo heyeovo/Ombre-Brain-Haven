@@ -2664,6 +2664,18 @@ class GatewayService:
         if auth_result is not None:
             return auth_result
 
+        if request.method == "GET":
+            request_id = str(request.query_params.get("request_id") or "").strip()
+            if not request_id:
+                return JSONResponse({"error": "request_id is required"}, status_code=400)
+            turn = self.state_store.get_conversation_turn_by_request_id(
+                profile_id=self._conversation_profile_id,
+                request_id=request_id,
+            )
+            if not turn:
+                return JSONResponse({"error": "turn not found"}, status_code=404)
+            return JSONResponse({"ok": True, "turn": turn})
+
         try:
             body = await request.json()
         except Exception:
@@ -21615,7 +21627,7 @@ def create_gateway_app(
             Route("/api/debug/upstream-usage", upstream_usage_debug, methods=["GET"]),
             # ⚠️ 加路由必须同时加进 server.py 的 /gateway/* 转发表，
             # 否则公网打过去 404（第 2 步已经踩过一次）。
-            Route("/api/conversation/turn", conversation_turn, methods=["POST"]),
+            Route("/api/conversation/turn", conversation_turn, methods=["GET", "POST"]),
             Route("/api/conversation/import/polaris", polaris_conversation_import, methods=["POST"]),
             Route("/api/conversation/sessions", conversation_sessions, methods=["GET"]),
             Route("/api/conversation/turns", conversation_turns, methods=["GET"]),

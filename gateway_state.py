@@ -1,8 +1,36 @@
 import os
 import json
 import sqlite3
+import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+
+class ConversationConflictError(Exception):
+    def __init__(self, expected_round_id: int, actual_round_id: int):
+        super().__init__("conversation head changed")
+        self.expected_round_id = expected_round_id
+        self.actual_round_id = actual_round_id
+
+
+class ConversationPersonaConflictError(Exception):
+    def __init__(self, expected_persona_id: str, actual_persona_id: str):
+        super().__init__("conversation belongs to another persona")
+        self.expected_persona_id = expected_persona_id
+        self.actual_persona_id = actual_persona_id
+
+
+class RequestIdReuseError(Exception):
+    def __init__(self, request_id: str):
+        super().__init__("request_id was reused with different content")
+        self.request_id = request_id
+
+
+class SessionStateConflictError(Exception):
+    def __init__(self, expected_version: int, actual_version: int):
+        super().__init__("conversation session state changed")
+        self.expected_version = expected_version
+        self.actual_version = actual_version
 
 
 class GatewayStateStore:
@@ -26,16 +54,19 @@ class GatewayStateStore:
         conn: sqlite3.Connection,
         table: str,
         columns: dict[str, str],
-    ) -> None:
+    ) -> set[str]:
         """给已存在的表补列（幂等）。老库升级用，不重建表。"""
         existing = {
             str(row["name"])
             for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
         }
+        added: set[str] = set()
         for name, ddl in columns.items():
             if name in existing:
                 continue
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+            added.add(name)
+        return added
 
     def _init_db(self) -> None:
         conn = self._connect()
@@ -112,6 +143,10 @@ class GatewayStateStore:
                 model TEXT NOT NULL DEFAULT '',
                 client TEXT NOT NULL DEFAULT '',
                 route TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT 'gateway',
+                raw_json TEXT NOT NULL DEFAULT '',
+                request_id TEXT,
+                request_fingerprint TEXT,
                 UNIQUE(profile_id, session_id, round_id)
             )
             """
@@ -125,6 +160,8 @@ class GatewayStateStore:
             {
                 "source": "TEXT NOT NULL DEFAULT 'gateway'",
                 "raw_json": "TEXT NOT NULL DEFAULT ''",
+                "request_id": "TEXT",
+                "request_fingerprint": "TEXT",
             },
         )
         conn.execute(
@@ -141,16 +178,74 @@ class GatewayStateStore:
         )
         conn.execute(
             """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_turns_request_id
+            ON conversation_turns (profile_id, request_id)
+            WHERE request_id IS NOT NULL AND request_id != ''
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS conversation_sessions (
                 profile_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,
+                persona_id TEXT NOT NULL DEFAULT 'ombre',
                 title TEXT NOT NULL DEFAULT '',
+                local_engine_preference TEXT NOT NULL DEFAULT 'cc',
+                selfhost_overrides_json TEXT NOT NULL DEFAULT '{}',
+                cc_seen_round_id INTEGER NOT NULL DEFAULT 0,
+                state_version INTEGER NOT NULL DEFAULT 0,
                 deleted_at TEXT,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (profile_id, session_id)
             )
             """
         )
+        session_columns_added = self._ensure_columns(
+            conn,
+            "conversation_sessions",
+            {
+                "persona_id": "TEXT NOT NULL DEFAULT 'ombre'",
+                "local_engine_preference": "TEXT NOT NULL DEFAULT 'cc'",
+                "selfhost_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
+                "cc_seen_round_id": "INTEGER NOT NULL DEFAULT 0",
+                "state_version": "INTEGER NOT NULL DEFAULT 0",
+            },
+        )
+        if "persona_id" in session_columns_added:
+            # 4.5b 起现有 cc 窗口把归属写在首轮 client="ob2-chat/<persona_id>"。
+            # 无归属的更早历史继续按既有产品规则归给 ombre。
+            conn.execute(
+                """
+                UPDATE conversation_sessions
+                SET persona_id = COALESCE((
+                    SELECT CASE
+                        WHEN turns.client LIKE 'ob2-chat/%'
+                        THEN SUBSTR(turns.client, LENGTH('ob2-chat/') + 1)
+                        ELSE NULL
+                    END
+                    FROM conversation_turns turns
+                    WHERE turns.profile_id = conversation_sessions.profile_id
+                      AND turns.session_id = conversation_sessions.session_id
+                      AND turns.client LIKE 'ob2-chat/%'
+                    ORDER BY turns.round_id ASC, turns.id ASC
+                    LIMIT 1
+                ), 'ombre')
+                """
+            )
+        if "cc_seen_round_id" in session_columns_added:
+            # 10.1 上线前还没有 selfhost 对话；把现有最新轮次作为 cc 已知基线，
+            # 避免首次切换时把整段旧历史重复补入 Claude Code。
+            conn.execute(
+                """
+                UPDATE conversation_sessions
+                SET cc_seen_round_id = COALESCE((
+                    SELECT MAX(turns.round_id)
+                    FROM conversation_turns turns
+                    WHERE turns.profile_id = conversation_sessions.profile_id
+                      AND turns.session_id = conversation_sessions.session_id
+                ), 0)
+                """
+            )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS conversation_import_archives (
@@ -224,6 +319,7 @@ class GatewayStateStore:
                 recall_on INTEGER NOT NULL DEFAULT 1,
                 semantic_on INTEGER NOT NULL DEFAULT 1,
                 engine TEXT NOT NULL DEFAULT 'api',
+                selfhost_defaults_json TEXT NOT NULL DEFAULT '{}',
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL DEFAULT ''
@@ -237,7 +333,25 @@ class GatewayStateStore:
             {
                 "dirs": "TEXT NOT NULL DEFAULT '[]'",
                 "write_dirs": "TEXT NOT NULL DEFAULT '[]'",
+                "selfhost_defaults_json": "TEXT NOT NULL DEFAULT '{}'",
             },
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_created_buckets (
+                profile_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                bucket_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (profile_id, session_id, bucket_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_session_created_buckets_lookup
+            ON session_created_buckets (profile_id, session_id, created_at DESC)
+            """
         )
         # cc 前端的「上游模型配置」（5.2）。整个配置就一个对象，所以一行 JSON，
         # 不建结构化表 —— 里面是中转站清单 + 订阅侧可选模型 + 新对话的默认值，
@@ -326,6 +440,14 @@ class GatewayStateStore:
             return []
         return [str(item).strip() for item in value if str(item).strip()]
 
+    @staticmethod
+    def _json_object(raw: Any) -> dict[str, Any]:
+        try:
+            value = json.loads(raw or "{}") if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            return {}
+        return dict(value) if isinstance(value, dict) else {}
+
     @classmethod
     def _cc_persona_row_to_dict(cls, row: sqlite3.Row) -> dict[str, Any]:
         keys = row.keys()
@@ -334,6 +456,11 @@ class GatewayStateStore:
         dirs = cls._cc_persona_json_list(row["dirs"]) if "dirs" in keys else []
         write_dirs = (
             cls._cc_persona_json_list(row["write_dirs"]) if "write_dirs" in keys else []
+        )
+        selfhost_defaults = (
+            cls._json_object(row["selfhost_defaults_json"])
+            if "selfhost_defaults_json" in keys
+            else {}
         )
         return {
             "id": str(row["id"]),
@@ -350,6 +477,7 @@ class GatewayStateStore:
             "recall_on": bool(row["recall_on"]),
             "semantic_on": bool(row["semantic_on"]),
             "engine": row["engine"] or "api",
+            "selfhost_defaults": selfhost_defaults,
             "sort_order": int(row["sort_order"] or 0),
             "created_at": row["created_at"] or "",
             "updated_at": row["updated_at"] or "",
@@ -420,6 +548,11 @@ class GatewayStateStore:
                 ]
             else:
                 merged[dir_field] = []
+        if "selfhost_defaults" in persona:
+            raw_defaults = persona.get("selfhost_defaults")
+            merged["selfhost_defaults"] = (
+                dict(raw_defaults) if isinstance(raw_defaults, dict) else {}
+            )
 
         merged.setdefault("recall_on", True)
         merged.setdefault("semantic_on", True)
@@ -428,6 +561,7 @@ class GatewayStateStore:
         merged.setdefault("memory_entries", [])
         merged.setdefault("dirs", [])
         merged.setdefault("write_dirs", [])
+        merged.setdefault("selfhost_defaults", {})
         for field in self._CC_PERSONA_TEXT_FIELDS:
             merged.setdefault(field, "")
 
@@ -436,9 +570,9 @@ class GatewayStateStore:
             """
             INSERT OR REPLACE INTO cc_personas
             (id, name, initial, tint, user_name, purpose, description, prompt,
-             memory_entries, dirs, write_dirs, recall_on, semantic_on, engine, sort_order,
-             created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             memory_entries, dirs, write_dirs, recall_on, semantic_on, engine,
+             selfhost_defaults_json, sort_order, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 safe_id,
@@ -455,6 +589,7 @@ class GatewayStateStore:
                 1 if merged["recall_on"] else 0,
                 1 if merged["semantic_on"] else 0,
                 merged["engine"] or "api",
+                json.dumps(merged["selfhost_defaults"], ensure_ascii=False),
                 int(merged["sort_order"] or 0),
                 (existing or {}).get("created_at") or now,
                 now,
@@ -839,6 +974,300 @@ class GatewayStateStore:
         conn.close()
         return turn_id
 
+    @staticmethod
+    def _conversation_request_fingerprint(payload: dict[str, Any]) -> str:
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _conversation_turn_row_payload(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": int(row["id"]),
+            "profile_id": str(row["profile_id"]),
+            "session_id": str(row["session_id"]),
+            "round_id": int(row["round_id"]),
+            "created_at": str(row["created_at"] or ""),
+            "user_text": str(row["user_text"] or ""),
+            "assistant_text": str(row["assistant_text"] or ""),
+            "model": str(row["model"] or ""),
+            "client": str(row["client"] or ""),
+            "route": str(row["route"] or ""),
+            "source": str(row["source"] or "gateway"),
+            "request_id": str(row["request_id"] or ""),
+        }
+
+    def commit_conversation_turn(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        persona_id: str,
+        request_id: str,
+        expected_last_round_id: int | None,
+        user_text: str,
+        assistant_text: str = "",
+        model: str = "",
+        client: str = "",
+        route: str = "",
+        source: str = "gateway",
+        raw_json: str = "",
+        recalled_bucket_ids: list[str] | None = None,
+        created_bucket_ids: list[str] | None = None,
+        created_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Strict idempotent compare-and-append for cc/selfhost conversation turns."""
+        created_at = created_at or datetime.now(timezone.utc)
+        created_iso = created_at.isoformat(timespec="seconds")
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "").strip()
+        safe_persona_id = str(persona_id or "").strip()
+        safe_request_id = str(request_id or "").strip()
+        if not safe_session_id:
+            raise ValueError("session_id is required")
+        if not safe_persona_id:
+            raise ValueError("persona_id is required")
+        if not safe_request_id:
+            raise ValueError("request_id is required")
+        if len(safe_request_id) > 128:
+            raise ValueError("request_id is too long")
+
+        try:
+            expected_round = int(expected_last_round_id or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("expected_last_round_id must be an integer or null") from exc
+        if expected_round < 0:
+            raise ValueError("expected_last_round_id must be zero or greater")
+
+        recalled_ids = list(dict.fromkeys(
+            str(item or "").strip() for item in (recalled_bucket_ids or []) if str(item or "").strip()
+        ))
+        created_ids = list(dict.fromkeys(
+            str(item or "").strip() for item in (created_bucket_ids or []) if str(item or "").strip()
+        ))
+        fingerprint = self._conversation_request_fingerprint(
+            {
+                "session_id": safe_session_id,
+                "persona_id": safe_persona_id,
+                "expected_last_round_id": expected_round,
+                "user_text": str(user_text or ""),
+                "assistant_text": str(assistant_text or ""),
+                "model": str(model or ""),
+                "client": str(client or ""),
+                "route": str(route or ""),
+                "source": str(source or "gateway").strip() or "gateway",
+                "recalled_bucket_ids": sorted(recalled_ids),
+                "created_bucket_ids": sorted(created_ids),
+            }
+        )
+
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                """
+                SELECT id, profile_id, session_id, round_id, created_at,
+                       user_text, assistant_text, model, client, route, source,
+                       request_id, request_fingerprint
+                FROM conversation_turns
+                WHERE profile_id = ? AND request_id = ?
+                """,
+                (safe_profile_id, safe_request_id),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing["session_id"]) != safe_session_id
+                    or str(existing["request_fingerprint"] or "") != fingerprint
+                ):
+                    raise RequestIdReuseError(safe_request_id)
+                conn.rollback()
+                return {
+                    "turn": self._conversation_turn_row_payload(existing),
+                    "idempotent_replay": True,
+                }
+
+            session = conn.execute(
+                """
+                SELECT persona_id, cc_seen_round_id, state_version
+                FROM conversation_sessions
+                WHERE profile_id = ? AND session_id = ?
+                """,
+                (safe_profile_id, safe_session_id),
+            ).fetchone()
+            if session is not None:
+                actual_persona_id = str(session["persona_id"] or "ombre")
+                if actual_persona_id != safe_persona_id:
+                    raise ConversationPersonaConflictError(safe_persona_id, actual_persona_id)
+
+            head = conn.execute(
+                """
+                SELECT COALESCE(MAX(round_id), 0) AS current_round
+                FROM conversation_turns
+                WHERE profile_id = ? AND session_id = ?
+                """,
+                (safe_profile_id, safe_session_id),
+            ).fetchone()
+            actual_round = int(head["current_round"] or 0)
+            if actual_round != expected_round:
+                raise ConversationConflictError(expected_round, actual_round)
+            next_round = actual_round + 1
+
+            cursor = conn.execute(
+                """
+                INSERT INTO conversation_turns
+                (profile_id, session_id, round_id, created_at, user_text, assistant_text,
+                 model, client, route, source, raw_json, request_id, request_fingerprint)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    safe_profile_id,
+                    safe_session_id,
+                    next_round,
+                    created_iso,
+                    str(user_text or ""),
+                    str(assistant_text or ""),
+                    str(model or ""),
+                    str(client or ""),
+                    str(route or ""),
+                    str(source or "gateway").strip() or "gateway",
+                    str(raw_json or ""),
+                    safe_request_id,
+                    fingerprint,
+                ),
+            )
+
+            if session is None:
+                cc_seen_round_id = next_round if str(source or "").strip() == "cc" else 0
+                conn.execute(
+                    """
+                    INSERT INTO conversation_sessions
+                    (profile_id, session_id, persona_id, title, local_engine_preference,
+                     selfhost_overrides_json, cc_seen_round_id, state_version,
+                     deleted_at, updated_at)
+                    VALUES (?, ?, ?, '', 'cc', '{}', ?, ?, NULL, ?)
+                    """,
+                    (
+                        safe_profile_id,
+                        safe_session_id,
+                        safe_persona_id,
+                        cc_seen_round_id,
+                        1 if cc_seen_round_id else 0,
+                        created_iso,
+                    ),
+                )
+            else:
+                advances_cc_cursor = str(source or "").strip() == "cc"
+                conn.execute(
+                    """
+                    UPDATE conversation_sessions
+                    SET cc_seen_round_id = CASE
+                            WHEN ? = 1 THEN MAX(cc_seen_round_id, ?)
+                            ELSE cc_seen_round_id
+                        END,
+                        state_version = state_version + CASE WHEN ? = 1 THEN 1 ELSE 0 END,
+                        deleted_at = NULL,
+                        updated_at = ?
+                    WHERE profile_id = ? AND session_id = ?
+                    """,
+                    (
+                        1 if advances_cc_cursor else 0,
+                        next_round,
+                        1 if advances_cc_cursor else 0,
+                        created_iso,
+                        safe_profile_id,
+                        safe_session_id,
+                    ),
+                )
+
+            if recalled_ids:
+                recall_head = conn.execute(
+                    "SELECT COALESCE(MAX(round_id), 0) AS current_round FROM request_rounds WHERE session_id = ?",
+                    (safe_session_id,),
+                ).fetchone()
+                recall_round = int(recall_head["current_round"] or 0) + 1
+                conn.execute(
+                    "INSERT INTO request_rounds (session_id, round_id, completed_at) VALUES (?, ?, ?)",
+                    (safe_session_id, recall_round, created_iso),
+                )
+                conn.executemany(
+                    """
+                    INSERT OR IGNORE INTO injected_buckets
+                    (session_id, round_id, bucket_id, injected_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    [
+                        (safe_session_id, recall_round, bucket_id, created_iso)
+                        for bucket_id in recalled_ids
+                    ],
+                )
+
+            if created_ids:
+                conn.executemany(
+                    """
+                    INSERT OR IGNORE INTO session_created_buckets
+                    (profile_id, session_id, bucket_id, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    [
+                        (safe_profile_id, safe_session_id, bucket_id, created_iso)
+                        for bucket_id in created_ids
+                    ],
+                )
+
+            turn_id = int(cursor.lastrowid or 0)
+            conn.commit()
+            row = conn.execute(
+                """
+                SELECT id, profile_id, session_id, round_id, created_at,
+                       user_text, assistant_text, model, client, route, source,
+                       request_id
+                FROM conversation_turns WHERE id = ?
+                """,
+                (turn_id,),
+            ).fetchone()
+            return {
+                "turn": self._conversation_turn_row_payload(row),
+                "idempotent_replay": False,
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def get_session_bucket_exclusion_ids(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+    ) -> set[str]:
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "").strip()
+        if not safe_session_id:
+            return set()
+        conn = self._connect()
+        recalled = conn.execute(
+            "SELECT DISTINCT bucket_id FROM injected_buckets WHERE session_id = ?",
+            (safe_session_id,),
+        ).fetchall()
+        created = conn.execute(
+            """
+            SELECT bucket_id FROM session_created_buckets
+            WHERE profile_id = ? AND session_id = ?
+            """,
+            (safe_profile_id, safe_session_id),
+        ).fetchall()
+        conn.close()
+        return {
+            str(row["bucket_id"])
+            for row in [*recalled, *created]
+            if str(row["bucket_id"] or "").strip()
+        }
+
     def import_conversation_archive(
         self,
         *,
@@ -1118,11 +1547,13 @@ class GatewayStateStore:
         profile_id: str,
         limit: int = 50,
         source: str = "",
+        persona_id: str = "",
     ) -> list[dict[str, Any]]:
         """会话列表：每个 session_id 一行，带轮数、时间范围和第一句用户原话做标题。"""
         safe_limit = max(1, min(200, int(limit or 50)))
         safe_profile_id = str(profile_id or "default").strip() or "default"
         safe_source = str(source or "").strip()
+        safe_persona_id = str(persona_id or "").strip()
         where_clause = (
             "turns.profile_id = ? AND NOT EXISTS ("
             "SELECT 1 FROM conversation_sessions meta "
@@ -1135,6 +1566,14 @@ class GatewayStateStore:
         if safe_source:
             where_clause += " AND turns.source = ?"
             params.append(safe_source)
+        if safe_persona_id:
+            where_clause += (
+                " AND EXISTS (SELECT 1 FROM conversation_sessions owner "
+                "WHERE owner.profile_id = turns.profile_id "
+                "AND owner.session_id = turns.session_id "
+                "AND owner.persona_id = ?)"
+            )
+            params.append(safe_persona_id)
         params.append(safe_limit)
         conn = self._connect()
         rows = conn.execute(
@@ -1165,7 +1604,7 @@ class GatewayStateStore:
             ).fetchone()
             meta = conn.execute(
                 """
-                SELECT title FROM conversation_sessions
+                SELECT persona_id, title FROM conversation_sessions
                 WHERE profile_id = ? AND session_id = ?
                 """,
                 (safe_profile_id, row["session_id"]),
@@ -1176,6 +1615,7 @@ class GatewayStateStore:
             sessions.append(
                 {
                     "session_id": row["session_id"],
+                    "persona_id": (meta["persona_id"] if meta else "ombre") or "ombre",
                     "turn_count": int(row["turn_count"] or 0),
                     "first_at": row["first_at"],
                     "last_at": row["last_at"],
@@ -1256,6 +1696,195 @@ class GatewayStateStore:
             "updated_at": deleted_at,
         }
 
+    def get_conversation_session_state(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "").strip()
+        if not safe_session_id:
+            return {}
+        conn = self._connect()
+        row = conn.execute(
+            """
+            SELECT profile_id, session_id, persona_id, title,
+                   local_engine_preference, selfhost_overrides_json,
+                   cc_seen_round_id, state_version, deleted_at, updated_at
+            FROM conversation_sessions
+            WHERE profile_id = ? AND session_id = ?
+            """,
+            (safe_profile_id, safe_session_id),
+        ).fetchone()
+        conn.close()
+        if row is None:
+            return {}
+        preference = str(row["local_engine_preference"] or "cc")
+        if preference not in {"cc", "selfhost"}:
+            preference = "cc"
+        return {
+            "profile_id": str(row["profile_id"]),
+            "session_id": str(row["session_id"]),
+            "persona_id": str(row["persona_id"] or "ombre"),
+            "title": str(row["title"] or ""),
+            "local_engine_preference": preference,
+            "selfhost_overrides": self._json_object(row["selfhost_overrides_json"]),
+            "cc_seen_round_id": int(row["cc_seen_round_id"] or 0),
+            "state_version": int(row["state_version"] or 0),
+            "deleted_at": row["deleted_at"],
+            "updated_at": str(row["updated_at"] or ""),
+        }
+
+    def patch_conversation_session_state(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        persona_id: str,
+        updates: dict[str, Any],
+        expected_state_version: int | None = None,
+    ) -> dict[str, Any]:
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "").strip()
+        safe_persona_id = str(persona_id or "").strip()
+        if not safe_session_id:
+            raise ValueError("session_id is required")
+        if not safe_persona_id:
+            raise ValueError("persona_id is required")
+        if not isinstance(updates, dict):
+            raise ValueError("updates must be an object")
+        if "effective_engine" in updates:
+            raise ValueError("effective_engine is runtime-only and cannot be persisted")
+        allowed = {"local_engine_preference", "selfhost_overrides"}
+        unknown = sorted(set(updates) - allowed)
+        if unknown:
+            raise ValueError(f"unsupported session state fields: {', '.join(unknown)}")
+
+        preference: str | None = None
+        if "local_engine_preference" in updates:
+            preference = str(updates.get("local_engine_preference") or "").strip()
+            if preference not in {"cc", "selfhost"}:
+                raise ValueError("local_engine_preference must be cc or selfhost")
+        overrides: dict[str, Any] | None = None
+        if "selfhost_overrides" in updates:
+            raw_overrides = updates.get("selfhost_overrides")
+            if not isinstance(raw_overrides, dict):
+                raise ValueError("selfhost_overrides must be an object")
+            overrides = dict(raw_overrides)
+
+        updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT persona_id, local_engine_preference, selfhost_overrides_json,
+                       state_version
+                FROM conversation_sessions
+                WHERE profile_id = ? AND session_id = ?
+                """,
+                (safe_profile_id, safe_session_id),
+            ).fetchone()
+            if row is not None:
+                actual_persona_id = str(row["persona_id"] or "ombre")
+                if actual_persona_id != safe_persona_id:
+                    raise ConversationPersonaConflictError(safe_persona_id, actual_persona_id)
+                current_version = int(row["state_version"] or 0)
+                if (
+                    expected_state_version is not None
+                    and int(expected_state_version) != current_version
+                ):
+                    raise SessionStateConflictError(int(expected_state_version), current_version)
+                current_preference = str(row["local_engine_preference"] or "cc")
+                current_overrides = self._json_object(row["selfhost_overrides_json"])
+            else:
+                current_version = 0
+                if expected_state_version not in (None, 0):
+                    raise SessionStateConflictError(int(expected_state_version), 0)
+                current_preference = "cc"
+                current_overrides = {}
+
+            next_preference = preference or current_preference
+            next_overrides = overrides if overrides is not None else current_overrides
+            next_version = current_version + 1
+            conn.execute(
+                """
+                INSERT INTO conversation_sessions
+                (profile_id, session_id, persona_id, title, local_engine_preference,
+                 selfhost_overrides_json, cc_seen_round_id, state_version,
+                 deleted_at, updated_at)
+                VALUES (?, ?, ?, '', ?, ?, 0, ?, NULL, ?)
+                ON CONFLICT(profile_id, session_id) DO UPDATE SET
+                    local_engine_preference = excluded.local_engine_preference,
+                    selfhost_overrides_json = excluded.selfhost_overrides_json,
+                    state_version = excluded.state_version,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    safe_profile_id,
+                    safe_session_id,
+                    safe_persona_id,
+                    next_preference,
+                    json.dumps(next_overrides, ensure_ascii=False),
+                    next_version,
+                    updated_at,
+                ),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return self.get_conversation_session_state(
+            profile_id=safe_profile_id,
+            session_id=safe_session_id,
+        )
+
+    def permanently_delete_conversation_session(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+    ) -> dict[str, int]:
+        """Delete one chat window's profile-scoped records, never memory buckets."""
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "").strip()
+        if not safe_session_id:
+            raise ValueError("session_id is required")
+        conn = self._connect()
+        counts: dict[str, int] = {}
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            owner = conn.execute(
+                """
+                SELECT profile_id FROM conversation_sessions
+                WHERE profile_id = ? AND session_id = ?
+                """,
+                (safe_profile_id, safe_session_id),
+            ).fetchone()
+            if owner is None:
+                raise ValueError("session ownership could not be verified")
+            for table in (
+                "conversation_turns",
+                "conversation_sessions",
+                "conversation_import_archives",
+                "session_created_buckets",
+            ):
+                cursor = conn.execute(
+                    f"DELETE FROM {table} WHERE profile_id = ? AND session_id = ?",
+                    (safe_profile_id, safe_session_id),
+                )
+                counts[table] = max(0, int(cursor.rowcount or 0))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return counts
+
     def list_conversation_session_metadata(
         self,
         *,
@@ -1265,7 +1894,9 @@ class GatewayStateStore:
         conn = self._connect()
         rows = conn.execute(
             """
-            SELECT profile_id, session_id, title, deleted_at, updated_at
+            SELECT profile_id, session_id, persona_id, title,
+                   local_engine_preference, cc_seen_round_id, state_version,
+                   deleted_at, updated_at
             FROM conversation_sessions
             WHERE profile_id = ?
             """,
@@ -1276,7 +1907,11 @@ class GatewayStateStore:
             {
                 "profile_id": row["profile_id"],
                 "session_id": row["session_id"],
+                "persona_id": row["persona_id"] or "ombre",
                 "title": row["title"] or "",
+                "local_engine_preference": row["local_engine_preference"] or "cc",
+                "cc_seen_round_id": int(row["cc_seen_round_id"] or 0),
+                "state_version": int(row["state_version"] or 0),
                 "deleted_at": row["deleted_at"],
                 "updated_at": row["updated_at"],
             }
@@ -1290,6 +1925,8 @@ class GatewayStateStore:
         session_id: str,
         limit: int = 200,
         before_id: int | None = None,
+        after_round_id: int | None = None,
+        source: str = "",
         include_raw: bool = False,
     ) -> list[dict[str, Any]]:
         """某个会话的消息，按时间正序返回（界面直接顺着渲染）。"""
@@ -1303,6 +1940,13 @@ class GatewayStateStore:
         if before_id is not None:
             where_clause += " AND id < ?"
             params.append(int(before_id))
+        if after_round_id is not None:
+            where_clause += " AND round_id > ?"
+            params.append(int(after_round_id))
+        safe_source = str(source or "").strip()
+        if safe_source:
+            where_clause += " AND source = ?"
+            params.append(safe_source)
         params.append(safe_limit)
         conn = self._connect()
         rows = conn.execute(

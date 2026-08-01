@@ -38,7 +38,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 |------|------|
 | `server.py` | **Brain** 入口（~640KB）。MCP 工具注册（`@mcp.custom_route`）+ REST API + 记忆核心 |
 | `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线 + cc 持久化路由（`Route()` 注册） |
-| `gateway_state.py` | Gateway 会话状态 / 上游管理 |
+| `gateway_state.py` | Gateway/cc SQLite 状态：会话原文、协作者归属、窗口配置、幂等写入、跨设备冲突、cc 游标与桶排除账本 |
 | `bucket_manager.py` | 桶 CRUD、搜索、评分、回收站、命中统计、分词 |
 | `dehydrator.py` | LLM 脱水、合并、打标（含 `_last_merge_usage` 成本追踪） |
 | `decay_engine.py` | 衰减引擎，计算 score |
@@ -137,6 +137,21 @@ POST /api/bucket/{bucket_id}/merge-commit?into={id}      # 确认合并（更新
 
 ### 可观测性
 ```
+
+### Gateway / cc 会话持久化
+```
+POST   /gateway/api/conversation/turn
+       # 兼容旧写入；携带 request_id + expected_last_round_id + persona_id 时
+       # 使用原子 compare-and-append，并可同轮记录 recalled_bucket_ids / created_bucket_ids
+GET    /gateway/api/conversation/turns?session_id=&after_round_id=&source=
+       # 读取窗口历史；after_round_id + source=selfhost 供 cc 跨引擎补齐
+GET    /gateway/api/conversation/session?session_id=&include_bucket_exclusions=1
+       # 窗口归属、local_engine_preference、selfhost 覆盖、cc 阅读游标与可选桶排除集合
+PATCH  /gateway/api/conversation/session
+       # 修改持久窗口覆盖；effective_engine 是运行态，拒绝入库
+DELETE /gateway/api/conversation/session
+       # 默认软删除；permanent=true 且 confirm_session_id 精确匹配时永久删除窗口数据
+```
 GET  /api/hit-stats?limit=&include_zero=&order=&exclude_gated=   # 命中统计
 POST /api/hit-stats/reset                                       # 重置
 GET  /api/recent-searches?limit=                                # 检索追溯
@@ -229,12 +244,21 @@ GET /api/debug/injections             # 注入调试（见 README「Gateway 注�
 ### cc 持久化（Haven 侧）
 cc 配置/用户数据由 **Gateway** 持久化到 Haven 数据库，路由注册在 `gateway.py`（~21441 行 `Route()` 列表）：
 ```
-/api/cc/personas      # 协作者（含 dirs 可读目录、write_dirs 写目录清单；密钥硬拦）
+/api/cc/personas      # 协作者（含 dirs/write_dirs 与 selfhost_defaults；密钥硬拦）
 /api/cc/upstream      # 上游模型配置（cc_upstream_config 表）
 /api/cc/permissions   # 写权限批准
 /api/cc/mcp           # MCP 工具配置
 ```
-dashboards 的 `/api/gateway/[...path]` 代理到这些路由，Bearer 网关鉴权。会话轮次存 `conversation_turns` 表（`/api/cc/turns` 读回）。
+dashboards 的 `/api/gateway/[...path]` 代理到这些路由，Bearer 网关鉴权。
+
+会话轮次存 `conversation_turns`，窗口状态存 `conversation_sessions`：
+
+- 一个 `session_id` 永久绑定一个 `persona_id`；旧窗口从首轮 `client="ob2-chat/<persona>"` 回填，无主历史归 `ombre`。
+- `local_engine_preference` 只保存用户的本地首选；Vercel 的 `effective_engine=selfhost` 不得写回。
+- 严格写入用 `request_id` 防重复，用 `expected_last_round_id` 拒绝基于旧历史的跨设备追加；SQLite `BEGIN IMMEDIATE` 内统一分配下一轮。
+- `cc_seen_round_id` 是 Claude Code 已读到的 Haven 轮次书签，只在 cc 轮次成功写库后推进。
+- 已召回桶继续落 `injected_buckets`；本窗口新建桶落 `session_created_buckets`，二者并集为该 session 的排除集合。
+- 永久删除只清理带 `profile_id` 的窗口数据，不删除长期记忆桶；旧的无 profile 诊断/冷却表暂不清理。
 
 ---
 

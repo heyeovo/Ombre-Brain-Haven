@@ -28,7 +28,13 @@ from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
 from favorite_tags import has_favorite_memory_tag, is_flavor_tag
 from identity import identity_names
-from gateway_state import GatewayStateStore
+from gateway_state import (
+    ConversationConflictError,
+    ConversationPersonaConflictError,
+    GatewayStateStore,
+    RequestIdReuseError,
+    SessionStateConflictError,
+)
 from memory_diffusion import (
     diffuse_memory,
     diffusion_options_from_config,
@@ -2711,6 +2717,85 @@ class GatewayService:
             )
 
         profile_id = self._conversation_profile_id
+        strict_commit = "request_id" in body or "expected_last_round_id" in body
+        if strict_commit:
+            if not str(body.get("request_id") or "").strip():
+                return JSONResponse({"error": "request_id is required"}, status_code=400)
+            if "expected_last_round_id" not in body:
+                return JSONResponse(
+                    {"error": "expected_last_round_id is required"}, status_code=400
+                )
+            persona_id = str(body.get("persona_id") or "").strip()
+            if not persona_id:
+                return JSONResponse({"error": "persona_id is required"}, status_code=400)
+
+            def string_list(value: Any) -> list[str]:
+                if not isinstance(value, list):
+                    return []
+                return [str(item).strip() for item in value if str(item or "").strip()]
+
+            try:
+                result = self.state_store.commit_conversation_turn(
+                    profile_id=profile_id,
+                    session_id=session_id,
+                    persona_id=persona_id,
+                    request_id=str(body.get("request_id") or ""),
+                    expected_last_round_id=body.get("expected_last_round_id"),
+                    user_text=user_text,
+                    assistant_text=assistant_text,
+                    model=model,
+                    client=client,
+                    route=route,
+                    source=source,
+                    raw_json=raw_json,
+                    recalled_bucket_ids=string_list(body.get("recalled_bucket_ids")),
+                    created_bucket_ids=string_list(body.get("created_bucket_ids")),
+                )
+            except ConversationConflictError as exc:
+                return JSONResponse(
+                    {
+                        "error": "conversation_conflict",
+                        "expected_last_round_id": exc.expected_round_id,
+                        "actual_last_round_id": exc.actual_round_id,
+                        "message": "另一端产生了新消息，请刷新后重试",
+                    },
+                    status_code=409,
+                )
+            except ConversationPersonaConflictError as exc:
+                return JSONResponse(
+                    {
+                        "error": "conversation_persona_conflict",
+                        "expected_persona_id": exc.expected_persona_id,
+                        "actual_persona_id": exc.actual_persona_id,
+                        "message": "这个窗口属于另一个协作者",
+                    },
+                    status_code=409,
+                )
+            except RequestIdReuseError:
+                return JSONResponse(
+                    {
+                        "error": "request_id_reused",
+                        "message": "同一个发送标识被用于不同内容，请重新发送",
+                    },
+                    status_code=409,
+                )
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            turn = result["turn"]
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "stored": True,
+                    "idempotent_replay": bool(result["idempotent_replay"]),
+                    "turn_id": turn["id"],
+                    "profile_id": turn["profile_id"],
+                    "session_id": turn["session_id"],
+                    "round_id": turn["round_id"],
+                    "source": turn["source"],
+                    "raw_chars": len(raw_json),
+                }
+            )
+
         round_id = body.get("round_id")
         try:
             round_id_int = int(round_id)
@@ -3024,6 +3109,7 @@ class GatewayService:
         except ValueError:
             limit = 50
         source = str(request.query_params.get("source", "") or "").strip()
+        persona_id = str(request.query_params.get("persona_id", "") or "").strip()
         profile_id = self._conversation_profile_id
         return JSONResponse(
             {
@@ -3032,6 +3118,7 @@ class GatewayService:
                     profile_id=profile_id,
                     limit=limit,
                     source=source,
+                    persona_id=persona_id,
                 ),
             }
         )
@@ -3059,6 +3146,16 @@ class GatewayService:
                 before_id = int(raw_before)
             except ValueError:
                 before_id = None
+        after_round_id: int | None = None
+        raw_after_round = str(request.query_params.get("after_round_id", "") or "").strip()
+        if raw_after_round:
+            try:
+                after_round_id = int(raw_after_round)
+            except ValueError:
+                return JSONResponse(
+                    {"error": "after_round_id must be an integer"}, status_code=400
+                )
+        source = str(request.query_params.get("source", "") or "").strip()
         include_raw = self._truthy_header(request.query_params.get("include_raw"))
         profile_id = self._conversation_profile_id
         turns = self.state_store.list_conversation_turns_by_session(
@@ -3066,6 +3163,8 @@ class GatewayService:
             session_id=session_id,
             limit=limit,
             before_id=before_id,
+            after_round_id=after_round_id,
+            source=source,
             include_raw=include_raw,
         )
         return JSONResponse(
@@ -3081,6 +3180,26 @@ class GatewayService:
         auth_result = self._authorize(request.headers.get("Authorization", ""))
         if auth_result is not None:
             return auth_result
+        profile_id = self._conversation_profile_id
+        if request.method == "GET":
+            session_id = str(request.query_params.get("session_id") or "").strip()
+            if not session_id:
+                return JSONResponse({"error": "session_id is required"}, status_code=400)
+            state = self.state_store.get_conversation_session_state(
+                profile_id=profile_id,
+                session_id=session_id,
+            )
+            if not state:
+                return JSONResponse({"error": "session not found"}, status_code=404)
+            payload: dict[str, Any] = {"ok": True, "session": state}
+            if self._truthy_header(request.query_params.get("include_bucket_exclusions")):
+                payload["bucket_exclusion_ids"] = sorted(
+                    self.state_store.get_session_bucket_exclusion_ids(
+                        profile_id=profile_id,
+                        session_id=session_id,
+                    )
+                )
+            return JSONResponse(payload)
         try:
             body = await request.json()
         except Exception:
@@ -3090,22 +3209,86 @@ class GatewayService:
         session_id = str(body.get("session_id") or "").strip()
         if not session_id:
             return JSONResponse({"error": "session_id is required"}, status_code=400)
-        profile_id = self._conversation_profile_id
         if request.method == "DELETE":
+            if body.get("permanent") is True:
+                if str(body.get("confirm_session_id") or "").strip() != session_id:
+                    return JSONResponse(
+                        {"error": "confirm_session_id must exactly match session_id"},
+                        status_code=400,
+                    )
+                try:
+                    deleted_counts = self.state_store.permanently_delete_conversation_session(
+                        profile_id=profile_id,
+                        session_id=session_id,
+                    )
+                except ValueError as exc:
+                    return JSONResponse({"error": str(exc)}, status_code=400)
+                return JSONResponse(
+                    {
+                        "ok": True,
+                        "deleted": True,
+                        "permanent": True,
+                        "session_id": session_id,
+                        "deleted_counts": deleted_counts,
+                        "memory_buckets_deleted": 0,
+                    }
+                )
             metadata = self.state_store.soft_delete_conversation_session(
                 profile_id=profile_id,
                 session_id=session_id,
             )
             return JSONResponse({"ok": True, "deleted": True, "session": metadata})
+
+        state_keys = {"local_engine_preference", "selfhost_overrides", "effective_engine"}
+        updates = {key: body[key] for key in state_keys if key in body}
         title = " ".join(str(body.get("title") or "").strip().split())
-        if not title:
-            return JSONResponse({"error": "title is required"}, status_code=400)
-        metadata = self.state_store.set_conversation_session_title(
-            profile_id=profile_id,
-            session_id=session_id,
-            title=title,
-        )
-        return JSONResponse({"ok": True, "session": metadata})
+        if not title and not updates:
+            return JSONResponse({"error": "title or session state is required"}, status_code=400)
+        if updates:
+            persona_id = str(body.get("persona_id") or "").strip()
+            if not persona_id:
+                return JSONResponse({"error": "persona_id is required"}, status_code=400)
+            try:
+                state = self.state_store.patch_conversation_session_state(
+                    profile_id=profile_id,
+                    session_id=session_id,
+                    persona_id=persona_id,
+                    updates=updates,
+                    expected_state_version=body.get("expected_state_version"),
+                )
+            except ConversationPersonaConflictError as exc:
+                return JSONResponse(
+                    {
+                        "error": "conversation_persona_conflict",
+                        "expected_persona_id": exc.expected_persona_id,
+                        "actual_persona_id": exc.actual_persona_id,
+                    },
+                    status_code=409,
+                )
+            except SessionStateConflictError as exc:
+                return JSONResponse(
+                    {
+                        "error": "session_state_conflict",
+                        "expected_state_version": exc.expected_version,
+                        "actual_state_version": exc.actual_version,
+                    },
+                    status_code=409,
+                )
+            except (TypeError, ValueError) as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+        else:
+            state = {}
+        if title:
+            self.state_store.set_conversation_session_title(
+                profile_id=profile_id,
+                session_id=session_id,
+                title=title,
+            )
+            state = self.state_store.get_conversation_session_state(
+                profile_id=profile_id,
+                session_id=session_id,
+            )
+        return JSONResponse({"ok": True, "session": state})
 
     async def handle_persona_exchange(self, request: Request) -> JSONResponse:
         auth_result = self._authorize(request.headers.get("Authorization", ""))
@@ -21436,7 +21619,7 @@ def create_gateway_app(
             Route("/api/conversation/import/polaris", polaris_conversation_import, methods=["POST"]),
             Route("/api/conversation/sessions", conversation_sessions, methods=["GET"]),
             Route("/api/conversation/turns", conversation_turns, methods=["GET"]),
-            Route("/api/conversation/session", conversation_session, methods=["PATCH", "DELETE"]),
+            Route("/api/conversation/session", conversation_session, methods=["GET", "PATCH", "DELETE"]),
             Route("/api/persona/exchange", persona_exchange, methods=["POST"]),
             Route("/api/cc/personas", cc_personas, methods=["GET", "POST", "DELETE"]),
             Route("/api/cc/upstream", cc_upstream, methods=["GET", "POST"]),

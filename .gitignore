@@ -1,5 +1,7 @@
 __pycache__/
 tests/
+!tests/
+!tests/test_gateway_state_contracts.py
 *.pyc
 *.pyo
 .env

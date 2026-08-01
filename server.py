@@ -15335,7 +15335,7 @@ if __name__ == "__main__":
                 _GwRoute("/gateway/api/conversation/import/polaris", _gw_polaris_conversation_import, methods=["POST"]),
                 _GwRoute("/gateway/api/conversation/sessions", _gw_conversation_sessions, methods=["GET"]),
                 _GwRoute("/gateway/api/conversation/turns", _gw_conversation_turns, methods=["GET"]),
-                _GwRoute("/gateway/api/conversation/session", _gw_conversation_session, methods=["PATCH", "DELETE"]),
+                _GwRoute("/gateway/api/conversation/session", _gw_conversation_session, methods=["GET", "PATCH", "DELETE"]),
                 _GwRoute("/gateway/api/persona/exchange", _gw_persona_exchange, methods=["POST"]),
                 _GwRoute("/gateway/api/cc/personas", _gw_cc_personas, methods=["GET", "POST", "DELETE"]),
                 _GwRoute("/gateway/api/cc/upstream", _gw_cc_upstream, methods=["GET", "POST"]),

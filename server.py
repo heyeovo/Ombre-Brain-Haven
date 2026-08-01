@@ -8990,7 +8990,8 @@ async def hold(
 
     action = "合并→" if is_merged else "新建→"
     related_note = _format_readonly_related_memory(related_bucket) if related_bucket else ""
-    return f"{action}{result_name} {','.join(domain)}{related_note}"
+    created_marker = f" [bucket_id={bucket_id}]" if not is_merged else ""
+    return f"{action}{result_name} {','.join(domain)}{related_note}{created_marker}"
 
 
 # =============================================================

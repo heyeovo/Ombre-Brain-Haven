@@ -1,21 +1,22 @@
-@AGENTS.md
 # Ombre-Brain 开发文档
 
 > 供新窗口快速了解后端全貌，开窗口时 fetch 此文件。
+> 系统级总览 / 部署 / 客户端接入以 **README.md** 为准（Haven/Rain Fork 架构）。本文件只做开发入口：模块、路由、实现细节。
+> 改动收尾契约见 dashboard 仓库 **`MAINTENANCE_CONTRACT.md`**；待删 / 冗余 / 遗留账本见 dashboard 仓库 **`TECH_DEBT.md`**（未接入功能以那里为准）。
 
 ## 项目概述
 
-Ombre Brain 是 AI 长期情绪记忆系统后端。Python FastMCP + Starlette，部署在 Zeabur。前端 ob-dashboard2（Next.js 15）部署在 Vercel。
+Ombre Brain 是 AI 长期情绪记忆系统后端。当前为 Haven/Rain Fork：Python FastMCP + Starlette，**Brain（`server.py`）与 Gateway（`gateway.py`）双进程**，部署在 Zeabur。前端 ob-dashboard2（Next.js 15）部署在 Vercel。
 
-- **仓库**：github.com/heyeovo/Ombre-Brain
-- **Zeabur 域名**：https://forxiaoyan.zeabur.app
+- **仓库**：github.com/heyeovo/Ombre-Brain-Haven
+- **Zeabur 域名**：https://foryan.zeabur.app
 - **前端仓库**：github.com/heyeovo/ob-dashboard2
 
 ## 技术栈
 
 - **语言**：Python 3.10+
 - **框架**：FastMCP + Starlette（HTTP 模式）
-- **关键依赖**：jieba（中文分词）、httpx（LLM API 调用）、PyYAML
+- **关键依赖**：jieba（中文分词）、httpx（LLM API 调用）、PyYAML、mcp（钉死 1.27.2，防 Zeabur ModuleNotFoundError）
 - **LLM**：通过 OpenAI 兼容 API 调用（`OMBRE_API_KEY` + `OMBRE_BASE_URL` 配置）
 
 ## 启动方式
@@ -35,18 +36,26 @@ OMBRE_TRANSPORT=streamable-http python server.py
 
 | 文件 | 职责 |
 |------|------|
-| `server.py` | 入口，MCP 工具注册 + REST API |
+| `server.py` | **Brain** 入口（~640KB）。MCP 工具注册（`@mcp.custom_route`）+ REST API + 记忆核心 |
+| `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线 + cc 持久化路由（`Route()` 注册） |
+| `gateway_state.py` | Gateway 会话状态 / 上游管理 |
 | `bucket_manager.py` | 桶 CRUD、搜索、评分、回收站、命中统计、分词 |
 | `dehydrator.py` | LLM 脱水、合并、打标（含 `_last_merge_usage` 成本追踪） |
 | `decay_engine.py` | 衰减引擎，计算 score |
 | `embedding_engine.py` | 向量嵌入 + 相似度搜索 |
 | `import_memory.py` | 对话历史导入引擎（含成本追踪） |
+| `recall_policy.py` | 召回策略（vague 闸、相对日期、分词整词判断） |
+| `reflection_engine.py` | 反思/日印象引擎 |
+| `persona_engine.py` / `portrait_engine.py` | 用户画像（persona 状态 + 画像生成） |
+| `memory_*.py` | 记忆分层：layers/nodes/edges/metadata/moments/diffusion/relevance/write_gate |
+| `todo_store.py` / `reminder_store.py` | 待办 / 照顾备忘持久化 |
+| `darkroom.py` / `dream_engine.py` | 深色房调试 / 自动 dream |
 | `utils.py` | 配置加载、`LLM_PRICING`、`estimate_llm_cost`、`auto_merge` |
 
 ## 配置
 
 ```yaml
-# config.yaml 关键项
+# config.yaml 关键项（完整见 config.example.yaml）
 buckets_dir: "./buckets"
 merge_threshold: 75
 auto_merge: true    # OMBRE_AUTO_MERGE=false 可关闭
@@ -67,6 +76,8 @@ scoring_weights:
 
 ## 环境变量
 
+完整清单见 **ENV_VARS.md**。核心项：
+
 ```
 OMBRE_API_KEY=             # LLM API key（必须）
 OMBRE_BASE_URL=            # LLM API 地址
@@ -76,7 +87,9 @@ OMBRE_AUTO_MERGE=          # true/false，关闭自动合并
 OMBRE_SCORING_WARMTH_BOOST= # 温暖偏置初始值
 ```
 
-## REST API 完整列表
+## REST API
+
+**完整路由以代码为准**（`server.py` 的 `@mcp.custom_route` 90+ 条 + `gateway.py` 的 `Route()`），用 `grep -oE "@mcp\.custom_route\(\"[^\"]*\"" server.py` 实时查。下面列出 dashboard 前端实际消费的核心组：
 
 ### 认证
 ```
@@ -86,21 +99,23 @@ POST /auth/login  { password } → set-cookie
 ### 桶 CRUD
 ```
 GET    /api/buckets                          # 所有桶（含 noise 字段）
-GET    /api/bucket/{id}                      # 单个桶（含 noise 字段）
+GET    /api/bucket/{bucket_id}               # 单个桶（含 noise 字段）
 POST   /api/bucket                           # 新建
-PATCH  /api/bucket/{id}                      # 更新（支持 noise 标记）
-DELETE /api/bucket/{id}                      # 软删除 → 回收站
-POST   /api/touch/{id}?ripple=true/false     # 轻触/激活
-POST   /api/archive/{id}                     # 归档
-POST   /api/unarchive/{id}                   # 恢复归档
+PATCH  /api/bucket/{bucket_id}               # 更新（支持 noise 标记）
+DELETE /api/bucket/{bucket_id}               # 软删除 → 回收站
+POST   /api/touch/{bucket_id}?ripple=true/false     # 轻触/激活
+POST   /api/archive/{bucket_id}              # 归档
+POST   /api/unarchive/{bucket_id}            # 恢复归档
+POST   /api/bucket/{bucket_id}/comments      # 评论
+DELETE /api/bucket/{bucket_id}/comments/{comment_id}
 ```
 
 ### 回收站
 ```
 GET  /api/trash                   # 列表
 POST /api/trash/empty             # 清空
-POST /api/bucket/{id}/restore     # 恢复
-POST /api/bucket/{id}/purge       # 彻底删除（物理 os.remove）
+POST /api/bucket/{bucket_id}/restore     # 恢复
+POST /api/bucket/{bucket_id}/purge       # 彻底删除（物理 os.remove）
 ```
 
 ### 搜索
@@ -110,13 +125,14 @@ GET /api/search?q=&simulate=&include_vector=&include_noise=&include_archive=&lim
 # include_vector=true → 附加 vector_similarity
 # include_noise=true → 包含噪声桶
 # record_stats 由后端控制（simulate 时不记录）
+GET /api/search-raw   # 原文检索（GET / JSON POST）
 ```
 
 ### 相似 & 合并
 ```
-GET  /api/bucket/{id}/similar?n=5                 # embedding 相似桶
-POST /api/bucket/{id}/merge-preview?into={id}     # LLM 合并预览 + 费用估算
-POST /api/bucket/{id}/merge-commit?into={id}      # 确认合并（更新 B，删除 A）
+GET  /api/bucket/{bucket_id}/similar?n=5                 # embedding 相似桶
+POST /api/bucket/{bucket_id}/merge-preview?into={id}     # LLM 合并预览 + 费用估算
+POST /api/bucket/{bucket_id}/merge-commit?into={id}      # 确认合并（更新 B，删除 A）
 ```
 
 ### 可观测性
@@ -128,13 +144,15 @@ GET  /api/scoring-config                                        # 读评分旋�
 POST /api/scoring-config                                        # 写旋钮（持久化 runtime_config.json）
 POST /api/scoring-config/reset                                  # 重置为默认值
 GET  /api/breath-debug?q=&valence=&arousal=&threshold=          # 模拟 breath（亦记录命中统计）
+GET  /api/recall-debug                                           # 召回调试
+GET  /api/status                                                 # 状态
 ```
 
 ### 日记
 ```
 GET  /api/journal                        # 列表（60s 内存缓存）
 POST /api/journal                        # 新建（自动 invalidate 缓存）
-POST /api/bucket/{id}/to-journal         # 桶转日记（不可逆）
+POST /api/bucket/{bucket_id}/to-journal  # 桶转日记（不可逆）
 ```
 
 ### 导入
@@ -147,21 +165,27 @@ POST /api/import/pause                                   # 暂停
 GET  /api/import/patterns                                # 模式检测
 ```
 
-### 配置
+### 配置 & 记忆
 ```
 GET  /api/config                      # { fuzzy_threshold, max_results }
 POST /api/config { fuzzy_threshold }  # 更新（重启恢复）
 GET  /api/prompts                     # 读 prompt
 POST /api/prompts                     # 写 prompt
 POST /api/prompts/test                # 测试 prompt
-GET  /gateway/api/cc/mcp              # 读 cc MCP 配置（Bearer 网关认证）
-POST /gateway/api/cc/mcp              # 整份覆盖 cc MCP 配置（Bearer 网关认证）
+GET  /api/todos / POST /api/todos / POST /api/todos/{id}/writeback   # 待办
+GET  /api/reminders / POST /api/reminders / DELETE /api/reminders/{id}  # 照顾备忘
+GET  /api/persona / GET /api/portrait-state*                        # 画像
+GET  /api/moments / GET /api/edges / GET /api/word-map*              # 记忆图
+POST /api/ingest-raw / POST /api/memories                            # 原文写入
+GET  /api/daily-chat-memory/pending | /run | /confirm                # 每日聊天记忆
 ```
 
-### Hooks
+### Hooks & 调试
 ```
 GET /breath-hook                      # SessionStart hook（自动 breath）
 GET /dream-hook                       # 自动 dream
+GET /introspection-hook               # 自省 hook
+GET /api/debug/injections             # 注入调试（见 README「Gateway 注入边界」）
 ```
 
 ---
@@ -202,33 +226,43 @@ GET /dream-hook                       # 自动 dream
 ### 相似记忆
 依赖 embedding 引擎（`config.yaml` 中 `embedding.enabled`）。返回 `{items, embedding_enabled, total_scanned}`。
 
+### cc 持久化（Haven 侧）
+cc 配置/用户数据由 **Gateway** 持久化到 Haven 数据库，路由注册在 `gateway.py`（~21441 行 `Route()` 列表）：
+```
+/api/cc/personas      # 协作者（含 dirs 可读目录、write_dirs 写目录清单；密钥硬拦）
+/api/cc/upstream      # 上游模型配置（cc_upstream_config 表）
+/api/cc/permissions   # 写权限批准
+/api/cc/mcp           # MCP 工具配置
+```
+dashboards 的 `/api/gateway/[...path]` 代理到这些路由，Bearer 网关鉴权。会话轮次存 `conversation_turns` 表（`/api/cc/turns` 读回）。
+
 ---
 
 ## 调试 / 常用命令
 
 ```bash
 # 重置命中统计
-curl -X POST https://forxiaoyan.zeabur.app/api/hit-stats/reset \
-  -H "Cookie: $(curl -s -X POST https://forxiaoyan.zeabur.app/auth/login \
+curl -X POST https://foryan.zeabur.app/api/hit-stats/reset \
+  -H "Cookie: $(curl -s -X POST https://foryan.zeabur.app/auth/login \
     -H 'Content-Type: application/json' \
     -d '{"password":"<OMBRE_SESSION>"}' -i | grep set-cookie | cut -d';' -f1 | cut -d' ' -f2)"
 
 # 测试搜索（含匹配详情）
-curl "https://forxiaoyan.zeabur.app/api/search?q=今天&simulate=true" \
+curl "https://foryan.zeabur.app/api/search?q=今天&simulate=true" \
   -H "Cookie: ..."
 
 # 重置评分旋钮为默认值
-curl -X POST https://forxiaoyan.zeabur.app/api/scoring-config/reset
+curl -X POST https://foryan.zeabur.app/api/scoring-config/reset
 
 # 查看配置
-curl https://forxiaoyan.zeabur.app/api/config
+curl https://foryan.zeabur.app/api/config
+
+# 实时查全量路由
+grep -oE "@mcp\.custom_route\(\"[^\"]*\"" server.py
 ```
 
 ---
 
-## 未接入功能（规范列表 — ob-dashboard2 引用此列表）
+## 待办 / 遗留
 
-- [ ] 重新脱水（redehydrate）— Fork 有 /api/bucket/{id}/redehydrate + redehydrate-commit
-- [ ] 控制台配置页 — 多组 LLM profile、衰减权重 UI 调节
-- [ ] 自动备份 — GitHub Actions 每天备份 buckets 到私有仓库
-- [ ] 情感唤起罗盘 — 手机端 2D 心情坐标选记忆 + LLM 叙事
+待删、冗余、未接入功能统一维护在 dashboard 仓库 **`TECH_DEBT.md`**，本文件不再维护副本。

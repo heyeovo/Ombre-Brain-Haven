@@ -2,7 +2,8 @@
 
 > 供新窗口快速了解后端全貌，开窗口时 fetch 此文件。
 > 系统级总览 / 部署 / 客户端接入以 **README.md** 为准（Haven/Rain Fork 架构）。本文件只做开发入口：模块、路由、实现细节。
-> 改动收尾契约见 dashboard 仓库 **`MAINTENANCE_CONTRACT.md`**；待删 / 冗余 / 遗留账本见 dashboard 仓库 **`TECH_DEBT.md`**（未接入功能以那里为准）。
+> Codex/代理在本仓库中的工作约束见 **`AGENTS.md`**；改动收尾契约见 dashboard 仓库 **`MAINTENANCE_CONTRACT.md`**。
+> 已排期的后续工作写入对应 handoff；没有近期排期的长期遗留见 dashboard 仓库 **`TECH_DEBT.md`**。本文件不维护阶段任务副本。
 
 ## 项目概述
 
@@ -287,6 +288,6 @@ grep -oE "@mcp\.custom_route\(\"[^\"]*\"" server.py
 
 ---
 
-## 待办 / 遗留
+## 后续事项归档
 
-待删、冗余、未接入功能统一维护在 dashboard 仓库 **`TECH_DEBT.md`**，本文件不再维护副本。
+已排入后续窗口的工作维护在对应 handoff；短期不处理、没有明确排期的待删、冗余和遗留项维护在 dashboard 仓库 **`TECH_DEBT.md`**。本文件不维护副本。

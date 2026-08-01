@@ -1584,14 +1584,16 @@ class GatewayStateStore:
         limit: int = 50,
         source: str = "",
         persona_id: str = "",
+        deleted_only: bool = False,
     ) -> list[dict[str, Any]]:
         """会话列表：每个 session_id 一行，带轮数、时间范围和第一句用户原话做标题。"""
         safe_limit = max(1, min(200, int(limit or 50)))
         safe_profile_id = str(profile_id or "default").strip() or "default"
         safe_source = str(source or "").strip()
         safe_persona_id = str(persona_id or "").strip()
+        deleted_predicate = "EXISTS" if deleted_only else "NOT EXISTS"
         where_clause = (
-            "turns.profile_id = ? AND NOT EXISTS ("
+            f"turns.profile_id = ? AND {deleted_predicate} ("
             "SELECT 1 FROM conversation_sessions meta "
             "WHERE meta.profile_id = turns.profile_id "
             "AND meta.session_id = turns.session_id "
@@ -1640,7 +1642,7 @@ class GatewayStateStore:
             ).fetchone()
             meta = conn.execute(
                 """
-                SELECT persona_id, title FROM conversation_sessions
+                SELECT persona_id, title, deleted_at FROM conversation_sessions
                 WHERE profile_id = ? AND session_id = ?
                 """,
                 (safe_profile_id, row["session_id"]),
@@ -1660,6 +1662,7 @@ class GatewayStateStore:
                     "client": (head["client"] if head else "") or "",
                     "route": (head["route"] if head else "") or "",
                     "source": (head["source"] if head else "") or "gateway",
+                    "deleted_at": meta["deleted_at"] if meta else None,
                 }
             )
         conn.close()

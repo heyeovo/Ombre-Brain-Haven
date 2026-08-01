@@ -299,6 +299,26 @@ class GatewayStateContractsTest(unittest.TestCase):
             [],
         )
 
+    def test_deleted_session_list_is_explicit_and_disappears_after_permanent_delete(self):
+        store = self.make_store()
+        self.commit(store, request_id="request-1", expected=0, persona_id="ombre")
+        store.soft_delete_conversation_session(
+            profile_id="default", session_id="session-1"
+        )
+        self.assertEqual(store.list_conversation_sessions(profile_id="default"), [])
+        deleted = store.list_conversation_sessions(
+            profile_id="default", persona_id="ombre", deleted_only=True
+        )
+        self.assertEqual([item["session_id"] for item in deleted], ["session-1"])
+        self.assertTrue(deleted[0]["deleted_at"])
+        store.permanently_delete_conversation_session(
+            profile_id="default", session_id="session-1"
+        )
+        self.assertEqual(
+            store.list_conversation_sessions(profile_id="default", deleted_only=True),
+            [],
+        )
+
     def test_permanent_delete_removes_window_but_not_unscoped_legacy_state(self):
         store = self.make_store()
         self.commit(

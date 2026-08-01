@@ -148,6 +148,8 @@ GET    /gateway/api/conversation/turn?request_id=
        # 按 profile + request_id 读回已提交轮次及 raw_json/persona_id，供调用端持久幂等重放
 GET    /gateway/api/conversation/turns?session_id=&after_round_id=&source=
        # 读取窗口历史；after_round_id + source=selfhost 供 cc 跨引擎补齐
+GET    /gateway/api/conversation/sessions?source=&persona_id=&deleted=1
+       # 默认只列活动窗口；deleted=1 只列软删除窗口，供前端永久删除区使用
 GET    /gateway/api/conversation/session?session_id=&include_bucket_exclusions=1
        # 窗口归属、local_engine_preference、selfhost 覆盖、cc 阅读游标与可选桶排除集合
 PATCH  /gateway/api/conversation/session

@@ -3122,6 +3122,9 @@ class GatewayService:
             limit = 50
         source = str(request.query_params.get("source", "") or "").strip()
         persona_id = str(request.query_params.get("persona_id", "") or "").strip()
+        deleted_only = str(request.query_params.get("deleted", "") or "").strip().lower() in {
+            "1", "true", "yes"
+        }
         profile_id = self._conversation_profile_id
         return JSONResponse(
             {
@@ -3131,6 +3134,7 @@ class GatewayService:
                     limit=limit,
                     source=source,
                     persona_id=persona_id,
+                    deleted_only=deleted_only,
                 ),
             }
         )

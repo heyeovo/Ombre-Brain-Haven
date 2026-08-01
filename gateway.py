@@ -2820,8 +2820,13 @@ class GatewayService:
                     assistant_text = "[工具调用记录]"
                 current["assistant_text"] = assistant_text
                 current["round_id"] = len(turns) + 1
+                thinking_parts = current.pop("thinking_parts")
+                current.pop("tool_by_id")
                 current["raw_json"] = json.dumps(
                     {
+                        "thinking": "\n\n".join(thinking_parts).strip(),
+                        "tools": current.pop("tools"),
+                        "process": current.pop("process"),
                         "source_message_ids": current.pop("source_message_ids"),
                         "system_message_ids": current.pop("system_message_ids"),
                     },
@@ -2837,7 +2842,49 @@ class GatewayService:
                 role = str(message.get("role") or "").strip().lower()
                 message_id = str(message.get("id") or "").strip()
                 if role == "system":
-                    pending_system_ids.append(message_id)
+                    if current is None:
+                        pending_system_ids.append(message_id)
+                        continue
+                    current["system_message_ids"].append(message_id)
+                    current["source_message_ids"].append(message_id)
+                    invocation = message.get("toolInvocation")
+                    if not isinstance(invocation, dict):
+                        continue
+                    tool_id = str(
+                        invocation.get("toolCallId")
+                        or invocation.get("id")
+                        or invocation.get("originMessageId")
+                        or message_id
+                    )
+                    tool = current["tool_by_id"].get(tool_id)
+                    if tool is None:
+                        tool = {
+                            "id": tool_id,
+                            "name": str(
+                                invocation.get("toolName")
+                                or invocation.get("title")
+                                or invocation.get("kind")
+                                or "工具"
+                            ),
+                            "status": "completed",
+                            "startedAt": message.get("timestamp"),
+                        }
+                        current["tools"].append(tool)
+                        current["process"].append(
+                            {"type": "tool", "id": f"process-{tool_id}", "tool": tool}
+                        )
+                        current["tool_by_id"][tool_id] = tool
+                    status = str(invocation.get("status") or "").lower()
+                    tool["status"] = "error" if status in {"error", "failed"} else "completed"
+                    result = invocation.get("mcpResult")
+                    if result is None:
+                        result = invocation.get("detailText") or invocation.get("summary")
+                    if result is not None:
+                        tool["result"] = (
+                            result
+                            if isinstance(result, str)
+                            else json.dumps(result, ensure_ascii=False)
+                        )
                     continue
                 if role == "user":
                     finish_current()
@@ -2846,6 +2893,10 @@ class GatewayService:
                         "user_text": str(message.get("content") or ""),
                         "assistant_parts": [],
                         "has_tool_call": False,
+                        "thinking_parts": [],
+                        "tools": [],
+                        "process": [],
+                        "tool_by_id": {},
                         "model": "",
                         "source_message_ids": [message_id],
                         "system_message_ids": pending_system_ids,
@@ -2853,7 +2904,8 @@ class GatewayService:
                     pending_system_ids = []
                     continue
                 if role == "assistant" and current is not None:
-                    current["assistant_parts"].append(str(message.get("content") or ""))
+                    assistant_content = str(message.get("content") or "")
+                    current["assistant_parts"].append(assistant_content)
                     current["has_tool_call"] = bool(
                         current["has_tool_call"]
                         or message.get("nativeToolCalls")
@@ -2862,6 +2914,59 @@ class GatewayService:
                     if not current["model"]:
                         current["model"] = str(message.get("model") or "")
                     current["source_message_ids"].append(message_id)
+                    thinking_text = str(message.get("thinkingText") or "").strip()
+                    if thinking_text:
+                        current["thinking_parts"].append(thinking_text)
+                        thinking_event: dict[str, Any] = {
+                            "type": "thinking",
+                            "id": f"polaris-thinking-{message_id}",
+                            "text": thinking_text,
+                        }
+                        started_at = message.get("timestamp")
+                        if isinstance(started_at, (int, float)):
+                            thinking_event["startedAt"] = started_at
+                        duration_ms = message.get("thinkingDurationMs")
+                        if isinstance(duration_ms, (int, float)) and duration_ms >= 0:
+                            thinking_event["durationMs"] = duration_ms
+                        current["process"].append(thinking_event)
+
+                    if assistant_content.strip():
+                        current["process"].append(
+                            {
+                                "type": "text",
+                                "id": f"polaris-text-{message_id}",
+                                "text": assistant_content,
+                            }
+                        )
+
+                    native_tools = message.get("nativeToolCalls")
+                    if isinstance(native_tools, list):
+                        for tool_index, native_tool in enumerate(native_tools):
+                            if not isinstance(native_tool, dict):
+                                continue
+                            tool_id = str(
+                                native_tool.get("id")
+                                or f"polaris-tool-{message_id}-{tool_index}"
+                            )
+                            arguments_text = native_tool.get("argumentsText")
+                            tool_input: Any = arguments_text
+                            if isinstance(arguments_text, str):
+                                try:
+                                    tool_input = json.loads(arguments_text)
+                                except (TypeError, ValueError):
+                                    tool_input = arguments_text
+                            tool = {
+                                "id": tool_id,
+                                "name": str(native_tool.get("name") or "工具"),
+                                "input": tool_input,
+                                "status": "completed",
+                                "startedAt": message.get("timestamp"),
+                            }
+                            current["tools"].append(tool)
+                            current["process"].append(
+                                {"type": "tool", "id": f"process-{tool_id}", "tool": tool}
+                            )
+                            current["tool_by_id"][tool_id] = tool
             finish_current()
 
             if not turns:

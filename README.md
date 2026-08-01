@@ -241,13 +241,15 @@ Persona 不是事实记忆，不能回答“发生过什么”，也不应覆盖
 
 ### “刚才聊了什么”与换窗连续性
 
-Gateway 会把成功完成的 user / assistant 轮次保存为短期 `conversation_turns`。当问题包含“刚才、刚刚、上一句、之前那个”等近指表达时，它优先选择最近相关轮次，拼成 `Just Now Chat Context`，而不是用长期语义记忆猜测。
+Gateway 会把成功完成的 user / assistant 轮次持久保存到 `conversation_turns`。这张表也是 cc、Polaris 历史导入和未来 API 聊天共用的对话原文层；它不再按 `conversation_turns_max_entries` 自动删除旧轮次，该旧参数只保留调用兼容，运行时始终覆盖为 `0`。旧 `config.yaml` / `config.example.yaml` 即使仍显示 `500` 也不会生效。当问题包含“刚才、刚刚、上一句、之前那个”等近指表达时，Gateway 会从已保存原文中优先选择最近相关轮次，拼成 `Just Now Chat Context`，而不是用长期语义记忆猜测。
 
-这不是真正的无缝共享上下文。新窗口里的模型看不到旧窗口的隐藏上下文；系统只是把保存下来的少量对话重新拼接进本轮输入。连续性取决于：
+这里要区分三层限制：**存储层不按轮数裁剪**；列表和聊天页面可以分页读取（例如每页 100 轮），分页不会删除数据；Just Now、handoff 和模型请求仍会按各自的时间范围、条数与 token 预算选取一部分原文，避免把整库塞进一次请求。
+
+因此，这不是真正的无缝共享上下文。新窗口里的模型看不到旧窗口的隐藏上下文；系统只是从完整原文库中选择少量对话重新拼接进本轮输入。连续性取决于：
 
 - 旧轮次是否经 Gateway 成功完成并被保存。
 - 新窗口是否仍连接同一套 Gateway 与 state。
-- 记录是否还在配置的时间范围、条数和 token 预算内。
+- 所需记录是否进入本次召回或 handoff 的时间范围、条数和 token 预算。
 - 截取后的片段是否包含回答所需的完整因果和指代。
 
 因此它适合接住“我们刚才说到哪了”，不保证还原旧窗口全部上下文。更长的阶段连续性由 handoff 的 Current Focus / Recent Continuity 补充；具体旧事件仍应查询 bucket 或 raw events。`X-Ombre-Session-Id` 会影响 session 状态和冷却，但 Just Now 也可以从同一 persona profile 下的近期跨窗口轮次中取材。

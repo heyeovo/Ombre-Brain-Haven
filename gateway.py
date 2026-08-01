@@ -2413,6 +2413,13 @@ class GatewayService:
         allow_rerank = self._truthy_header(
             str(body.get("allow_rerank")) if body.get("allow_rerank") is not None else None
         )
+        raw_exclude_ids = body.get("exclude_ids")
+        exclude_ids: set[str] = set()
+        if isinstance(raw_exclude_ids, list):
+            for item in raw_exclude_ids:
+                clean = str(item or "").strip()
+                if clean:
+                    exclude_ids.add(clean)
 
         try:
             cards, recalled_ids, debug_payload, date_recall_text = await self._hook_recall_fast_cards(
@@ -2426,6 +2433,7 @@ class GatewayService:
                 allow_semantic_session_dedupe=allow_semantic_session_dedupe,
                 allow_rerank=allow_rerank,
                 allow_date_recall=allow_date_recall,
+                exclude_ids=exclude_ids,
             )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
@@ -19457,6 +19465,7 @@ class GatewayService:
         allow_semantic_session_dedupe: bool,
         allow_rerank: bool,
         allow_date_recall: bool = True,
+        exclude_ids: set[str] | None = None,
     ) -> tuple[list[dict[str, Any]], list[str], dict[str, Any], str]:
         memory_sentinel_debug = self._memory_sentinel_debug_base(query)
         memory_sentinel_debug["searchable_residue_terms"] = self._memory_sentinel_searchable_residue_terms(query)
@@ -19568,7 +19577,7 @@ class GatewayService:
 
         cards: list[dict[str, Any]] = []
         recalled_ids: list[str] = []
-        seen_ids: set[str] = set()
+        seen_ids: set[str] = set(exclude_ids or ())
         for bucket in selected_buckets:
             if len(cards) >= max_cards:
                 break

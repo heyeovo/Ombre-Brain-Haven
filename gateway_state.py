@@ -2221,10 +2221,20 @@ class GatewayStateStore:
     ) -> float:
         if cooldown_hours <= 0:
             return 1.0
-        now = now or datetime.now()
+        now = now or datetime.now(timezone.utc)
         last_injected = self.get_last_injected_at(session_id, bucket_id)
         if not last_injected:
             return 1.0
+        # 新轮次统一写 UTC-aware ISO；旧 injected_buckets 仍可能是无时区 ISO。
+        # 冷却只关心经过时长，旧值按 UTC 解释后再相减，避免 naive/aware 混算 500。
+        if now.tzinfo is None or now.utcoffset() is None:
+            now = now.replace(tzinfo=timezone.utc)
+        else:
+            now = now.astimezone(timezone.utc)
+        if last_injected.tzinfo is None or last_injected.utcoffset() is None:
+            last_injected = last_injected.replace(tzinfo=timezone.utc)
+        else:
+            last_injected = last_injected.astimezone(timezone.utc)
         elapsed_hours = max(0.0, (now - last_injected).total_seconds() / 3600)
         if elapsed_hours >= cooldown_hours:
             return 1.0

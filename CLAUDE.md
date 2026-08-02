@@ -263,7 +263,7 @@ dashboards 的 `/api/gateway/[...path]` 代理到这些路由，Bearer 网关鉴
 - 严格写入用 `request_id` 防重复，用 `expected_last_round_id` 拒绝基于旧历史的跨设备追加；SQLite `BEGIN IMMEDIATE` 内统一分配下一轮。
 - `/api/conversation/turn?request_id=` 可在进程重启或换设备后读回严格写入结果；调用端校验 session/persona/user 原文后重放已保存过程，不再请求上游。
 - `cc_seen_round_id` 是 Claude Code 已读到的 Haven 轮次书签，只在 cc 轮次成功写库后推进。
-- 已召回桶继续落 `injected_buckets`；本窗口新建桶落 `session_created_buckets`，二者并集为该 session 的排除集合。
+- 已召回桶继续落 `injected_buckets`；本窗口新建桶落 `session_created_buckets`，二者并集为该 session 的排除集合。召回冷却读取 `injected_at` 时把旧无时区值与新 UTC-aware 值统一按 UTC 计算，避免混合时间格式导致 hook recall 500。
 - 永久删除只清理带 `profile_id` 的窗口数据，不删除长期记忆桶；旧的无 profile 诊断/冷却表暂不清理。
 
 ---

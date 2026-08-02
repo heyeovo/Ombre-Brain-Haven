@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -354,6 +355,38 @@ class GatewayStateContractsTest(unittest.TestCase):
             ),
             {"bucket-recalled"},
         )
+
+    def test_cooldown_normalizes_new_aware_timestamp_with_naive_now(self):
+        store = self.make_store()
+        store.record_success(
+            "session-1",
+            ["bucket-1"],
+            completed_at=datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc),
+        )
+        multiplier = store.get_cooldown_multiplier(
+            "session-1",
+            "bucket-1",
+            cooldown_hours=2,
+            cooldown_floor=0.5,
+            now=datetime(2026, 8, 2, 13, 0),
+        )
+        self.assertEqual(multiplier, 0.75)
+
+    def test_cooldown_normalizes_legacy_naive_timestamp_with_aware_now(self):
+        store = self.make_store()
+        store.record_success(
+            "session-1",
+            ["bucket-1"],
+            completed_at=datetime(2026, 8, 2, 12, 0),
+        )
+        multiplier = store.get_cooldown_multiplier(
+            "session-1",
+            "bucket-1",
+            cooldown_hours=2,
+            cooldown_floor=0.5,
+            now=datetime(2026, 8, 2, 13, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(multiplier, 0.75)
 
 
 if __name__ == "__main__":

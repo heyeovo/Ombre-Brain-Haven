@@ -8743,6 +8743,15 @@ async def api_bucket_comment_delete(request):
 # Tool 2: hold — Hold on to this
 # 工具 2：hold — 握住，留下来
 # =============================================================
+def _hold_success(action: str, bucket_id: str, bucket_name: str) -> dict:
+    return {
+        "status": "success",
+        "action": action,
+        "bucket_id": bucket_id,
+        "bucket_name": bucket_name or bucket_id,
+    }
+
+
 @mcp.tool()
 async def hold(
     content: str,
@@ -8767,7 +8776,7 @@ async def hold(
     locked: bool = False,
     unlock_hint: str = "",
     event_time: str = "",
-) -> str:
+) -> dict | str:
     """写入一条长期记忆；附带 todo 时必须同时传 todo_domain="tech" 或 "emotional"。"""
     await decay_engine.ensure_started()
 
@@ -8807,7 +8816,7 @@ async def hold(
             locked=locked,
             unlock_hint=unlock_hint,
         )
-        return f"📔日记→{bucket_id} [作者:{author or '共同'}]" + ("[已上锁]" if locked else "")
+        return _hold_success("created", bucket_id, title.strip() or bucket_id)
 
     # --- Feel mode: store as feel type, minimal metadata ---
     # --- Feel 模式：存为 feel 类型，最少元数据 ---
@@ -8828,7 +8837,7 @@ async def hold(
             date=event_date or None,
         )
         _queue_embedding_refresh(bucket_id)
-        return f"🫧whisper→{bucket_id}"
+        return _hold_success("created", bucket_id, title.strip() or bucket_id)
 
     if whisper:
         if source_bucket and source_bucket.strip():
@@ -8861,7 +8870,8 @@ async def hold(
             if not entry:
                 return "年轮写入失败。"
             _queue_embedding_refresh(source_id)
-            return f"年轮→{source_id}#{entry['id']}"
+            source_name = str((source.get("metadata") or {}).get("name") or source_id)
+            return _hold_success("commented", source_id, source_name)
 
         # No source bucket: keep a standalone feel for compatibility.
         # 没有源记忆时保留独立 whisper，兼容旧用法。
@@ -8903,7 +8913,7 @@ async def hold(
             await embedding_engine.generate_and_store(bucket_id, content)
         except Exception:
             pass
-        return f"🗺️轨迹→{bucket_id} (breath(domain=\"journey\") 读取)"
+        return _hold_success("created", bucket_id, suggested_name or bucket_id)
 
     # --- Step 1: auto-tagging / 自动打标 ---
     try:
@@ -8964,7 +8974,7 @@ async def hold(
         _queue_embedding_refresh(bucket_id)
         _queue_memory_enrichment(bucket_id)
         related_note = _format_readonly_related_memory(related_bucket) if related_bucket else ""
-        return f"📌钉选→{bucket_id} {','.join(domain)}{related_note}"
+        return _hold_success("created", bucket_id, suggested_name or bucket_id)
 
     # --- Step 2: merge or create / 合并或新建 ---
     bucket_id, result_name, is_merged, related_bucket = await _merge_or_create(
@@ -8988,10 +8998,7 @@ async def hold(
     )
     _queue_memory_enrichment(bucket_id)
 
-    action = "合并→" if is_merged else "新建→"
-    related_note = _format_readonly_related_memory(related_bucket) if related_bucket else ""
-    created_marker = f" [bucket_id={bucket_id}]" if not is_merged else ""
-    return f"{action}{result_name} {','.join(domain)}{related_note}{created_marker}"
+    return _hold_success("merged" if is_merged else "created", bucket_id, result_name)
 
 
 # =============================================================

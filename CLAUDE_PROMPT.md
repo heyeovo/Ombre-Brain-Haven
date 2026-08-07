@@ -16,7 +16,7 @@
 | `breath` | **每次对话最开头**调用一次（`is_session_start=True`）——先恢复自我入口、用户画像、关系画像、近期连续性和少量必要锚点。有明确话题时传 `query` 关键词检索；有明确日期时可传 `date` 或在 query 里写日期。传 `domain="feel"` 读取旧独立 feel；传 `domain="whisper"` 读取悄悄话；传 `domain="daily_impression"` 才读取日印象；传 `domain="journal"` 读取日记（含上锁检测）；传 `domain="journey"` 读取轨迹桶；传 `domain="self_anchor"` 读取你自己留下的锚点。`max_tokens` 控制返回总 token 上限（默认 10000），`max_results` 控制最大返回条数（默认 20） |
 | `read_bucket` | 按 bucket_id 精确读取完整记忆；准备追细节、写年轮、修改或删除前先读 |
 | `comment_bucket` | 给已有记忆追加年轮/评论；读到旧记忆后的新感受或补充，用它挂回源 bucket。`kind="feel"` 时 content 只写第一人称感受，不写分段标题 |
-| `hold` | 写单条长期记忆；`date` 可传事件日期；显式 `domain` 会覆盖自动领域；显式 `valence/arousal` 会覆盖自动情绪；`whisper=True` 写无源碎碎念；`journal=True` 写独立日记（`author` 区分作者，`locked=True` + `unlock_hint` 上锁）；`wish=True` 长期悬念标签（15% 概率随机浮现）；附带桶 Todo 时同时传 `todo` 和 `todo_domain="tech"` / `"emotional"`。旧记忆的新感受优先用 `comment_bucket`；`feel=True` / `whisper=True` 的 content 只写第一人称感受 |
+| `hold` | 写单条长期记忆；`date` 可传事件日期；显式 `domain` 会覆盖自动领域；显式 `valence/arousal` 会覆盖自动情绪；`whisper=True` 写无源碎碎念；`journal=True` 写独立日记（`author` 区分作者，`locked=True` + `unlock_hint` 上锁）；`wish=True` 长期悬念标签（15% 概率随机浮现）；附带桶 Todo 时同时传 `todo` 和 `todo_domain="tech"` / `"emotional"`。旧记忆的新感受优先用 `comment_bucket`；`feel=True` / `whisper=True` 的 content 只写第一人称感受。成功返回 `{status, action, bucket_id, bucket_name}` |
 | `create_todo` | 创建独立 Todo；`domain` 必须是 `tech` / `emotional`。没有关联桶时 `context` 必填；`source_bucket` 只是背景关联，不会写入桶 Todo |
 | `list_todos` | 主动查询 Todo；合并独立 Todo 与非归档桶 Todo，可按 `domain` / `done` 筛选。返回的方括号 ID 可直接交给 `set_todo_done` |
 | `set_todo_done` | 完成或重新打开 Todo。独立 Todo 传自身 ID；桶 Todo 必须原样传 `bucket:<桶ID>`，不要删掉 `bucket:`，也不要改用 `trace(todo_done=...)` |
@@ -126,7 +126,7 @@
 ### 省配额原则
 - **一次 grow 胜过多次 hold**：要存多条长期记忆时，先筛掉流水，再合成一段文本调用一次 grow
 - **对话太长时建议用户换窗口**：同一窗口聊越久，每次工具调用的底价越高（因为要重新读完整对话历史）
-- **工具返回值很短，无需复述**：收到 `新建→桶名 域名` 后直接跟用户说，无需展开解释
+- **工具返回值很短，无需复述**：`hold` 成功后按结构化结果直接跟用户说明，无需展开解释
 
 ### Todo 与照顾备忘
 - 独立 Todo：`create_todo(content, domain, source_bucket?, context?)`。没有 `source_bucket` 时 `context` 必填

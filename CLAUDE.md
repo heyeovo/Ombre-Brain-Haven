@@ -53,6 +53,10 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `darkroom.py` / `dream_engine.py` | 深色房调试 / 自动 dream |
 | `utils.py` | 配置加载、`LLM_PRICING`、`estimate_llm_cost`、`auto_merge` |
 
+### `hold` 结构化成功结果
+
+`server.py` 的 MCP `hold` 在成功新建、合并或追加年轮后统一返回 `{status, action, bucket_id, bucket_name}`，其中 `action` 为 `created`、`merged` 或 `commented`。会话执行器只有在 `status=success, action=created` 时才应把 `bucket_id` 记入本窗口新建桶排除账本。
+
 ## 配置
 
 ```yaml

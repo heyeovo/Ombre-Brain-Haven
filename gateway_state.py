@@ -2,6 +2,7 @@ import os
 import json
 import sqlite3
 import hashlib
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -198,6 +199,36 @@ class GatewayStateStore:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (profile_id, session_id)
             )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_attachments (
+                attachment_id TEXT PRIMARY KEY,
+                profile_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                turn_id INTEGER,
+                round_id INTEGER,
+                filename TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                byte_size INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                storage_name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                cleared_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_conversation_attachments_session
+            ON conversation_attachments (profile_id, session_id, created_at)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_conversation_attachments_turn
+            ON conversation_attachments (turn_id, created_at)
             """
         )
         session_columns_added = self._ensure_columns(
@@ -984,6 +1015,248 @@ class GatewayStateStore:
         )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
+    @property
+    def conversation_attachment_dir(self) -> str:
+        path = os.path.join(os.path.dirname(self.db_path), "cc-attachments")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    @staticmethod
+    def _attachment_mime(data: bytes) -> tuple[str, str]:
+        if data.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg", ".jpg"
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png", ".png"
+        if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return "image/webp", ".webp"
+        raise ValueError("only JPEG, PNG, and WebP images are supported")
+
+    @staticmethod
+    def _attachment_row_payload(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": str(row["attachment_id"]),
+            "session_id": str(row["session_id"]),
+            "turn_id": int(row["turn_id"]) if row["turn_id"] is not None else None,
+            "round_id": int(row["round_id"]) if row["round_id"] is not None else None,
+            "filename": str(row["filename"] or "image"),
+            "mime_type": str(row["mime_type"]),
+            "byte_size": int(row["byte_size"] or 0),
+            "sha256": str(row["sha256"]),
+            "created_at": str(row["created_at"]),
+            "cleared": bool(row["cleared_at"]),
+            "cleared_at": str(row["cleared_at"] or ""),
+        }
+
+    def create_conversation_attachment(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        filename: str,
+        data: bytes,
+    ) -> dict[str, Any]:
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "").strip()
+        if not safe_session_id:
+            raise ValueError("session_id is required")
+        if not data:
+            raise ValueError("image is empty")
+        if len(data) > 2 * 1024 * 1024:
+            raise ValueError("compressed image must not exceed 2 MB")
+        mime_type, suffix = self._attachment_mime(data)
+        attachment_id = uuid.uuid4().hex
+        storage_name = f"{attachment_id}{suffix}"
+        safe_filename = os.path.basename(str(filename or "image")).strip()[:200] or f"image{suffix}"
+        created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        sha256 = hashlib.sha256(data).hexdigest()
+        final_path = os.path.join(self.conversation_attachment_dir, storage_name)
+        temp_path = f"{final_path}.tmp"
+        with open(temp_path, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, final_path)
+        conn = self._connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO conversation_attachments
+                (attachment_id, profile_id, session_id, turn_id, round_id, filename,
+                 mime_type, byte_size, sha256, storage_name, created_at, cleared_at)
+                VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    attachment_id,
+                    safe_profile_id,
+                    safe_session_id,
+                    safe_filename,
+                    mime_type,
+                    len(data),
+                    sha256,
+                    storage_name,
+                    created_at,
+                ),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            try:
+                os.remove(final_path)
+            except OSError:
+                pass
+            raise
+        finally:
+            conn.close()
+        return {
+            "id": attachment_id,
+            "session_id": safe_session_id,
+            "turn_id": None,
+            "round_id": None,
+            "filename": safe_filename,
+            "mime_type": mime_type,
+            "byte_size": len(data),
+            "sha256": sha256,
+            "created_at": created_at,
+            "cleared": False,
+            "cleared_at": "",
+        }
+
+    def get_conversation_attachment(
+        self,
+        *,
+        profile_id: str,
+        attachment_id: str,
+    ) -> tuple[dict[str, Any], str]:
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_id = str(attachment_id or "").strip()
+        conn = self._connect()
+        row = conn.execute(
+            """
+            SELECT * FROM conversation_attachments
+            WHERE profile_id = ? AND attachment_id = ?
+            """,
+            (safe_profile_id, safe_id),
+        ).fetchone()
+        conn.close()
+        if row is None:
+            return {}, ""
+        payload = self._attachment_row_payload(row)
+        if payload["cleared"]:
+            return payload, ""
+        return payload, os.path.join(self.conversation_attachment_dir, str(row["storage_name"]))
+
+    def list_conversation_attachments(
+        self,
+        *,
+        profile_id: str,
+        session_id: str = "",
+        turn_ids: list[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        where = "profile_id = ?"
+        params: list[Any] = [safe_profile_id]
+        safe_session_id = str(session_id or "").strip()
+        if safe_session_id:
+            where += " AND session_id = ?"
+            params.append(safe_session_id)
+        safe_turn_ids = [int(value) for value in (turn_ids or []) if int(value) > 0]
+        if safe_turn_ids:
+            placeholders = ",".join("?" for _ in safe_turn_ids)
+            where += f" AND turn_id IN ({placeholders})"
+            params.extend(safe_turn_ids)
+        conn = self._connect()
+        rows = conn.execute(
+            f"SELECT * FROM conversation_attachments WHERE {where} ORDER BY created_at, attachment_id",
+            params,
+        ).fetchall()
+        conn.close()
+        return [self._attachment_row_payload(row) for row in rows]
+
+    def clear_conversation_attachment(
+        self,
+        *,
+        profile_id: str,
+        attachment_id: str,
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_id = str(attachment_id or "").strip()
+        safe_session_id = str(session_id or "").strip()
+        conn = self._connect()
+        where = "profile_id = ? AND attachment_id = ?"
+        params: list[Any] = [safe_profile_id, safe_id]
+        if safe_session_id:
+            where += " AND session_id = ?"
+            params.append(safe_session_id)
+        row = conn.execute(
+            f"SELECT * FROM conversation_attachments WHERE {where}", params
+        ).fetchone()
+        if row is None:
+            conn.close()
+            return {}
+        cleared_at = str(row["cleared_at"] or "") or datetime.now(timezone.utc).isoformat(timespec="seconds")
+        path = os.path.join(self.conversation_attachment_dir, str(row["storage_name"]))
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        conn.execute(
+            "UPDATE conversation_attachments SET cleared_at = ? WHERE attachment_id = ?",
+            (cleared_at, safe_id),
+        )
+        conn.commit()
+        conn.close()
+        return {**self._attachment_row_payload(row), "cleared": True, "cleared_at": cleared_at}
+
+    def clear_session_conversation_attachments(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+    ) -> int:
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "").strip()
+        conn = self._connect()
+        rows = conn.execute(
+            """
+            SELECT attachment_id FROM conversation_attachments
+            WHERE profile_id = ? AND session_id = ? AND cleared_at IS NULL
+            """,
+            (safe_profile_id, safe_session_id),
+        ).fetchall()
+        conn.close()
+        count = 0
+        for row in rows:
+            if self.clear_conversation_attachment(
+                profile_id=safe_profile_id,
+                attachment_id=str(row["attachment_id"]),
+                session_id=safe_session_id,
+            ):
+                count += 1
+        return count
+
+    def cleanup_staged_conversation_attachments(self, *, older_than_hours: int = 24) -> int:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, older_than_hours))).isoformat(timespec="seconds")
+        conn = self._connect()
+        rows = conn.execute(
+            """
+            SELECT profile_id, attachment_id, session_id
+            FROM conversation_attachments
+            WHERE turn_id IS NULL AND cleared_at IS NULL AND created_at < ?
+            """,
+            (cutoff,),
+        ).fetchall()
+        conn.close()
+        count = 0
+        for row in rows:
+            if self.clear_conversation_attachment(
+                profile_id=str(row["profile_id"]),
+                attachment_id=str(row["attachment_id"]),
+                session_id=str(row["session_id"]),
+            ):
+                count += 1
+        return count
+
     @staticmethod
     def _conversation_turn_row_payload(row: sqlite3.Row) -> dict[str, Any]:
         return {
@@ -1035,6 +1308,10 @@ class GatewayStateStore:
             **self._conversation_turn_row_payload(row),
             "persona_id": str(row["persona_id"] or "ombre"),
             "raw_json": str(row["raw_json"] or ""),
+            "attachments": self.list_conversation_attachments(
+                profile_id=safe_profile_id,
+                turn_ids=[int(row["id"])],
+            ),
         }
 
     def commit_conversation_turn(
@@ -1052,6 +1329,7 @@ class GatewayStateStore:
         route: str = "",
         source: str = "gateway",
         raw_json: str = "",
+        attachment_ids: list[str] | None = None,
         recalled_bucket_ids: list[str] | None = None,
         created_bucket_ids: list[str] | None = None,
         created_at: datetime | None = None,
@@ -1085,25 +1363,48 @@ class GatewayStateStore:
         created_ids = list(dict.fromkeys(
             str(item or "").strip() for item in (created_bucket_ids or []) if str(item or "").strip()
         ))
-        fingerprint = self._conversation_request_fingerprint(
-            {
-                "session_id": safe_session_id,
-                "persona_id": safe_persona_id,
-                "expected_last_round_id": expected_round,
-                "user_text": str(user_text or ""),
-                "assistant_text": str(assistant_text or ""),
-                "model": str(model or ""),
-                "client": str(client or ""),
-                "route": str(route or ""),
-                "source": str(source or "gateway").strip() or "gateway",
-                "recalled_bucket_ids": sorted(recalled_ids),
-                "created_bucket_ids": sorted(created_ids),
-            }
-        )
+        requested_attachment_ids = list(dict.fromkeys(
+            str(item or "").strip() for item in (attachment_ids or []) if str(item or "").strip()
+        ))
+        if len(requested_attachment_ids) > 4:
+            raise ValueError("no more than 4 attachments are allowed per turn")
 
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            attachment_rows: list[sqlite3.Row] = []
+            if requested_attachment_ids:
+                placeholders = ",".join("?" for _ in requested_attachment_ids)
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM conversation_attachments
+                    WHERE profile_id = ? AND attachment_id IN ({placeholders})
+                    """,
+                    [safe_profile_id, *requested_attachment_ids],
+                ).fetchall()
+                by_id = {str(row["attachment_id"]): row for row in rows}
+                if any(item not in by_id for item in requested_attachment_ids):
+                    raise ValueError("attachment not found")
+                attachment_rows = [by_id[item] for item in requested_attachment_ids]
+            fingerprint = self._conversation_request_fingerprint(
+                {
+                    "session_id": safe_session_id,
+                    "persona_id": safe_persona_id,
+                    "expected_last_round_id": expected_round,
+                    "user_text": str(user_text or ""),
+                    "assistant_text": str(assistant_text or ""),
+                    "model": str(model or ""),
+                    "client": str(client or ""),
+                    "route": str(route or ""),
+                    "source": str(source or "gateway").strip() or "gateway",
+                    "attachments": [
+                        {"id": str(row["attachment_id"]), "sha256": str(row["sha256"])}
+                        for row in attachment_rows
+                    ],
+                    "recalled_bucket_ids": sorted(recalled_ids),
+                    "created_bucket_ids": sorted(created_ids),
+                }
+            )
             existing = conn.execute(
                 """
                 SELECT id, profile_id, session_id, round_id, created_at,
@@ -1125,6 +1426,12 @@ class GatewayStateStore:
                     "turn": self._conversation_turn_row_payload(existing),
                     "idempotent_replay": True,
                 }
+
+            for row in attachment_rows:
+                if str(row["session_id"]) != safe_session_id:
+                    raise ValueError("attachment belongs to another session")
+                if row["turn_id"] is not None:
+                    raise ValueError("attachment is already bound to another turn")
 
             session = conn.execute(
                 """
@@ -1255,6 +1562,17 @@ class GatewayStateStore:
                 )
 
             turn_id = int(cursor.lastrowid or 0)
+            if requested_attachment_ids:
+                placeholders = ",".join("?" for _ in requested_attachment_ids)
+                conn.execute(
+                    f"""
+                    UPDATE conversation_attachments
+                    SET turn_id = ?, round_id = ?
+                    WHERE profile_id = ? AND session_id = ?
+                      AND attachment_id IN ({placeholders})
+                    """,
+                    [turn_id, next_round, safe_profile_id, safe_session_id, *requested_attachment_ids],
+                )
             conn.commit()
             row = conn.execute(
                 """
@@ -1894,6 +2212,7 @@ class GatewayStateStore:
             raise ValueError("session_id is required")
         conn = self._connect()
         counts: dict[str, int] = {}
+        attachment_storage_names: list[str] = []
         try:
             conn.execute("BEGIN IMMEDIATE")
             owner = conn.execute(
@@ -1905,7 +2224,23 @@ class GatewayStateStore:
             ).fetchone()
             if owner is None:
                 raise ValueError("session ownership could not be verified")
+            attachment_storage_names = [
+                str(row["storage_name"])
+                for row in conn.execute(
+                    """
+                    SELECT storage_name FROM conversation_attachments
+                    WHERE profile_id = ? AND session_id = ?
+                    """,
+                    (safe_profile_id, safe_session_id),
+                ).fetchall()
+            ]
+            for storage_name in attachment_storage_names:
+                try:
+                    os.remove(os.path.join(self.conversation_attachment_dir, storage_name))
+                except FileNotFoundError:
+                    pass
             for table in (
+                "conversation_attachments",
                 "conversation_turns",
                 "conversation_sessions",
                 "conversation_import_archives",
@@ -1999,7 +2334,25 @@ class GatewayStateStore:
             """,
             params,
         ).fetchall()
+        turn_ids = [int(row["id"]) for row in rows]
+        attachment_rows: list[sqlite3.Row] = []
+        if turn_ids:
+            placeholders = ",".join("?" for _ in turn_ids)
+            attachment_rows = conn.execute(
+                f"""
+                SELECT * FROM conversation_attachments
+                WHERE profile_id = ? AND turn_id IN ({placeholders})
+                ORDER BY created_at, attachment_id
+                """,
+                [safe_profile_id, *turn_ids],
+            ).fetchall()
         conn.close()
+        attachments_by_turn: dict[int, list[dict[str, Any]]] = {}
+        for attachment_row in attachment_rows:
+            turn_id = int(attachment_row["turn_id"] or 0)
+            attachments_by_turn.setdefault(turn_id, []).append(
+                self._attachment_row_payload(attachment_row)
+            )
         turns = [
             {
                 "id": row["id"],
@@ -2013,6 +2366,7 @@ class GatewayStateStore:
                 "client": row["client"] or "",
                 "route": row["route"] or "",
                 "source": row["source"] or "gateway",
+                "attachments": attachments_by_turn.get(int(row["id"]), []),
                 **({"raw_json": row["raw_json"] or ""} if include_raw else {}),
             }
             for row in rows

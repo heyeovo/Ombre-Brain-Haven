@@ -15300,6 +15300,8 @@ if __name__ == "__main__":
                 return await _gw_service.handle_upstream_usage_debug(request)
             async def _gw_conversation_turn(request):
                 return await _gw_service.handle_conversation_turn(request)
+            async def _gw_conversation_attachment(request):
+                return await _gw_service.handle_conversation_attachment(request)
             async def _gw_polaris_conversation_import(request):
                 return await _gw_service.handle_polaris_conversation_import(request)
             async def _gw_conversation_sessions(request):
@@ -15340,6 +15342,7 @@ if __name__ == "__main__":
                 _GwRoute("/gateway/api/debug/recall-eval", _gw_recall_eval_debug, methods=["GET"]),
                 _GwRoute("/gateway/api/debug/upstream-usage", _gw_upstream_usage_debug, methods=["GET"]),
                 _GwRoute("/gateway/api/conversation/turn", _gw_conversation_turn, methods=["GET", "POST"]),
+                _GwRoute("/gateway/api/conversation/attachment", _gw_conversation_attachment, methods=["GET", "POST", "DELETE"]),
                 _GwRoute("/gateway/api/conversation/import/polaris", _gw_polaris_conversation_import, methods=["POST"]),
                 _GwRoute("/gateway/api/conversation/sessions", _gw_conversation_sessions, methods=["GET"]),
                 _GwRoute("/gateway/api/conversation/turns", _gw_conversation_turns, methods=["GET"]),

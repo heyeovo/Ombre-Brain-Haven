@@ -39,7 +39,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 |------|------|
 | `server.py` | **Brain** 入口（~640KB）。MCP 工具注册（`@mcp.custom_route`）+ REST API + 记忆核心 |
 | `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线 + cc 持久化路由（`Route()` 注册） |
-| `gateway_state.py` | Gateway/cc SQLite 状态：会话原文、协作者归属、窗口配置、幂等写入、跨设备冲突、cc 游标与桶排除账本 |
+| `gateway_state.py` | Gateway/cc SQLite 状态：会话原文、图片附件元数据/私有文件、协作者归属、窗口配置、幂等写入、跨设备冲突、cc 游标与桶排除账本 |
 | `bucket_manager.py` | 桶 CRUD、搜索、评分、回收站、命中统计、分词 |
 | `dehydrator.py` | LLM 脱水、合并、打标（含 `_last_merge_usage` 成本追踪） |
 | `decay_engine.py` | 衰减引擎，计算 score |
@@ -147,7 +147,9 @@ POST /api/bucket/{bucket_id}/merge-commit?into={id}      # 确认合并（更新
 ```
 POST   /gateway/api/conversation/turn
        # 兼容旧写入；携带 request_id + expected_last_round_id + persona_id 时
-       # 使用原子 compare-and-append，并可同轮记录 recalled_bucket_ids / created_bucket_ids
+       # 使用原子 compare-and-append，并可同轮绑定 attachment_ids、记录 recalled_bucket_ids / created_bucket_ids
+GET|POST|DELETE /gateway/api/conversation/attachment
+       # 上传压缩图片、Bearer 私有读取、清除单张或当前窗口全部图片
 GET    /gateway/api/conversation/turn?request_id=
        # 按 profile + request_id 读回已提交轮次及 raw_json/persona_id，供调用端持久幂等重放
 GET    /gateway/api/conversation/turns?session_id=&after_round_id=&source=
@@ -260,15 +262,16 @@ cc 配置/用户数据由 **Gateway** 持久化到 Haven 数据库，路由注�
 ```
 dashboards 的 `/api/gateway/[...path]` 代理到这些路由，Bearer 网关鉴权。
 
-会话轮次存 `conversation_turns`，窗口状态存 `conversation_sessions`：
+会话轮次存 `conversation_turns`，窗口状态存 `conversation_sessions`，图片元数据存 `conversation_attachments`；图片文件位于 `buckets_dir/cc-attachments`：
 
 - 一个 `session_id` 永久绑定一个 `persona_id`；旧窗口从首轮 `client="ob2-chat/<persona>"` 回填，无主历史归 `ombre`。
 - `local_engine_preference` 只保存用户的本地首选；Vercel 的 `effective_engine=selfhost` 不得写回。
 - 严格写入用 `request_id` 防重复，用 `expected_last_round_id` 拒绝基于旧历史的跨设备追加；SQLite `BEGIN IMMEDIATE` 内统一分配下一轮。
+- 附件先按窗口暂存，严格写入把有序 ID + SHA-256 纳入幂等指纹并在同一事务绑定轮次；只接受 JPEG/PNG/WebP，压缩文件单张不超过 2MB、每轮不超过 4 张。私有读取必须经 Bearer 网关，未绑定附件 24 小时后在后续上传时清理。
 - `/api/conversation/turn?request_id=` 可在进程重启或换设备后读回严格写入结果；调用端校验 session/persona/user 原文后重放已保存过程，不再请求上游。
 - `cc_seen_round_id` 是 Claude Code 已读到的 Haven 轮次书签，只在 cc 轮次成功写库后推进。
 - 已召回桶继续落 `injected_buckets`；本窗口新建桶落 `session_created_buckets`，二者并集为该 session 的排除集合。召回冷却读取 `injected_at` 时把旧无时区值与新 UTC-aware 值统一按 UTC 计算，避免混合时间格式导致 hook recall 500。
-- 永久删除只清理带 `profile_id` 的窗口数据，不删除长期记忆桶；旧的无 profile 诊断/冷却表暂不清理。
+- 永久删除会先删除该窗口附件文件，再清理带 `profile_id` 的窗口数据，不删除长期记忆桶；旧的无 profile 诊断/冷却表暂不清理。
 
 ---
 

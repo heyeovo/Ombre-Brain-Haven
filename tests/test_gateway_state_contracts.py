@@ -43,6 +43,7 @@ class GatewayStateContractsTest(unittest.TestCase):
         assistant_text: str = "reply",
         recalled_bucket_ids: list[str] | None = None,
         created_bucket_ids: list[str] | None = None,
+        attachment_ids: list[str] | None = None,
     ):
         return store.commit_conversation_turn(
             profile_id="default",
@@ -58,7 +59,72 @@ class GatewayStateContractsTest(unittest.TestCase):
             source=source,
             recalled_bucket_ids=recalled_bucket_ids,
             created_bucket_ids=created_bucket_ids,
+            attachment_ids=attachment_ids,
         )
+
+    def test_attachment_is_bound_to_strict_turn_and_clear_keeps_placeholder(self):
+        store = self.make_store()
+        attachment = store.create_conversation_attachment(
+            profile_id="default",
+            session_id="session-1",
+            filename="截图.png",
+            data=b"\x89PNG\r\n\x1a\n" + b"image-data",
+        )
+        _, stored_path = store.get_conversation_attachment(
+            profile_id="default", attachment_id=attachment["id"]
+        )
+        self.assertTrue(Path(stored_path).exists())
+
+        committed = self.commit(
+            store,
+            request_id="request-image",
+            expected=0,
+            attachment_ids=[attachment["id"]],
+        )
+        turns = store.list_conversation_turns_by_session(
+            profile_id="default", session_id="session-1"
+        )
+        self.assertEqual(turns[0]["attachments"][0]["id"], attachment["id"])
+        self.assertEqual(turns[0]["attachments"][0]["turn_id"], committed["turn"]["id"])
+
+        cleared = store.clear_conversation_attachment(
+            profile_id="default",
+            session_id="session-1",
+            attachment_id=attachment["id"],
+        )
+        self.assertTrue(cleared["cleared"])
+        self.assertFalse(Path(stored_path).exists())
+        turns = store.list_conversation_turns_by_session(
+            profile_id="default", session_id="session-1"
+        )
+        self.assertTrue(turns[0]["attachments"][0]["cleared"])
+
+    def test_permanent_delete_removes_attachment_records_and_files(self):
+        store = self.make_store()
+        attachment = store.create_conversation_attachment(
+            profile_id="default",
+            session_id="session-1",
+            filename="photo.webp",
+            data=b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"image-data",
+        )
+        _, stored_path = store.get_conversation_attachment(
+            profile_id="default", attachment_id=attachment["id"]
+        )
+        self.commit(
+            store,
+            request_id="request-image-delete",
+            expected=0,
+            attachment_ids=[attachment["id"]],
+        )
+        deleted = store.permanently_delete_conversation_session(
+            profile_id="default", session_id="session-1"
+        )
+        self.assertEqual(deleted["conversation_attachments"], 1)
+        self.assertFalse(Path(stored_path).exists())
+        item, path = store.get_conversation_attachment(
+            profile_id="default", attachment_id=attachment["id"]
+        )
+        self.assertEqual((item, path), ({}, ""))
 
     def test_old_database_migration_backfills_persona_and_cc_cursor(self):
         db_path = self.root / "gateway_state.db"

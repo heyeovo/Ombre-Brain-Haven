@@ -2760,6 +2760,7 @@ class GatewayService:
                     route=route,
                     source=source,
                     raw_json=raw_json,
+                    attachment_ids=string_list(body.get("attachment_ids")),
                     recalled_bucket_ids=string_list(body.get("recalled_bucket_ids")),
                     created_bucket_ids=string_list(body.get("created_bucket_ids")),
                 )
@@ -2842,6 +2843,97 @@ class GatewayService:
                 "raw_chars": len(raw_json),
             }
         )
+
+    async def handle_conversation_attachment(self, request: Request) -> Response:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        profile_id = self._conversation_profile_id
+
+        if request.method == "POST":
+            session_id = str(
+                request.query_params.get("session_id")
+                or request.headers.get("X-Ombre-Session-Id")
+                or ""
+            ).strip()
+            filename = str(request.query_params.get("filename") or "image").strip()
+            try:
+                content_length = int(request.headers.get("content-length") or 0)
+            except ValueError:
+                content_length = 0
+            if content_length > 2 * 1024 * 1024:
+                return JSONResponse({"error": "compressed image must not exceed 2 MB"}, status_code=413)
+            data = await request.body()
+            try:
+                item = self.state_store.create_conversation_attachment(
+                    profile_id=profile_id,
+                    session_id=session_id,
+                    filename=filename,
+                    data=data,
+                )
+                self.state_store.cleanup_staged_conversation_attachments(older_than_hours=24)
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": True, "attachment": item})
+
+        if request.method == "GET":
+            attachment_id = str(request.query_params.get("attachment_id") or "").strip()
+            session_id = str(
+                request.query_params.get("session_id")
+                or request.headers.get("X-Ombre-Session-Id")
+                or ""
+            ).strip()
+            item, path = self.state_store.get_conversation_attachment(
+                profile_id=profile_id,
+                attachment_id=attachment_id,
+            )
+            if not item:
+                return JSONResponse({"error": "attachment not found"}, status_code=404)
+            if session_id and str(item.get("session_id") or "") != session_id:
+                return JSONResponse({"error": "attachment not found"}, status_code=404)
+            if not path or item.get("cleared"):
+                return JSONResponse({"error": "attachment was cleared"}, status_code=410)
+            try:
+                with open(path, "rb") as handle:
+                    data = handle.read()
+            except FileNotFoundError:
+                return JSONResponse({"error": "attachment file not found"}, status_code=404)
+            return Response(
+                data,
+                media_type=str(item.get("mime_type") or "application/octet-stream"),
+                headers={
+                    "Cache-Control": "private, max-age=300",
+                    "Content-Disposition": "inline",
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid attachment request"}, status_code=400)
+        session_id = str(body.get("session_id") or "").strip()
+        if body.get("all") is True:
+            if not session_id:
+                return JSONResponse({"error": "session_id is required"}, status_code=400)
+            count = self.state_store.clear_session_conversation_attachments(
+                profile_id=profile_id,
+                session_id=session_id,
+            )
+            return JSONResponse({"ok": True, "cleared": count})
+        attachment_id = str(body.get("attachment_id") or "").strip()
+        if not attachment_id:
+            return JSONResponse({"error": "attachment_id is required"}, status_code=400)
+        item = self.state_store.clear_conversation_attachment(
+            profile_id=profile_id,
+            attachment_id=attachment_id,
+            session_id=session_id,
+        )
+        if not item:
+            return JSONResponse({"error": "attachment not found"}, status_code=404)
+        return JSONResponse({"ok": True, "attachment": item})
 
     async def handle_polaris_conversation_import(self, request: Request) -> JSONResponse:
         """导入 Polaris v1 对话归档；只接收 chat conversations，不读取任何设置。"""
@@ -21579,6 +21671,9 @@ def create_gateway_app(
     async def conversation_turn(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_conversation_turn(request)
 
+    async def conversation_attachment(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_conversation_attachment(request)
+
     async def polaris_conversation_import(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_polaris_conversation_import(request)
 
@@ -21632,6 +21727,7 @@ def create_gateway_app(
             # ⚠️ 加路由必须同时加进 server.py 的 /gateway/* 转发表，
             # 否则公网打过去 404（第 2 步已经踩过一次）。
             Route("/api/conversation/turn", conversation_turn, methods=["GET", "POST"]),
+            Route("/api/conversation/attachment", conversation_attachment, methods=["GET", "POST", "DELETE"]),
             Route("/api/conversation/import/polaris", polaris_conversation_import, methods=["POST"]),
             Route("/api/conversation/sessions", conversation_sessions, methods=["GET"]),
             Route("/api/conversation/turns", conversation_turns, methods=["GET"]),

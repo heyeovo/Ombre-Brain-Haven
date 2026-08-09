@@ -1,5 +1,6 @@
 import sys
 import unittest
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -76,6 +77,27 @@ class DailyReviewEngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request["json"]["messages"], [{"role": "user", "content": "日回顾材料"}])
         self.assertFalse(request["json"]["stream"])
         self.assertEqual(request["headers"]["x-api-key"], "test-key")
+
+    def test_continuity_reference_uses_only_two_exact_previous_calendar_days(self):
+        class Store:
+            @staticmethod
+            def list_daily_reviews(**kwargs):
+                return [
+                    {"review_date": "2026-08-08", "content": "当天旧稿，不应读取"},
+                    {"review_date": "2026-08-07", "content": "前一天"},
+                    {"review_date": "2026-08-06", "content": "前两天"},
+                    {"review_date": "2026-08-05", "content": "更早内容，不应补位"},
+                ]
+
+        engine = DailyReviewEngine({}, Store())
+        reference = engine._continuity_reference(
+            profile_id="default", persona_id="ombre", target=date(2026, 8, 8),
+        )
+        self.assertLess(reference.index("2026-08-06"), reference.index("2026-08-07"))
+        self.assertIn("前两天", reference)
+        self.assertIn("前一天", reference)
+        self.assertNotIn("当天旧稿", reference)
+        self.assertNotIn("更早内容", reference)
 
     async def test_chat_keeps_full_text_and_work_uses_summary_plus_tail(self):
         engine = DailyReviewEngine(

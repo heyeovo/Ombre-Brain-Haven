@@ -198,6 +198,35 @@ class DailyReviewEngine:
             material = "（当天对话超过输入边界，以下保留靠后的内容。）\n\n" + material[-self.max_input_chars :]
         return material, session_ids
 
+    def _continuity_reference(
+        self, *, profile_id: str, persona_id: str, target: date,
+    ) -> str:
+        dates = [(target - timedelta(days=offset)).isoformat() for offset in (2, 1)]
+        allowed = set(dates)
+        reviews = self.state_store.list_daily_reviews(
+            profile_id=profile_id,
+            persona_id=persona_id,
+            start_date=dates[0],
+            end_date=dates[-1],
+            limit=2,
+        )
+        by_date = {
+            str(review.get("review_date") or ""): str(review.get("content") or "").strip()
+            for review in reviews
+            if isinstance(review, dict)
+            and str(review.get("review_date") or "") in allowed
+            and str(review.get("content") or "").strip()
+        }
+        entries = [f"{review_date}\n{by_date[review_date]}" for review_date in dates if review_date in by_date]
+        if not entries:
+            return ""
+        return "\n\n".join([
+            "<previous_daily_reviews>",
+            "以下是前两个日历日已有的日回顾，只用于理解关系、情绪、未完成事项和生活状态如何延续。不要复述或改写这些旧笔记，只在确有延续时自然接上。",
+            *entries,
+            "</previous_daily_reviews>",
+        ])
+
     async def generate(
         self, *, profile_id: str, persona_id: str, review_date: str,
         force: bool = False, override_user_edit: bool = False,
@@ -224,9 +253,18 @@ class DailyReviewEngine:
         material, session_ids = await self._materials(turns, persona)
         if not material.strip():
             return {"status": "skipped", "reason": "empty_material", "date": review_date}
+        continuity_reference = self._continuity_reference(
+            profile_id=profile_id,
+            persona_id=persona_id,
+            target=target,
+        )
+        user_parts = [DAILY_REVIEW_INSTRUCTION]
+        if continuity_reference:
+            user_parts.append(continuity_reference)
+        user_parts.append(f"<today_conversations date={review_date!r}>\n{material}\n</today_conversations>")
         content = await self._create_message(
             system=self._persona_system(persona),
-            user=f"{DAILY_REVIEW_INSTRUCTION}\n\n日期：{review_date}\n\n{material}",
+            user="\n\n".join(user_parts),
             max_tokens=self.max_tokens,
             temperature=0.5,
         )

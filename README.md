@@ -336,7 +336,7 @@ python gateway.py
 | `reranker` | 可选重排；资源不足或延迟敏感时可关闭 |
 | `gateway.upstreams` | 聊天模型上游和模型路由 |
 | `memory_diffusion` | 图召回、扩散和门控参数 |
-| `reflection` / `portrait` | 日总结与画像维护策略 |
+| `reflection` / `daily_review` / `portrait` | 已暂停的旧日印象、独立日回顾与画像维护策略 |
 | `raw_events` | 原文存储和检索配置 |
 | `word_map` / `dream` | 默认可关闭的派生能力 |
 
@@ -349,7 +349,7 @@ OMBRE_GATEWAY_TOKEN=...
 OMBRE_DASHBOARD_PASSWORD=...
 ```
 
-其它 provider key 由 `gateway.upstreams[*].api_key_env` 指向对应环境变量。RiJi / Diary 集成使用自己的 `MCP_BEARER_TOKEN`，它不是 Gateway 或 Dashboard 的访问令牌。
+其它 provider key 由 `gateway.upstreams[*].api_key_env` 指向对应环境变量。日回顾如需独立密钥可设置 `OMBRE_DAILY_REVIEW_API_KEY`；留空会复用 Reflection 密钥。RiJi / Diary 集成使用自己的 `MCP_BEARER_TOKEN`，它不是 Gateway 或 Dashboard 的访问令牌。
 
 示例里的 embedding 模型只是远程兼容配置，不是硬依赖。更换模型或维度后应重建向量索引；小型本地 embedding 也可以通过 OpenAI-compatible 服务接入。
 
@@ -391,7 +391,7 @@ http://your-host:18001/dashboard
 
 Python 直跑或直接访问容器内部服务时使用 `http://127.0.0.1:8000/dashboard`。
 
-Dashboard 可查看和编辑 bucket、画像、日印象、记忆图、Darkroom、提醒与调试状态。生产环境请设置 `OMBRE_DASHBOARD_PASSWORD` 并通过 HTTPS 暴露。
+Dashboard 可查看和编辑 bucket、画像、独立日回顾、记忆图、Darkroom、提醒与调试状态。生产环境请设置 `OMBRE_DASHBOARD_PASSWORD` 并通过 HTTPS 暴露。
 
 ### 原文写入与检索 API
 

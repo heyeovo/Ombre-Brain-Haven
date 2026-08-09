@@ -637,7 +637,8 @@ persona:
 reflection:
   enabled: true
   auto_enabled: true
-  daily_enabled: true              # daily relationship-weather impressions; persona_events only supplement
+  legacy_daily_memory_paused: true # hard pause: runtime overlay cannot re-enable old daily impression/auto-memory jobs
+  daily_enabled: false             # legacy daily impressions paused; retained data is not deleted
   enrich_on_write: true
   memory_affect_anchor_enabled: true      # ordinary memory enrich may append affect_anchor; turn off for quieter buckets
   relationship_weather_affect_anchor_enabled: true  # daily/weekly relationship weather keeps affect_anchor by default
@@ -654,7 +655,7 @@ reflection:
   daily_hour: 4                   # generate daily impression after this local hour
   daily_min_memory_items: 5        # ordinary memory/update items required before daily impression writes
   daily_conversation_turn_limit: 12 # small short-term turn window for daily impression material
-  daily_chat_memory_mode: review   # review = pending candidates; auto = write selected Gateway chat memories; off = disabled
+  daily_chat_memory_mode: off      # legacy automatic chat-memory extraction paused
   daily_chat_memory_hour: 0        # organize the previous day's Gateway chats after local midnight
   daily_chat_memory_turn_limit: 0  # 0 = use all raw_events for that date; >0 caps restored turns
   daily_chat_memory_max_per_day: 10 # cap for selected long-term memory candidates
@@ -671,7 +672,7 @@ reflection:
   daily_chat_memory_summary_max_tokens: 2200
   daily_chat_memory_candidate_model: ""
   daily_chat_memory_candidate_max_tokens: 3200
-  daily_activity_summary_enabled: true      # writes one "what happened today" item into portrait recent_timeline
+  daily_activity_summary_enabled: false     # legacy daily aggregation paused with old daily impression/auto-memory
   daily_activity_summary_turn_limit: 0      # 0 = use all raw_events for that date; not sourced from auto-memory candidates
   daily_activity_summary_max_tokens: 320
   persona_events_limit: 12         # selected and deduped; persona events supplement daily weather only
@@ -702,6 +703,20 @@ reflection:
   #   OMBRE_REFLECTION_CANDIDATE_MODEL
   #   OMBRE_DIARY_MCP_URL
   #   OMBRE_DIARY_MCP_TOKEN_ENV
+
+# --- Daily Review / 日回顾 ---
+# Stores first-person continuity notes outside ordinary memory buckets.
+daily_review:
+  enabled: true
+  daily_hour: 4
+  timezone: "Asia/Hong_Kong"
+  model: ""                       # empty = reflection.model
+  base_url: ""                    # empty = reflection.base_url
+  thinking_mode: ""               # empty = model default; disabled/enabled can force thinking
+  max_tokens: 900
+  max_input_chars: 240000          # final safety boundary across all windows
+  work_tail_turns: 10              # work windows keep only their latest turns
+  # api_key: ""                   # use OMBRE_DAILY_REVIEW_API_KEY; falls back to reflection key
 
 # --- Daily Portrait Maintainer / 每日画像维护 ---
 # Writes only an inspectable state/portrait_state.json. It does not edit

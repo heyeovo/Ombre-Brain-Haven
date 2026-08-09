@@ -39,7 +39,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 |------|------|
 | `server.py` | **Brain** 入口（~640KB）。MCP 工具注册（`@mcp.custom_route`）+ REST API + 记忆核心 |
 | `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线 + cc 持久化路由（`Route()` 注册） |
-| `gateway_state.py` | Gateway/cc SQLite 状态：会话原文、图片/文件附件元数据与私有文件、文件解析正文、协作者归属、协作者基础提示词、提示词模块及窗口覆盖、幂等写入、跨设备冲突、cc 游标与桶排除账本 |
+| `gateway_state.py` | Gateway/cc SQLite 状态：会话原文、窗口闲聊/工作模式、固定日回顾快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、cc 游标与桶排除账本 |
 | `bucket_manager.py` | 桶 CRUD、搜索、评分、回收站、命中统计、分词 |
 | `dehydrator.py` | LLM 脱水、合并、打标（含 `_last_merge_usage` 成本追踪） |
 | `decay_engine.py` | 衰减引擎，计算 score |
@@ -47,11 +47,14 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `import_memory.py` | 对话历史导入引擎（含成本追踪） |
 | `recall_policy.py` | 召回策略（vague 闸、相对日期、分词整词判断） |
 | `reflection_engine.py` | 反思/日印象引擎 |
+| `daily_review_engine.py` | 每日 4 点按协作者生成第一人称日回顾；闲聊用完整可见原文，工作用较早脉络摘要 + 最后 10 轮，结果不进记忆桶 |
 | `persona_engine.py` / `portrait_engine.py` | 用户画像（persona 状态 + 画像生成） |
 | `memory_*.py` | 记忆分层：layers/nodes/edges/metadata/moments/diffusion/relevance/write_gate |
 | `todo_store.py` / `reminder_store.py` | 待办 / 照顾备忘持久化 |
 | `darkroom.py` / `dream_engine.py` | 深色房调试 / 自动 dream |
 | `utils.py` | 配置加载、`LLM_PRICING`、`estimate_llm_cost`、`auto_merge` |
+
+`reflection.legacy_daily_memory_paused=true` 是旧日印象、旧自动记忆和旧每日活动汇总的硬暂停闸；它优先于运行时覆盖文件里的旧开关。旧数据与配置保留，关系整理和记忆 enrichment/backfill 仍可继续运行。新日回顾完全走 `daily_review.*` 与独立表。
 
 ### `hold` 结构化成功结果
 
@@ -157,11 +160,13 @@ GET    /gateway/api/conversation/turns?session_id=&after_round_id=&source=
 GET    /gateway/api/conversation/sessions?source=&persona_id=&deleted=1
        # 默认只列活动窗口；deleted=1 只列软删除窗口，供前端永久删除区使用
 GET    /gateway/api/conversation/session?session_id=&include_bucket_exclusions=1
-       # 窗口归属、local_engine_preference、selfhost/提示词模块覆盖、cc 阅读游标与可选桶排除集合
+       # 窗口归属、闲聊/工作模式、固定日回顾快照、引擎/提示词覆盖、cc 游标与可选桶排除集合
 PATCH  /gateway/api/conversation/session
-       # 修改持久窗口覆盖（含 prompt_module_overrides）；effective_engine 是运行态，拒绝入库
+       # 修改持久窗口覆盖；initialize_daily_review_snapshot 只在首次复制最近三天日回顾
 DELETE /gateway/api/conversation/session
        # 默认软删除；permanent=true 且 confirm_session_id 精确匹配时永久删除窗口数据
+GET|PATCH /gateway/api/daily-reviews?persona_id=
+       # 独立日回顾列表与手动微调；不进入 bucket、搜索或召回
 ```
 GET  /api/hit-stats?limit=&include_zero=&order=&exclude_gated=   # 命中统计
 POST /api/hit-stats/reset                                       # 重置
@@ -204,6 +209,8 @@ GET  /api/persona / GET /api/portrait-state*                        # 画像
 GET  /api/moments / GET /api/edges / GET /api/word-map*              # 记忆图
 POST /api/ingest-raw / POST /api/memories                            # 原文写入
 GET  /api/daily-chat-memory/pending | /run | /confirm                # 每日聊天记忆
+GET|PATCH /api/daily-reviews                                            # 日回顾列表 / 手动微调
+POST /api/daily-reviews/run                                             # 指定日期手动生成日回顾
 ```
 
 ### Hooks & 调试

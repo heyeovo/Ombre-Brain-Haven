@@ -393,7 +393,8 @@ class ReflectionEngine:
 
         self.enabled = bool(cfg.get("enabled", True))
         self.auto_enabled = bool(cfg.get("auto_enabled", True))
-        self.daily_enabled = bool(cfg.get("daily_enabled", True))
+        self.legacy_daily_memory_paused = bool(cfg.get("legacy_daily_memory_paused", True))
+        self.daily_enabled = False if self.legacy_daily_memory_paused else bool(cfg.get("daily_enabled", True))
         self.enrich_on_write = bool(cfg.get("enrich_on_write", True))
         self.memory_affect_anchor_enabled = bool(cfg.get("memory_affect_anchor_enabled", True))
         self.relationship_weather_affect_anchor_enabled = bool(
@@ -458,6 +459,8 @@ class ReflectionEngine:
         self.daily_chat_memory_mode = self._normalize_daily_chat_memory_mode(
             cfg.get("daily_chat_memory_mode", "review")
         )
+        if self.legacy_daily_memory_paused:
+            self.daily_chat_memory_mode = "off"
         self.daily_chat_memory_hour = max(0, min(23, int(cfg.get("daily_chat_memory_hour", 0))))
         self.daily_chat_memory_turn_limit = max(0, min(10000, int(cfg.get("daily_chat_memory_turn_limit", 0))))
         self.daily_chat_memory_max_per_day = max(0, min(10, int(cfg.get("daily_chat_memory_max_per_day", 10))))

@@ -5,7 +5,7 @@ import hashlib
 import io
 import uuid
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 
@@ -213,12 +213,39 @@ class GatewayStateStore:
                 local_engine_preference TEXT NOT NULL DEFAULT 'cc',
                 selfhost_overrides_json TEXT NOT NULL DEFAULT '{}',
                 prompt_module_overrides_json TEXT NOT NULL DEFAULT '{}',
+                mode TEXT NOT NULL DEFAULT 'chat',
+                daily_review_enabled INTEGER NOT NULL DEFAULT 1,
+                daily_review_snapshot_json TEXT NOT NULL DEFAULT '[]',
+                daily_review_snapshot_initialized INTEGER NOT NULL DEFAULT 0,
                 cc_seen_round_id INTEGER NOT NULL DEFAULT 0,
                 state_version INTEGER NOT NULL DEFAULT 0,
                 deleted_at TEXT,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (profile_id, session_id)
             )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_reviews (
+                profile_id TEXT NOT NULL,
+                persona_id TEXT NOT NULL,
+                review_date TEXT NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                source_session_ids_json TEXT NOT NULL DEFAULT '[]',
+                source_turn_count INTEGER NOT NULL DEFAULT 0,
+                model TEXT NOT NULL DEFAULT '',
+                generated_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                edited_by_user INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (profile_id, persona_id, review_date)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_daily_reviews_lookup
+            ON daily_reviews (profile_id, persona_id, review_date DESC)
             """
         )
         conn.execute(
@@ -271,6 +298,10 @@ class GatewayStateStore:
                 "local_engine_preference": "TEXT NOT NULL DEFAULT 'cc'",
                 "selfhost_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
                 "prompt_module_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
+                "mode": "TEXT NOT NULL DEFAULT 'chat'",
+                "daily_review_enabled": "INTEGER NOT NULL DEFAULT 1",
+                "daily_review_snapshot_json": "TEXT NOT NULL DEFAULT '[]'",
+                "daily_review_snapshot_initialized": "INTEGER NOT NULL DEFAULT 0",
                 "cc_seen_round_id": "INTEGER NOT NULL DEFAULT 0",
                 "state_version": "INTEGER NOT NULL DEFAULT 0",
             },
@@ -516,6 +547,14 @@ class GatewayStateStore:
         except (TypeError, ValueError):
             return {}
         return dict(value) if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _json_array(raw: Any) -> list[Any]:
+        try:
+            value = json.loads(raw or "[]") if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            return []
+        return list(value) if isinstance(value, list) else []
 
     @staticmethod
     def _cc_prompt_modules(raw: Any, legacy_prompt: str = "") -> list[dict[str, Any]]:
@@ -2060,6 +2099,54 @@ class GatewayStateStore:
             for row in filtered
         ]
 
+    def list_daily_review_turns(
+        self, *, profile_id: str, persona_id: str, start_at: datetime, end_at: datetime,
+        limit: int = 10000,
+    ) -> list[dict[str, Any]]:
+        """Return visible turns for one persona/day with the persisted chat/work mode."""
+        safe_limit = max(1, min(10000, int(limit or 10000)))
+        conn = self._connect()
+        rows = conn.execute(
+            """
+            SELECT turns.id, turns.session_id, turns.round_id, turns.created_at,
+                   turns.user_text, turns.assistant_text, turns.source,
+                   COALESCE(sessions.mode, 'chat') AS mode,
+                   COALESCE(sessions.title, '') AS session_title
+            FROM conversation_turns turns
+            LEFT JOIN conversation_sessions sessions
+              ON sessions.profile_id = turns.profile_id AND sessions.session_id = turns.session_id
+            WHERE turns.profile_id = ? AND COALESCE(sessions.persona_id, 'ombre') = ?
+            ORDER BY turns.id ASC
+            """,
+            (str(profile_id or "default"), str(persona_id or "").strip()),
+        ).fetchall()
+        conn.close()
+        selected: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                created = datetime.fromisoformat(str(row["created_at"] or ""))
+            except ValueError:
+                continue
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=start_at.tzinfo)
+            elif start_at.tzinfo is not None:
+                created = created.astimezone(start_at.tzinfo)
+            if not (start_at <= created < end_at):
+                continue
+            mode = str(row["mode"] or "chat")
+            selected.append({
+                "id": int(row["id"]), "session_id": str(row["session_id"]),
+                "round_id": int(row["round_id"]), "created_at": str(row["created_at"]),
+                "user_text": str(row["user_text"] or ""),
+                "assistant_text": str(row["assistant_text"] or ""),
+                "source": str(row["source"] or "gateway"),
+                "mode": mode if mode in {"chat", "work"} else "chat",
+                "session_title": str(row["session_title"] or ""),
+            })
+            if len(selected) >= safe_limit:
+                break
+        return selected
+
     def next_conversation_round_id(self, *, profile_id: str, session_id: str) -> int:
         """
         同 session 里的下一个 round_id。
@@ -2239,6 +2326,128 @@ class GatewayStateStore:
             "updated_at": deleted_at,
         }
 
+    @classmethod
+    def _daily_review_row_payload(cls, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "profile_id": str(row["profile_id"]),
+            "persona_id": str(row["persona_id"]),
+            "review_date": str(row["review_date"]),
+            "content": str(row["content"] or ""),
+            "source_session_ids": [str(item) for item in cls._json_array(row["source_session_ids_json"])],
+            "source_turn_count": int(row["source_turn_count"] or 0),
+            "model": str(row["model"] or ""),
+            "generated_at": str(row["generated_at"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+            "edited_by_user": bool(row["edited_by_user"]),
+        }
+
+    def list_daily_reviews(
+        self, *, profile_id: str, persona_id: str, start_date: str = "", end_date: str = "", limit: int = 90,
+    ) -> list[dict[str, Any]]:
+        clauses = ["profile_id = ?", "persona_id = ?"]
+        params: list[Any] = [str(profile_id or "default"), str(persona_id or "").strip()]
+        if start_date:
+            clauses.append("review_date >= ?")
+            params.append(str(start_date))
+        if end_date:
+            clauses.append("review_date <= ?")
+            params.append(str(end_date))
+        params.append(max(1, min(366, int(limit or 90))))
+        conn = self._connect()
+        rows = conn.execute(
+            f"SELECT * FROM daily_reviews WHERE {' AND '.join(clauses)} ORDER BY review_date DESC LIMIT ?",
+            params,
+        ).fetchall()
+        conn.close()
+        return [self._daily_review_row_payload(row) for row in rows]
+
+    def upsert_daily_review(
+        self, *, profile_id: str, persona_id: str, review_date: str, content: str,
+        source_session_ids: list[str] | None = None, source_turn_count: int = 0,
+        model: str = "", edited_by_user: bool = False, preserve_user_edit: bool = True,
+    ) -> dict[str, Any]:
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_persona_id = str(persona_id or "").strip()
+        safe_review_date = str(review_date or "").strip()
+        safe_content = str(content or "").strip()
+        if not safe_persona_id:
+            raise ValueError("persona_id is required")
+        try:
+            date.fromisoformat(safe_review_date)
+        except ValueError as exc:
+            raise ValueError("review_date must be YYYY-MM-DD") from exc
+        if not safe_content:
+            raise ValueError("daily review content is required")
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        conn = self._connect()
+        existing = conn.execute(
+            "SELECT * FROM daily_reviews WHERE profile_id = ? AND persona_id = ? AND review_date = ?",
+            (safe_profile_id, safe_persona_id, safe_review_date),
+        ).fetchone()
+        if existing and preserve_user_edit and bool(existing["edited_by_user"]) and not edited_by_user:
+            conn.close()
+            return self.list_daily_reviews(
+                profile_id=safe_profile_id, persona_id=safe_persona_id,
+                start_date=safe_review_date, end_date=safe_review_date, limit=1,
+            )[0]
+        effective_source_session_ids = source_session_ids
+        effective_source_turn_count = source_turn_count
+        effective_model = str(model or "")
+        if existing and edited_by_user:
+            if effective_source_session_ids is None:
+                effective_source_session_ids = [
+                    str(item) for item in self._json_array(existing["source_session_ids_json"])
+                ]
+            if not effective_source_turn_count:
+                effective_source_turn_count = int(existing["source_turn_count"] or 0)
+            if not effective_model:
+                effective_model = str(existing["model"] or "")
+        generated_at = now if not existing else ""
+        conn.execute(
+            """
+            INSERT INTO daily_reviews
+            (profile_id, persona_id, review_date, content, source_session_ids_json,
+             source_turn_count, model, generated_at, updated_at, edited_by_user)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(profile_id, persona_id, review_date) DO UPDATE SET
+                content = excluded.content,
+                source_session_ids_json = excluded.source_session_ids_json,
+                source_turn_count = excluded.source_turn_count,
+                model = excluded.model,
+                generated_at = CASE WHEN daily_reviews.generated_at = '' THEN excluded.generated_at ELSE daily_reviews.generated_at END,
+                updated_at = excluded.updated_at,
+                edited_by_user = excluded.edited_by_user
+            """,
+            (
+                safe_profile_id, safe_persona_id, safe_review_date, safe_content,
+                json.dumps(list(dict.fromkeys(effective_source_session_ids or [])), ensure_ascii=False),
+                max(0, int(effective_source_turn_count or 0)), effective_model, generated_at or now, now,
+                1 if edited_by_user else 0,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return self.list_daily_reviews(
+            profile_id=safe_profile_id, persona_id=safe_persona_id,
+            start_date=safe_review_date, end_date=safe_review_date, limit=1,
+        )[0]
+
+    @classmethod
+    def _daily_review_snapshot_rows(
+        cls, conn: sqlite3.Connection, *, profile_id: str, persona_id: str,
+    ) -> list[dict[str, str]]:
+        today = datetime.now(timezone(timedelta(hours=8))).date()
+        dates = [(today - timedelta(days=offset)).isoformat() for offset in (1, 2, 3)]
+        placeholders = ",".join("?" for _ in dates)
+        rows = conn.execute(
+            f"SELECT review_date, content, updated_at FROM daily_reviews WHERE profile_id = ? AND persona_id = ? AND review_date IN ({placeholders}) ORDER BY review_date ASC",
+            [profile_id, persona_id, *dates],
+        ).fetchall()
+        return [
+            {"review_date": str(row["review_date"]), "content": str(row["content"]), "updated_at": str(row["updated_at"] or "")}
+            for row in rows if str(row["content"] or "").strip()
+        ]
+
     def get_conversation_session_state(
         self,
         *,
@@ -2254,6 +2463,8 @@ class GatewayStateStore:
             """
             SELECT profile_id, session_id, persona_id, title,
                    local_engine_preference, selfhost_overrides_json, prompt_module_overrides_json,
+                   mode, daily_review_enabled, daily_review_snapshot_json,
+                   daily_review_snapshot_initialized,
                    cc_seen_round_id, state_version, deleted_at, updated_at
             FROM conversation_sessions
             WHERE profile_id = ? AND session_id = ?
@@ -2266,6 +2477,9 @@ class GatewayStateStore:
         preference = str(row["local_engine_preference"] or "cc")
         if preference not in {"cc", "selfhost"}:
             preference = "cc"
+        mode = str(row["mode"] or "chat")
+        if mode not in {"chat", "work"}:
+            mode = "chat"
         return {
             "profile_id": str(row["profile_id"]),
             "session_id": str(row["session_id"]),
@@ -2278,6 +2492,13 @@ class GatewayStateStore:
                 for key, value in self._json_object(row["prompt_module_overrides_json"]).items()
                 if str(key).strip() and isinstance(value, bool)
             },
+            "mode": mode,
+            "daily_review_enabled": bool(row["daily_review_enabled"]),
+            "daily_review_snapshot": [
+                item for item in self._json_array(row["daily_review_snapshot_json"])
+                if isinstance(item, dict)
+            ],
+            "daily_review_snapshot_initialized": bool(row["daily_review_snapshot_initialized"]),
             "cc_seen_round_id": int(row["cc_seen_round_id"] or 0),
             "state_version": int(row["state_version"] or 0),
             "deleted_at": row["deleted_at"],
@@ -2304,7 +2525,10 @@ class GatewayStateStore:
             raise ValueError("updates must be an object")
         if "effective_engine" in updates:
             raise ValueError("effective_engine is runtime-only and cannot be persisted")
-        allowed = {"local_engine_preference", "selfhost_overrides", "prompt_module_overrides"}
+        allowed = {
+            "local_engine_preference", "selfhost_overrides", "prompt_module_overrides",
+            "mode", "daily_review_enabled", "initialize_daily_review_snapshot",
+        }
         unknown = sorted(set(updates) - allowed)
         if unknown:
             raise ValueError(f"unsupported session state fields: {', '.join(unknown)}")
@@ -2330,6 +2554,13 @@ class GatewayStateStore:
                 for key, value in raw_prompt_overrides.items()
                 if str(key).strip() and isinstance(value, bool)
             }
+        mode: str | None = None
+        if "mode" in updates:
+            mode = str(updates.get("mode") or "").strip()
+            if mode not in {"chat", "work"}:
+                raise ValueError("mode must be chat or work")
+        daily_review_enabled = bool(updates.get("daily_review_enabled")) if "daily_review_enabled" in updates else None
+        initialize_daily_review_snapshot = bool(updates.get("initialize_daily_review_snapshot"))
 
         updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         conn = self._connect()
@@ -2338,7 +2569,8 @@ class GatewayStateStore:
             row = conn.execute(
                 """
                 SELECT persona_id, local_engine_preference, selfhost_overrides_json,
-                       prompt_module_overrides_json,
+                       prompt_module_overrides_json, mode, daily_review_enabled,
+                       daily_review_snapshot_json, daily_review_snapshot_initialized,
                        state_version
                 FROM conversation_sessions
                 WHERE profile_id = ? AND session_id = ?
@@ -2358,6 +2590,10 @@ class GatewayStateStore:
                 current_preference = str(row["local_engine_preference"] or "cc")
                 current_overrides = self._json_object(row["selfhost_overrides_json"])
                 current_prompt_module_overrides = self._json_object(row["prompt_module_overrides_json"])
+                current_mode = str(row["mode"] or "chat")
+                current_daily_review_enabled = bool(row["daily_review_enabled"])
+                current_daily_review_snapshot = self._json_array(row["daily_review_snapshot_json"])
+                current_daily_review_initialized = bool(row["daily_review_snapshot_initialized"])
             else:
                 current_version = 0
                 if expected_state_version not in (None, 0):
@@ -2365,6 +2601,10 @@ class GatewayStateStore:
                 current_preference = "cc"
                 current_overrides = {}
                 current_prompt_module_overrides = {}
+                current_mode = "chat"
+                current_daily_review_enabled = True
+                current_daily_review_snapshot = []
+                current_daily_review_initialized = False
 
             next_preference = preference or current_preference
             next_overrides = overrides if overrides is not None else current_overrides
@@ -2373,18 +2613,33 @@ class GatewayStateStore:
                 if prompt_module_overrides is not None
                 else current_prompt_module_overrides
             )
+            next_mode = mode or current_mode
+            next_daily_review_enabled = daily_review_enabled if daily_review_enabled is not None else current_daily_review_enabled
+            next_daily_review_snapshot = current_daily_review_snapshot
+            next_daily_review_initialized = current_daily_review_initialized
+            if initialize_daily_review_snapshot and not current_daily_review_initialized:
+                next_daily_review_snapshot = self._daily_review_snapshot_rows(
+                    conn, profile_id=safe_profile_id, persona_id=safe_persona_id,
+                ) if next_daily_review_enabled else []
+                next_daily_review_initialized = True
             next_version = current_version + 1
             conn.execute(
                 """
                 INSERT INTO conversation_sessions
                 (profile_id, session_id, persona_id, title, local_engine_preference,
-                 selfhost_overrides_json, prompt_module_overrides_json, cc_seen_round_id, state_version,
+                 selfhost_overrides_json, prompt_module_overrides_json, mode,
+                 daily_review_enabled, daily_review_snapshot_json, daily_review_snapshot_initialized,
+                 cc_seen_round_id, state_version,
                  deleted_at, updated_at)
-                VALUES (?, ?, ?, '', ?, ?, ?, 0, ?, NULL, ?)
+                VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?)
                 ON CONFLICT(profile_id, session_id) DO UPDATE SET
                     local_engine_preference = excluded.local_engine_preference,
                     selfhost_overrides_json = excluded.selfhost_overrides_json,
                     prompt_module_overrides_json = excluded.prompt_module_overrides_json,
+                    mode = excluded.mode,
+                    daily_review_enabled = excluded.daily_review_enabled,
+                    daily_review_snapshot_json = excluded.daily_review_snapshot_json,
+                    daily_review_snapshot_initialized = excluded.daily_review_snapshot_initialized,
                     state_version = excluded.state_version,
                     updated_at = excluded.updated_at
                 """,
@@ -2395,6 +2650,10 @@ class GatewayStateStore:
                     next_preference,
                     json.dumps(next_overrides, ensure_ascii=False),
                     json.dumps(next_prompt_module_overrides, ensure_ascii=False),
+                    next_mode,
+                    1 if next_daily_review_enabled else 0,
+                    json.dumps(next_daily_review_snapshot, ensure_ascii=False),
+                    1 if next_daily_review_initialized else 0,
                     next_version,
                     updated_at,
                 ),

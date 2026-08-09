@@ -3397,6 +3397,9 @@ class GatewayService:
             "local_engine_preference",
             "selfhost_overrides",
             "prompt_module_overrides",
+            "mode",
+            "daily_review_enabled",
+            "initialize_daily_review_snapshot",
             "effective_engine",
         }
         updates = {key: body[key] for key in state_keys if key in body}
@@ -3448,6 +3451,42 @@ class GatewayService:
                 session_id=session_id,
             )
         return JSONResponse({"ok": True, "session": state})
+
+    async def handle_daily_reviews(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        profile_id = self._conversation_profile_id
+        if request.method == "GET":
+            persona_id = str(request.query_params.get("persona_id") or "").strip()
+            if not persona_id:
+                return JSONResponse({"error": "persona_id is required"}, status_code=400)
+            items = self.state_store.list_daily_reviews(
+                profile_id=profile_id,
+                persona_id=persona_id,
+                start_date=str(request.query_params.get("start_date") or "").strip(),
+                end_date=str(request.query_params.get("end_date") or "").strip(),
+                limit=int(request.query_params.get("limit") or 90),
+            )
+            return JSONResponse({"ok": True, "items": items})
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid daily review request"}, status_code=400)
+        try:
+            review = self.state_store.upsert_daily_review(
+                profile_id=profile_id,
+                persona_id=str(body.get("persona_id") or "").strip(),
+                review_date=str(body.get("review_date") or "").strip(),
+                content=str(body.get("content") or ""),
+                edited_by_user=True,
+                preserve_user_edit=False,
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "review": review})
 
     async def handle_persona_exchange(self, request: Request) -> JSONResponse:
         auth_result = self._authorize(request.headers.get("Authorization", ""))
@@ -21737,6 +21776,9 @@ def create_gateway_app(
     async def conversation_session(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_conversation_session(request)
 
+    async def daily_reviews(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_daily_reviews(request)
+
     async def persona_exchange(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_persona_exchange(request)
 
@@ -21783,6 +21825,7 @@ def create_gateway_app(
             Route("/api/conversation/sessions", conversation_sessions, methods=["GET"]),
             Route("/api/conversation/turns", conversation_turns, methods=["GET"]),
             Route("/api/conversation/session", conversation_session, methods=["GET", "PATCH", "DELETE"]),
+            Route("/api/daily-reviews", daily_reviews, methods=["GET", "PATCH"]),
             Route("/api/persona/exchange", persona_exchange, methods=["POST"]),
             Route("/api/cc/personas", cc_personas, methods=["GET", "POST", "DELETE"]),
             Route("/api/cc/upstream", cc_upstream, methods=["GET", "POST"]),

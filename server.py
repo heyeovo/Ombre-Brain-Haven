@@ -128,6 +128,7 @@ from persona_event_selection import select_persona_events
 from portrait_engine import DailyPortraitMaintainer
 from raw_events import RawEventStore
 from reflection_engine import ReflectionEngine
+from daily_review_engine import DailyReviewEngine
 from recall_diagnostics import RecallDiagnosticsLogger
 from reminder_store import ReminderStore
 from todo_store import TODO_DOMAINS, TodoStore
@@ -253,6 +254,7 @@ identity_semantic_store = IdentitySemanticStore(config) # Private relationship a
 word_map_store = WordMapStore(config)                   # Derived generic word co-occurrence index / 派生通用词图
 darkroom_store = DarkroomStore(config)                  # Private reflection room / 不回显正文的暗房
 gateway_state_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gateway_state.db"))
+daily_review_engine = DailyReviewEngine(config, gateway_state_store)
 raw_event_store = RawEventStore(config)                  # Raw dialogue archive / 原文保险箱
 reminder_store = ReminderStore(config)                    # Standalone care memos / 独立照顾备忘
 todo_store = TodoStore(config)                            # Standalone todos / 独立待办
@@ -12721,6 +12723,63 @@ async def api_daily_chat_memory_run(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@mcp.custom_route("/api/daily-reviews", methods=["GET", "PATCH"])
+async def api_daily_reviews(request):
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    profile_id = str(getattr(persona_engine, "profile_id", "") or "default")
+    if request.method == "GET":
+        persona_id = str(request.query_params.get("persona_id") or "").strip()
+        if not persona_id:
+            return JSONResponse({"error": "persona_id is required"}, status_code=400)
+        return JSONResponse({"ok": True, "items": gateway_state_store.list_daily_reviews(
+            profile_id=profile_id,
+            persona_id=persona_id,
+            start_date=str(request.query_params.get("start_date") or ""),
+            end_date=str(request.query_params.get("end_date") or ""),
+            limit=_int_between(request.query_params.get("limit"), 90, 1, 366),
+        )})
+    body = await request.json()
+    try:
+        review = gateway_state_store.upsert_daily_review(
+            profile_id=profile_id,
+            persona_id=str(body.get("persona_id") or "").strip(),
+            review_date=str(body.get("review_date") or "").strip(),
+            content=str(body.get("content") or ""),
+            edited_by_user=True,
+            preserve_user_edit=False,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse({"ok": True, "review": review})
+
+
+@mcp.custom_route("/api/daily-reviews/run", methods=["POST"])
+async def api_daily_reviews_run(request):
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    body = await request.json()
+    review_date = str(body.get("review_date") or "").strip()
+    persona_id = str(body.get("persona_id") or "").strip()
+    if not review_date or not persona_id:
+        return JSONResponse({"error": "review_date and persona_id are required"}, status_code=400)
+    try:
+        result = await daily_review_engine.generate(
+            profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
+            persona_id=persona_id,
+            review_date=review_date,
+            force=_bool_value(body.get("force"), False),
+        )
+    except Exception as exc:
+        logger.warning("Daily review API failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse(result)
+
+
 def _store_daily_activity_summary_result(result: dict, portrait_engine_arg=None) -> dict:
     if not isinstance(result, dict):
         return {"status": "invalid", "reason": "result_not_object"}
@@ -13210,6 +13269,8 @@ async def api_config_get(request):
     persona_cfg = config.get("persona", {}) if isinstance(config.get("persona", {}), dict) else {}
     dream_cfg = config.get("dream", {}) if isinstance(config.get("dream", {}), dict) else {}
     reflection_cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
+    legacy_daily_memory_paused = bool(reflection_cfg.get("legacy_daily_memory_paused", True))
+    daily_review_cfg = config.get("daily_review", {}) if isinstance(config.get("daily_review", {}), dict) else {}
     portrait_cfg = config.get("portrait", {}) if isinstance(config.get("portrait", {}), dict) else {}
     self_anchor_cfg = config.get("self_anchor", {}) if isinstance(config.get("self_anchor", {}), dict) else {}
     domain_sentinel_configured_model = str(gateway_cfg.get("domain_sentinel_model") or "").strip()
@@ -13237,6 +13298,15 @@ async def api_config_get(request):
         or persona_cfg.get("api_key", "")
         or os.environ.get("OMBRE_PERSONA_API_KEY", "")
         or dehy.get("api_key", "")
+        or ""
+    )
+    daily_review_base_url = str(
+        daily_review_cfg.get("base_url") or reflection_base_url
+    ).strip()
+    daily_review_api_key = str(
+        os.environ.get("OMBRE_DAILY_REVIEW_API_KEY", "")
+        or daily_review_cfg.get("api_key", "")
+        or reflection_api_key
         or ""
     )
     return JSONResponse({
@@ -13385,7 +13455,7 @@ async def api_config_get(request):
                 )
             ),
             "daily_enabled": bool(
-                reflection_cfg.get(
+                False if legacy_daily_memory_paused else reflection_cfg.get(
                     "daily_enabled",
                     getattr(reflection_engine, "daily_enabled", True),
                 )
@@ -13415,7 +13485,7 @@ async def api_config_get(request):
                 )
             ),
             "daily_activity_summary_enabled": bool(
-                reflection_cfg.get(
+                False if legacy_daily_memory_paused else reflection_cfg.get(
                     "daily_activity_summary_enabled",
                     getattr(reflection_engine, "daily_activity_summary_enabled", True),
                 )
@@ -13433,7 +13503,7 @@ async def api_config_get(request):
                 )
             ),
             "daily_chat_memory_mode": str(
-                reflection_cfg.get(
+                "off" if legacy_daily_memory_paused else reflection_cfg.get(
                     "daily_chat_memory_mode",
                     getattr(reflection_engine, "daily_chat_memory_mode", "review"),
                 )
@@ -13463,6 +13533,19 @@ async def api_config_get(request):
             "effective_base_url": getattr(reflection_engine, "base_url", reflection_base_url),
             "api_key_masked": _mask_key(getattr(reflection_engine, "api_key", "") or reflection_api_key),
             "api_ready": bool(getattr(reflection_engine, "api_key", "") or reflection_api_key),
+        },
+        "daily_review": {
+            "enabled": bool(daily_review_cfg.get("enabled", getattr(daily_review_engine, "enabled", True))),
+            "daily_hour": int(daily_review_cfg.get("daily_hour", getattr(daily_review_engine, "daily_hour", 4))),
+            "timezone": str(daily_review_cfg.get("timezone") or "Asia/Hong_Kong"),
+            "model": str(daily_review_cfg.get("model") or getattr(daily_review_engine, "model", "")),
+            "thinking_mode": str(daily_review_cfg.get("thinking_mode") or getattr(daily_review_engine, "thinking_mode", "") or ""),
+            "base_url": str(daily_review_cfg.get("base_url") or ""),
+            "effective_base_url": getattr(daily_review_engine, "base_url", daily_review_base_url),
+            "api_key_masked": _mask_key(getattr(daily_review_engine, "api_key", "") or daily_review_api_key),
+            "api_ready": bool(getattr(daily_review_engine, "api_key", "") or daily_review_api_key),
+            "max_input_chars": int(daily_review_cfg.get("max_input_chars", 240000)),
+            "work_tail_turns": int(daily_review_cfg.get("work_tail_turns", 10)),
         },
         "portrait": {
             "enabled": bool(portrait_cfg.get("enabled", getattr(portrait_engine, "enabled", True))),
@@ -13505,7 +13588,7 @@ async def api_config_update(request):
     """Hot-update runtime config. Optionally persist to config.yaml."""
     from starlette.responses import JSONResponse
     import yaml
-    global dream_engine, persona_engine, portrait_engine, reflection_engine, reranker_engine
+    global dream_engine, persona_engine, portrait_engine, reflection_engine, reranker_engine, daily_review_engine
     err = _require_dashboard_auth(request)
     if err:
         return err
@@ -14049,6 +14132,37 @@ async def api_config_update(request):
             os.environ["OMBRE_REFLECTION_MODEL"] = reflection_cfg["model"]
         reflection_engine = ReflectionEngine(config)
 
+    # --- Daily review config ---
+    if "daily_review" in body:
+        r = body["daily_review"] if isinstance(body["daily_review"], dict) else {}
+        daily_review_cfg = config.setdefault("daily_review", {})
+        if "enabled" in r:
+            daily_review_cfg["enabled"] = bool(r["enabled"])
+            updated.append("daily_review.enabled")
+        if "daily_hour" in r:
+            daily_review_cfg["daily_hour"] = _int_between(r.get("daily_hour"), 4, 0, 23)
+            updated.append("daily_review.daily_hour")
+        if "max_input_chars" in r:
+            daily_review_cfg["max_input_chars"] = _int_between(r.get("max_input_chars"), 240000, 20000, 500000)
+            updated.append("daily_review.max_input_chars")
+        if "work_tail_turns" in r:
+            daily_review_cfg["work_tail_turns"] = _int_between(r.get("work_tail_turns"), 10, 1, 50)
+            updated.append("daily_review.work_tail_turns")
+        for key in ("model", "base_url", "timezone"):
+            if key in r:
+                daily_review_cfg[key] = str(r[key] or "").strip()
+                updated.append(f"daily_review.{key}")
+        if "thinking_mode" in r:
+            thinking_mode = str(r.get("thinking_mode") or "").strip().lower()
+            daily_review_cfg["thinking_mode"] = thinking_mode if thinking_mode in {"", "enabled", "disabled"} else ""
+            updated.append("daily_review.thinking_mode")
+        if "api_key" in r and r["api_key"]:
+            daily_review_cfg["api_key"] = str(r["api_key"])
+            os.environ["OMBRE_DAILY_REVIEW_API_KEY"] = daily_review_cfg["api_key"]
+            env_updates["OMBRE_DAILY_REVIEW_API_KEY"] = daily_review_cfg["api_key"]
+            updated.append("daily_review.api_key")
+        daily_review_engine = DailyReviewEngine(config, gateway_state_store)
+
     # --- Portrait maintainer config ---
     if "portrait" in body:
         p = body["portrait"]
@@ -14488,6 +14602,28 @@ async def api_config_update(request):
                     if thinking_mode not in {"", "enabled", "disabled"}:
                         thinking_mode = ""
                     sc_reflection["thinking_mode"] = thinking_mode
+                # Never persist api_key to yaml (use env var)
+
+            if "daily_review" in body:
+                sc_daily_review = save_config.setdefault("daily_review", {})
+                for key in ("model", "base_url", "timezone"):
+                    if key in body["daily_review"]:
+                        sc_daily_review[key] = str(body["daily_review"][key] or "").strip()
+                if "enabled" in body["daily_review"]:
+                    sc_daily_review["enabled"] = bool(body["daily_review"]["enabled"])
+                if "daily_hour" in body["daily_review"]:
+                    sc_daily_review["daily_hour"] = _int_between(body["daily_review"].get("daily_hour"), 4, 0, 23)
+                if "max_input_chars" in body["daily_review"]:
+                    sc_daily_review["max_input_chars"] = _int_between(
+                        body["daily_review"].get("max_input_chars"), 240000, 20000, 500000
+                    )
+                if "work_tail_turns" in body["daily_review"]:
+                    sc_daily_review["work_tail_turns"] = _int_between(
+                        body["daily_review"].get("work_tail_turns"), 10, 1, 50
+                    )
+                if "thinking_mode" in body["daily_review"]:
+                    thinking_mode = str(body["daily_review"].get("thinking_mode") or "").strip().lower()
+                    sc_daily_review["thinking_mode"] = thinking_mode if thinking_mode in {"", "enabled", "disabled"} else ""
                 # Never persist api_key to yaml (use env var)
 
             if "portrait" in body:
@@ -15007,6 +15143,7 @@ if __name__ == "__main__":
             while True:
                 try:
                     reflection_cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
+                    legacy_daily_memory_paused = bool(reflection_cfg.get("legacy_daily_memory_paused", True))
                     local_reflection_engine.enabled = bool(
                         reflection_cfg.get("enabled", True)
                     )
@@ -15016,7 +15153,7 @@ if __name__ == "__main__":
                     if not local_reflection_engine.enabled or not local_reflection_engine.auto_enabled:
                         await asyncio.sleep(local_reflection_engine.check_interval_minutes * 60)
                         continue
-                    local_reflection_engine.daily_enabled = bool(
+                    local_reflection_engine.daily_enabled = False if legacy_daily_memory_paused else bool(
                         reflection_cfg.get("daily_enabled", True)
                     )
                     local_reflection_engine.memory_affect_anchor_enabled = bool(
@@ -15037,7 +15174,7 @@ if __name__ == "__main__":
                         0,
                         80,
                     )
-                    local_reflection_engine.daily_activity_summary_enabled = bool(
+                    local_reflection_engine.daily_activity_summary_enabled = False if legacy_daily_memory_paused else bool(
                         reflection_cfg.get("daily_activity_summary_enabled", True)
                     )
                     local_reflection_engine.daily_activity_summary_turn_limit = _int_between(
@@ -15052,7 +15189,9 @@ if __name__ == "__main__":
                         80,
                         1000,
                     )
-                    mode = str(reflection_cfg.get("daily_chat_memory_mode") or "review").strip().lower()
+                    mode = "off" if legacy_daily_memory_paused else str(
+                        reflection_cfg.get("daily_chat_memory_mode") or "review"
+                    ).strip().lower()
                     local_reflection_engine.daily_chat_memory_mode = (
                         mode if mode in {"auto", "review", "off"} else "review"
                     )
@@ -15144,6 +15283,30 @@ if __name__ == "__main__":
             rt = threading.Thread(target=_start_reflection_scheduler, daemon=True)
             rt.start()
             logger.info("Reflection scheduler enabled / 反思定时器已启用")
+
+        async def _daily_review_loop():
+            await asyncio.sleep(30)
+            local_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gateway_state.db"))
+            while True:
+                try:
+                    local_engine = DailyReviewEngine(config, local_store)
+                    results = await local_engine.run_due(
+                        profile_id=str(getattr(persona_engine, "profile_id", "") or "default")
+                    )
+                    if results:
+                        logger.info("Daily review run-due results / 日回顾定时结果: %s", results)
+                except Exception as e:
+                    logger.warning("Daily review scheduler failed / 日回顾定时器失败: %s", e)
+                await asyncio.sleep(60 * 60)
+
+        def _start_daily_review_scheduler():
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(_daily_review_loop())
+
+        if daily_review_engine.enabled:
+            drt = threading.Thread(target=_start_daily_review_scheduler, daemon=True)
+            drt.start()
+            logger.info("Daily review scheduler enabled / 日回顾定时器已启用")
 
         async def _portrait_loop():
             await asyncio.sleep(25)
@@ -15310,6 +15473,8 @@ if __name__ == "__main__":
                 return await _gw_service.handle_conversation_turns(request)
             async def _gw_conversation_session(request):
                 return await _gw_service.handle_conversation_session(request)
+            async def _gw_daily_reviews(request):
+                return await _gw_service.handle_daily_reviews(request)
             async def _gw_persona_exchange(request):
                 return await _gw_service.handle_persona_exchange(request)
             async def _gw_cc_personas(request):
@@ -15347,6 +15512,7 @@ if __name__ == "__main__":
                 _GwRoute("/gateway/api/conversation/sessions", _gw_conversation_sessions, methods=["GET"]),
                 _GwRoute("/gateway/api/conversation/turns", _gw_conversation_turns, methods=["GET"]),
                 _GwRoute("/gateway/api/conversation/session", _gw_conversation_session, methods=["GET", "PATCH", "DELETE"]),
+                _GwRoute("/gateway/api/daily-reviews", _gw_daily_reviews, methods=["GET", "PATCH"]),
                 _GwRoute("/gateway/api/persona/exchange", _gw_persona_exchange, methods=["POST"]),
                 _GwRoute("/gateway/api/cc/personas", _gw_cc_personas, methods=["GET", "POST", "DELETE"]),
                 _GwRoute("/gateway/api/cc/upstream", _gw_cc_upstream, methods=["GET", "POST"]),

@@ -63,9 +63,9 @@
 
 > `OMBRE_GATEWAY_TOKEN` 用于客户端 Bearer 认证和 Gateway Debug 端点访问。各 upstream 的 API key 通过 `gateway.upstreams[*].api_key_env` 分别指向独立环境变量。
 
-## Persona / Reflection / Portrait / Dream
+## Persona / Reflection / Daily Review / Portrait / Dream
 
-`config.yaml` 字段：`persona.*` / `reflection.*` / `portrait.*` / `dream.*`
+`config.yaml` 字段：`persona.*` / `reflection.*` / `daily_review.*` / `portrait.*` / `dream.*`
 
 | 变量名 | 覆盖的 YAML 键 | 说明 |
 |--------|----------------|------|
@@ -76,6 +76,7 @@
 | `OMBRE_REFLECTION_BASE_URL` | `reflection.base_url` | Reflection 模型地址 |
 | `OMBRE_REFLECTION_MODEL` | `reflection.model` | Reflection 模型名 |
 | `OMBRE_REFLECTION_CANDIDATE_MODEL` | `reflection.daily_chat_memory_candidate_model` | 自动记忆候选模型 |
+| `OMBRE_DAILY_REVIEW_API_KEY` | `daily_review.api_key` | 日回顾模型密钥；留空时复用 Reflection 密钥 |
 | `OMBRE_DREAM_API_KEY` | `dream.api_key` | Dream 模型密钥 |
 | `OMBRE_DREAM_BASE_URL` | `dream.base_url` | Dream 模型地址 |
 | `OMBRE_DREAM_MODEL` | `dream.model` | Dream 模型名 |

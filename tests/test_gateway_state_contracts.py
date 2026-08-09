@@ -5,7 +5,7 @@ import tempfile
 import unittest
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -394,6 +394,76 @@ class GatewayStateContractsTest(unittest.TestCase):
             )["cc_seen_round_id"],
             2,
         )
+
+    def test_daily_review_snapshot_is_recent_fixed_and_optional(self):
+        store = self.make_store()
+        today = datetime.now(timezone(timedelta(hours=8))).date()
+        dates = [(today - timedelta(days=offset)).isoformat() for offset in (1, 2, 3, 4)]
+        for index, review_date in enumerate(dates):
+            store.upsert_daily_review(
+                profile_id="default",
+                persona_id="ombre",
+                review_date=review_date,
+                content=f"review-{index}",
+                edited_by_user=False,
+            )
+
+        state = store.patch_conversation_session_state(
+            profile_id="default",
+            session_id="daily-on",
+            persona_id="ombre",
+            updates={
+                "mode": "work",
+                "daily_review_enabled": True,
+                "initialize_daily_review_snapshot": True,
+            },
+        )
+        self.assertEqual(state["mode"], "work")
+        self.assertEqual(
+            [item["review_date"] for item in state["daily_review_snapshot"]],
+            sorted(dates[:3]),
+        )
+
+        store.upsert_daily_review(
+            profile_id="default",
+            persona_id="ombre",
+            review_date=dates[0],
+            content="changed later",
+            edited_by_user=True,
+        )
+        frozen = store.patch_conversation_session_state(
+            profile_id="default",
+            session_id="daily-on",
+            persona_id="ombre",
+            updates={"initialize_daily_review_snapshot": True},
+        )
+        self.assertNotIn("changed later", [item["content"] for item in frozen["daily_review_snapshot"]])
+
+        disabled = store.patch_conversation_session_state(
+            profile_id="default",
+            session_id="daily-off",
+            persona_id="ombre",
+            updates={
+                "daily_review_enabled": False,
+                "initialize_daily_review_snapshot": True,
+            },
+        )
+        self.assertTrue(disabled["daily_review_snapshot_initialized"])
+        self.assertEqual(disabled["daily_review_snapshot"], [])
+
+    def test_manual_daily_review_is_protected_from_automatic_overwrite(self):
+        store = self.make_store()
+        review_date = "2026-08-08"
+        store.upsert_daily_review(
+            profile_id="default", persona_id="ombre", review_date=review_date,
+            content="manual", edited_by_user=True,
+        )
+        protected = store.upsert_daily_review(
+            profile_id="default", persona_id="ombre", review_date=review_date,
+            content="automatic", edited_by_user=False, preserve_user_edit=True,
+        )
+        self.assertEqual(protected["content"], "manual")
+        self.assertTrue(protected["edited_by_user"])
 
     def test_committed_turn_can_be_read_by_request_id_for_replay(self):
         store = self.make_store()

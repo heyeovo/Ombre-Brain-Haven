@@ -2,6 +2,8 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
+from unittest.mock import AsyncMock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -9,28 +11,72 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-class ImportOnlyAsyncOpenAI:
+class ImportOnlyAsyncClient:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
 
 
-sys.modules.setdefault("openai", SimpleNamespace(AsyncOpenAI=ImportOnlyAsyncOpenAI))
+sys.modules.setdefault(
+    "httpx",
+    SimpleNamespace(AsyncClient=ImportOnlyAsyncClient, HTTPError=Exception),
+)
 
 from daily_review_engine import DailyReviewEngine  # noqa: E402
 
 
-class FakeCompletions:
-    def __init__(self):
-        self.calls = []
-
-    async def create(self, **kwargs):
-        self.calls.append(kwargs)
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="较早阶段已经完成范围确认，正在实现。"))]
+class DailyReviewEngineTest(unittest.IsolatedAsyncioTestCase):
+    def test_anthropic_content_reads_text_blocks(self):
+        self.assertEqual(
+            DailyReviewEngine._anthropic_content({
+                "content": [
+                    {"type": "thinking", "thinking": "内部思考"},
+                    {"type": "text", "text": "日回顾正文"},
+                ]
+            }),
+            "日回顾正文",
         )
 
+    async def test_create_message_uses_anthropic_v1_messages(self):
+        engine = DailyReviewEngine({"daily_review": {
+            "model": "claude-test", "base_url": "https://relay.example", "api_key": "test-key",
+        }}, SimpleNamespace())
 
-class DailyReviewEngineTest(unittest.IsolatedAsyncioTestCase):
+        class FakeResponse:
+            is_success = True
+            status_code = 200
+            text = ""
+
+            @staticmethod
+            def json():
+                return {"content": [{"type": "text", "text": "生成结果"}]}
+
+        class FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def post(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                return FakeResponse()
+
+        client = FakeClient()
+        with mock.patch("daily_review_engine.httpx.AsyncClient", return_value=client):
+            result = await engine._create_message(
+                system="完整身份提示", user="日回顾材料", max_tokens=900, temperature=0.5,
+            )
+        self.assertEqual(result, "生成结果")
+        url, request = client.calls[0]
+        self.assertEqual(url, "https://relay.example/v1/messages")
+        self.assertEqual(request["json"]["system"], "完整身份提示")
+        self.assertEqual(request["json"]["messages"], [{"role": "user", "content": "日回顾材料"}])
+        self.assertFalse(request["json"]["stream"])
+        self.assertEqual(request["headers"]["x-api-key"], "test-key")
+
     async def test_chat_keeps_full_text_and_work_uses_summary_plus_tail(self):
         engine = DailyReviewEngine(
             {
@@ -43,8 +89,7 @@ class DailyReviewEngineTest(unittest.IsolatedAsyncioTestCase):
             },
             state_store=SimpleNamespace(),
         )
-        completions = FakeCompletions()
-        engine.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        engine._create_message = AsyncMock(return_value="较早阶段已经完成范围确认，正在实现。")
         persona = {
             "name": "言之",
             "user_name": "小羊",
@@ -73,9 +118,10 @@ class DailyReviewEngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("较早对话脉络摘要", material)
         self.assertIn("工作问题11", material)
         self.assertNotIn("工作问题0\n", material)
-        self.assertEqual(len(completions.calls), 1)
-        self.assertIn("你是言之。", completions.calls[0]["messages"][0]["content"])
-        self.assertIn("认真记得彼此。", completions.calls[0]["messages"][0]["content"])
+        self.assertEqual(engine._create_message.await_count, 1)
+        summary_call = engine._create_message.await_args.kwargs
+        self.assertIn("你是言之。", summary_call["system"])
+        self.assertIn("认真记得彼此。", summary_call["system"])
 
     async def test_manual_edit_requires_explicit_override_before_regeneration(self):
         class Store:
@@ -102,14 +148,13 @@ class DailyReviewEngineTest(unittest.IsolatedAsyncioTestCase):
         engine = DailyReviewEngine({"daily_review": {
             "model": "claude-test", "base_url": "https://relay.example", "api_key": "test-key",
         }}, store)
-        completions = FakeCompletions()
-        engine.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        engine._create_message = AsyncMock(return_value="重新生成的日回顾")
 
         protected = await engine.generate(
             profile_id="default", persona_id="ombre", review_date="2026-08-08", force=True,
         )
         self.assertEqual(protected["status"], "protected")
-        self.assertEqual(len(completions.calls), 0)
+        self.assertEqual(engine._create_message.await_count, 0)
 
         created = await engine.generate(
             profile_id="default", persona_id="ombre", review_date="2026-08-08",

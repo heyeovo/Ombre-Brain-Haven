@@ -47,7 +47,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `import_memory.py` | 对话历史导入引擎（含成本追踪） |
 | `recall_policy.py` | 召回策略（vague 闸、相对日期、分词整词判断） |
 | `reflection_engine.py` | 反思/日印象引擎 |
-| `daily_review_engine.py` | 每日 4 点按协作者生成第一人称日回顾；闲聊用完整可见原文，工作用较早脉络摘要 + 最后 10 轮，结果不进记忆桶 |
+| `daily_review_engine.py` | 每日 4 点通过 Anthropic-compatible `/v1/messages` 按协作者生成第一人称日回顾；闲聊用完整可见原文，工作用较早脉络摘要 + 最后 10 轮，结果不进记忆桶 |
 | `persona_engine.py` / `portrait_engine.py` | 用户画像（persona 状态 + 画像生成） |
 | `memory_*.py` | 记忆分层：layers/nodes/edges/metadata/moments/diffusion/relevance/write_gate |
 | `todo_store.py` / `reminder_store.py` | 待办 / 照顾备忘持久化 |

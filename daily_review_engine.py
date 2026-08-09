@@ -8,7 +8,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from openai import AsyncOpenAI
+import httpx
 
 
 DAILY_REVIEW_INSTRUCTION = """以下是你今天和用户之间所有窗口的对话记录。
@@ -42,7 +42,7 @@ class DailyReviewEngine:
         self.max_tokens = max(300, min(2000, int(cfg.get("max_tokens", 900))))
         self.max_input_chars = max(20000, min(500000, int(cfg.get("max_input_chars", 240000))))
         self.work_tail_turns = max(1, min(50, int(cfg.get("work_tail_turns", 10))))
-        self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=180.0) if self.api_key and self.base_url else None
+        self.timeout_seconds = max(30, min(600, int(cfg.get("timeout_seconds", 180))))
 
     @staticmethod
     def _persona_system(persona: dict[str, Any]) -> str:
@@ -55,18 +55,88 @@ class DailyReviewEngine:
                 parts.append(f"【{str(module.get('name') or '提示词模块').strip()}】\n{content}")
         return "\n\n".join(part for part in parts if part)
 
-    def _completion_options(self, *, max_tokens: int, temperature: float) -> dict[str, Any]:
-        options: dict[str, Any] = {"max_tokens": max_tokens, "temperature": temperature}
-        if self.thinking_mode:
-            options["extra_body"] = {"thinking": {"type": self.thinking_mode}}
-        return options
+    @staticmethod
+    def _anthropic_content(response: Any) -> str:
+        if isinstance(response, str):
+            return response.strip()
+        if not isinstance(response, dict):
+            return ""
+        content = response.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if not isinstance(content, list):
+            return ""
+        return "\n".join(
+            str(block.get("text") or "").strip()
+            for block in content
+            if isinstance(block, dict)
+            and str(block.get("type") or "text") == "text"
+            and str(block.get("text") or "").strip()
+        ).strip()
+
+    def _candidate_urls(self) -> list[str]:
+        base = self.base_url.rstrip("/")
+        urls = [f"{base}/messages", f"{base[:-3]}/v1/messages"] if base.lower().endswith("/v1") else [
+            f"{base}/v1/messages", f"{base}/messages",
+        ]
+        return list(dict.fromkeys(urls))
+
+    async def _create_message(
+        self, *, system: str, user: str, max_tokens: int, temperature: float,
+    ) -> str:
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": max(1, int(max_tokens)),
+            "stream": False,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        }
+        if self.thinking_mode == "enabled":
+            payload["thinking"] = {"type": "enabled", "budget_tokens": 1024}
+            payload["max_tokens"] = max(int(payload["max_tokens"]), 1400)
+        else:
+            payload["temperature"] = temperature
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": self.api_key,
+            "Authorization": f"Bearer {self.api_key}",
+            "anthropic-version": "2023-06-01",
+        }
+        last_error = "没有可用的 /v1/messages 地址"
+        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            for url in self._candidate_urls():
+                try:
+                    response = await client.post(url, headers=headers, json=payload)
+                except httpx.HTTPError as exc:
+                    last_error = str(exc)
+                    continue
+                if not response.is_success:
+                    try:
+                        error_payload = response.json()
+                    except ValueError:
+                        error_payload = {}
+                    error = error_payload.get("error") if isinstance(error_payload, dict) else None
+                    message = error.get("message") if isinstance(error, dict) else None
+                    last_error = str(message or response.text[:300] or f"HTTP {response.status_code}")
+                    if response.status_code in {401, 403}:
+                        break
+                    continue
+                try:
+                    result = response.json()
+                except ValueError as exc:
+                    raise RuntimeError("/v1/messages 返回了非 JSON 响应") from exc
+                content = self._anthropic_content(result)
+                if content:
+                    return content
+                raise RuntimeError("/v1/messages 响应没有 text content")
+        raise RuntimeError(last_error)
 
     async def _summarize_work_history(
         self,
         items: list[dict[str, Any]],
         persona: dict[str, Any],
     ) -> str:
-        if not items or not self.client or not self.model:
+        if not items or not self.api_key or not self.base_url or not self.model:
             return ""
         user_name = str(persona.get("user_name") or "用户")
         assistant_name = str(persona.get("name") or "助手")
@@ -82,18 +152,12 @@ class DailyReviewEngine:
         boundary = min(80000, max(20000, self.max_input_chars // 2))
         if len(transcript) > boundary:
             transcript = "（较早内容因输入边界省略）\n" + transcript[-boundary:]
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": self._persona_system(persona)},
-                {
-                    "role": "user",
-                    "content": "把下面这个工作窗口的较早对话压缩成一段不超过400个中文字符的脉络摘要。只保留目标、决定、当前进度、未完成事项和与关系或情绪有关的变化；不写技术细节，不补充原文没有的内容。只输出摘要正文。\n\n" + transcript,
-                },
-            ],
-            **self._completion_options(max_tokens=700, temperature=0.2),
+        return await self._create_message(
+            system=self._persona_system(persona),
+            user="把下面这个工作窗口的较早对话压缩成一段不超过400个中文字符的脉络摘要。只保留目标、决定、当前进度、未完成事项和与关系或情绪有关的变化；不写技术细节，不补充原文没有的内容。只输出摘要正文。\n\n" + transcript,
+            max_tokens=700,
+            temperature=0.2,
         )
-        return str(response.choices[0].message.content if response.choices else "").strip()
 
     async def _materials(self, turns: list[dict[str, Any]], persona: dict[str, Any]) -> tuple[str, list[str]]:
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -155,20 +219,17 @@ class DailyReviewEngine:
         persona = self.state_store.get_cc_persona(persona_id)
         if not persona:
             return {"status": "skipped", "reason": "persona_not_found", "date": review_date}
-        if not self.client or not self.model:
+        if not self.api_key or not self.base_url or not self.model:
             return {"status": "skipped", "reason": "model_not_configured", "date": review_date}
         material, session_ids = await self._materials(turns, persona)
         if not material.strip():
             return {"status": "skipped", "reason": "empty_material", "date": review_date}
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": self._persona_system(persona)},
-                {"role": "user", "content": f"{DAILY_REVIEW_INSTRUCTION}\n\n日期：{review_date}\n\n{material}"},
-            ],
-            **self._completion_options(max_tokens=self.max_tokens, temperature=0.5),
+        content = await self._create_message(
+            system=self._persona_system(persona),
+            user=f"{DAILY_REVIEW_INSTRUCTION}\n\n日期：{review_date}\n\n{material}",
+            max_tokens=self.max_tokens,
+            temperature=0.5,
         )
-        content = str(response.choices[0].message.content if response.choices else "").strip()
         if not content:
             return {"status": "skipped", "reason": "empty_model_output", "date": review_date}
         review = self.state_store.upsert_daily_review(

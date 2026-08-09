@@ -8614,7 +8614,7 @@ async def comment_bucket(
 # =============================================================
 @mcp.tool()
 async def delete_bucket_comment(bucket_id: str, comment_id: str) -> str:
-    """删除自己通过 comment_bucket 写入的一条年轮；不会删除 bucket，也不会删除小雨/dashboard 写的年轮。"""
+    """删除自己通过 comment_bucket 写入的一条年轮；不会删除 bucket，也不会删除 dashboard 写的年轮。"""
     bucket_id = _coerce_memory_id(bucket_id)
     comment_id = _coerce_memory_id(comment_id)
     if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):

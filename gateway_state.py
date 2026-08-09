@@ -9,6 +9,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
+_DEFAULT_CC_BASE_PROMPT = "\n".join(
+    (
+        "你正在 Ombre Brain 的自建聊天链路中回复用户。",
+        "你只能使用本轮明确提供的远程 MCP 工具；没有提供的文件、命令或工具能力一律不可声称已经执行。",
+        "优先遵循用户当前消息，并给出直接、诚实的回答。",
+    )
+)
+
+
 class ConversationConflictError(Exception):
     def __init__(self, expected_round_id: int, actual_round_id: int):
         super().__init__("conversation head changed")
@@ -359,6 +368,7 @@ class GatewayStateStore:
                 user_name TEXT NOT NULL DEFAULT '',
                 purpose TEXT NOT NULL DEFAULT '',
                 description TEXT NOT NULL DEFAULT '',
+                base_prompt TEXT,
                 prompt TEXT NOT NULL DEFAULT '',
                 prompt_modules TEXT NOT NULL DEFAULT '[]',
                 memory_entries TEXT NOT NULL DEFAULT '[]',
@@ -382,6 +392,7 @@ class GatewayStateStore:
                 "dirs": "TEXT NOT NULL DEFAULT '[]'",
                 "write_dirs": "TEXT NOT NULL DEFAULT '[]'",
                 "prompt_modules": "TEXT NOT NULL DEFAULT '[]'",
+                "base_prompt": "TEXT",
                 "selfhost_defaults_json": "TEXT NOT NULL DEFAULT '{}'",
             },
         )
@@ -474,6 +485,7 @@ class GatewayStateStore:
         "user_name",
         "purpose",
         "description",
+        "base_prompt",
         "prompt",
         "engine",
     )
@@ -560,6 +572,11 @@ class GatewayStateStore:
             "user_name": row["user_name"] or "",
             "purpose": row["purpose"] or "",
             "description": row["description"] or "",
+            "base_prompt": (
+                _DEFAULT_CC_BASE_PROMPT
+                if "base_prompt" not in keys or row["base_prompt"] is None
+                else str(row["base_prompt"])
+            ),
             "prompt": row["prompt"] or "",
             "prompt_modules": prompt_modules,
             "memory_entries": entries,
@@ -656,6 +673,8 @@ class GatewayStateStore:
         merged.setdefault("dirs", [])
         merged.setdefault("write_dirs", [])
         merged.setdefault("selfhost_defaults", {})
+        if merged.get("base_prompt") is None:
+            merged["base_prompt"] = _DEFAULT_CC_BASE_PROMPT
         for field in self._CC_PERSONA_TEXT_FIELDS:
             merged.setdefault(field, "")
 
@@ -663,10 +682,10 @@ class GatewayStateStore:
         conn.execute(
             """
             INSERT OR REPLACE INTO cc_personas
-            (id, name, initial, tint, user_name, purpose, description, prompt,
+            (id, name, initial, tint, user_name, purpose, description, base_prompt, prompt,
              prompt_modules, memory_entries, dirs, write_dirs, recall_on, semantic_on, engine,
              selfhost_defaults_json, sort_order, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 safe_id,
@@ -676,6 +695,7 @@ class GatewayStateStore:
                 merged["user_name"],
                 merged["purpose"],
                 merged["description"],
+                merged["base_prompt"],
                 merged["prompt"],
                 json.dumps(merged["prompt_modules"], ensure_ascii=False),
                 json.dumps(merged["memory_entries"], ensure_ascii=False),

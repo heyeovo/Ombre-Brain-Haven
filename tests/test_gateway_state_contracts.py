@@ -280,6 +280,7 @@ class GatewayStateContractsTest(unittest.TestCase):
                 {
                     "id": "ombre",
                     "name": "Ombre",
+                    "base_prompt": "自定义基础提示词",
                     "prompt": "旧整块提示词",
                     "selfhost_defaults": {
                         "model": "claude-x",
@@ -288,6 +289,7 @@ class GatewayStateContractsTest(unittest.TestCase):
                 }
             )
         self.assertEqual(saved["selfhost_defaults"]["model"], "claude-x")
+        self.assertEqual(saved["base_prompt"], "自定义基础提示词")
         self.assertEqual(
             saved["prompt_modules"],
             [
@@ -299,6 +301,13 @@ class GatewayStateContractsTest(unittest.TestCase):
                 }
             ],
         )
+        with mock.patch.dict(
+            sys.modules,
+            {"utils": SimpleNamespace(now_iso=lambda: "2026-08-01T00:01:00+00:00")},
+        ):
+            cleared = store.save_cc_persona({"id": "ombre", "base_prompt": ""})
+        self.assertEqual(cleared["base_prompt"], "")
+        self.assertEqual(self.make_store().get_cc_persona("ombre")["base_prompt"], "")
 
         state = store.patch_conversation_session_state(
             profile_id="default",

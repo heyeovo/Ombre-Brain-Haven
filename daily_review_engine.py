@@ -134,13 +134,16 @@ class DailyReviewEngine:
             material = "（当天对话超过输入边界，以下保留靠后的内容。）\n\n" + material[-self.max_input_chars :]
         return material, session_ids
 
-    async def generate(self, *, profile_id: str, persona_id: str, review_date: str, force: bool = False) -> dict[str, Any]:
+    async def generate(
+        self, *, profile_id: str, persona_id: str, review_date: str,
+        force: bool = False, override_user_edit: bool = False,
+    ) -> dict[str, Any]:
         existing = self.state_store.list_daily_reviews(
             profile_id=profile_id, persona_id=persona_id, start_date=review_date, end_date=review_date, limit=1,
         )
         if existing and not force:
             return {"status": "exists", "review": existing[0]}
-        if existing and existing[0].get("edited_by_user"):
+        if existing and existing[0].get("edited_by_user") and not override_user_edit:
             return {"status": "protected", "review": existing[0]}
         target = date.fromisoformat(review_date)
         start = datetime.combine(target, time.min, tzinfo=self.tz)
@@ -171,7 +174,7 @@ class DailyReviewEngine:
         review = self.state_store.upsert_daily_review(
             profile_id=profile_id, persona_id=persona_id, review_date=review_date, content=content,
             source_session_ids=session_ids, source_turn_count=len(turns), model=self.model,
-            edited_by_user=False, preserve_user_edit=True,
+            edited_by_user=False, preserve_user_edit=not override_user_edit,
         )
         return {"status": "created", "review": review}
 

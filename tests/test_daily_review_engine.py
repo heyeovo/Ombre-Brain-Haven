@@ -77,6 +77,47 @@ class DailyReviewEngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("你是言之。", completions.calls[0]["messages"][0]["content"])
         self.assertIn("认真记得彼此。", completions.calls[0]["messages"][0]["content"])
 
+    async def test_manual_edit_requires_explicit_override_before_regeneration(self):
+        class Store:
+            def __init__(self):
+                self.upsert_args = None
+
+            def list_daily_reviews(self, **kwargs):
+                return [{"review_date": "2026-08-08", "content": "手动版", "edited_by_user": True}]
+
+            def list_daily_review_turns(self, **kwargs):
+                return [{
+                    "session_id": "chat-1", "mode": "chat", "session_title": "闲聊",
+                    "user_text": "昨天的对话", "assistant_text": "昨天的回复",
+                }]
+
+            def get_cc_persona(self, persona_id):
+                return {"id": persona_id, "name": "言之", "base_prompt": "你是言之。"}
+
+            def upsert_daily_review(self, **kwargs):
+                self.upsert_args = kwargs
+                return {"review_date": kwargs["review_date"], "content": kwargs["content"], "edited_by_user": False}
+
+        store = Store()
+        engine = DailyReviewEngine({"daily_review": {
+            "model": "claude-test", "base_url": "https://relay.example", "api_key": "test-key",
+        }}, store)
+        completions = FakeCompletions()
+        engine.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+        protected = await engine.generate(
+            profile_id="default", persona_id="ombre", review_date="2026-08-08", force=True,
+        )
+        self.assertEqual(protected["status"], "protected")
+        self.assertEqual(len(completions.calls), 0)
+
+        created = await engine.generate(
+            profile_id="default", persona_id="ombre", review_date="2026-08-08",
+            force=True, override_user_edit=True,
+        )
+        self.assertEqual(created["status"], "created")
+        self.assertFalse(store.upsert_args["preserve_user_edit"])
+
 
 if __name__ == "__main__":
     unittest.main()

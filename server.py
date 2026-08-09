@@ -12773,6 +12773,7 @@ async def api_daily_reviews_run(request):
             persona_id=persona_id,
             review_date=review_date,
             force=_bool_value(body.get("force"), False),
+            override_user_edit=_bool_value(body.get("override_user_edit"), False),
         )
     except Exception as exc:
         logger.warning("Daily review API failed: %s", exc)

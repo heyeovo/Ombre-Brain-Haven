@@ -1,7 +1,9 @@
 import sqlite3
+import io
 import sys
 import tempfile
 import unittest
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -98,6 +100,82 @@ class GatewayStateContractsTest(unittest.TestCase):
             profile_id="default", session_id="session-1"
         )
         self.assertTrue(turns[0]["attachments"][0]["cleared"])
+
+    def test_document_attachment_keeps_parsed_text_until_manual_clear(self):
+        store = self.make_store()
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("word/document.xml", "<w:document />")
+        attachment = store.create_conversation_attachment(
+            profile_id="default",
+            session_id="session-1",
+            filename="说明.docx",
+            data=buffer.getvalue(),
+            kind="file",
+            text_content="第一段\n\n第二段",
+            text_truncated=True,
+        )
+        self.assertEqual(attachment["kind"], "file")
+        self.assertEqual(attachment["text_chars"], len("第一段\n\n第二段"))
+        self.assertTrue(attachment["text_truncated"])
+
+        item, text = store.get_conversation_attachment_text(
+            profile_id="default", attachment_id=attachment["id"]
+        )
+        self.assertEqual(item["kind"], "file")
+        self.assertEqual(text, "第一段\n\n第二段")
+
+        image = store.create_conversation_attachment(
+            profile_id="default",
+            session_id="session-1",
+            filename="photo.webp",
+            data=b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"image-data",
+        )
+        cleared = store.clear_session_conversation_attachments(
+            profile_id="default", session_id="session-1", kind="file"
+        )
+        self.assertEqual(cleared, 1)
+        cleared_item, cleared_text = store.get_conversation_attachment_text(
+            profile_id="default", attachment_id=attachment["id"]
+        )
+        self.assertTrue(cleared_item["cleared"])
+        self.assertEqual(cleared_text, "")
+        image_item, image_path = store.get_conversation_attachment(
+            profile_id="default", attachment_id=image["id"]
+        )
+        self.assertFalse(image_item["cleared"])
+        self.assertTrue(Path(image_path).exists())
+
+    def test_old_attachment_table_migrates_document_columns_idempotently(self):
+        db_path = self.root / "gateway_state.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            CREATE TABLE conversation_attachments (
+                attachment_id TEXT PRIMARY KEY,
+                profile_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                turn_id INTEGER,
+                round_id INTEGER,
+                filename TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                byte_size INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                storage_name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                cleared_at TEXT
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        GatewayStateStore(str(db_path))
+        GatewayStateStore(str(db_path))
+        conn = sqlite3.connect(db_path)
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(conversation_attachments)")}
+        conn.close()
+        self.assertTrue({"kind", "text_content", "text_truncated"}.issubset(columns))
 
     def test_permanent_delete_removes_attachment_records_and_files(self):
         store = self.make_store()

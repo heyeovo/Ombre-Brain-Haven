@@ -245,7 +245,7 @@ Gateway 会把成功完成的 user / assistant 轮次持久保存到 `conversati
 
 cc/selfhost 严格写入可以携带 `request_id`、`expected_last_round_id` 与 `persona_id`：Haven 在同一事务中检查幂等、窗口协作者归属和最后轮次，冲突时拒绝分叉。已提交轮次可通过 `GET /gateway/api/conversation/turn?request_id=...` 读回（含 `raw_json`），用于跨重启、跨设备的持久幂等重放。
 
-`/cc` 图片附件保存在 `buckets_dir/cc-attachments`，SQLite 的 `conversation_attachments` 只保存窗口/轮次归属、文件名、MIME、大小和 SHA-256。上传只接受压缩后的 JPEG/PNG/WebP（单张 ≤2MB），读取必须通过 Gateway Bearer 鉴权，不生成永久公开 URL；严格写入在同一事务中把附件绑定到轮次并纳入幂等指纹。清除图片会删除文件但保留历史占位元数据，永久删除窗口会同时删除该窗口的附件记录和文件。
+`/cc` 私有附件保存在 `buckets_dir/cc-attachments`，SQLite 的 `conversation_attachments` 保存窗口/轮次归属、类型、文件名、MIME、大小、SHA-256，以及文档的受限解析正文。图片接受压缩后的 JPEG/PNG/WebP（单张 ≤2MB）；文件接受 PDF/DOCX/MD/TXT/CSV（单个 ≤4MB，为 Dashboard/Vercel multipart 留出请求体余量），解析正文只用于该窗口模型上下文，不进入长期记忆或召回。读取必须通过 Gateway Bearer 鉴权，不生成永久公开 URL；严格写入在同一事务中把有序附件绑定到轮次并纳入幂等指纹。图片与文件可分别单个或按窗口分类清除：删除原文件，文件还会擦除解析正文，但历史保留对应占位元数据；永久删除窗口会同时删除该窗口的附件记录和文件。
 
 这里要区分三层限制：**存储层不按轮数裁剪**；列表和聊天页面可以分页读取（例如每页 100 轮），分页不会删除数据；Just Now、handoff 和模型请求仍会按各自的时间范围、条数与 token 预算选取一部分原文，避免把整库塞进一次请求。
 

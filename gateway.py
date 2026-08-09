@@ -2851,25 +2851,49 @@ class GatewayService:
         profile_id = self._conversation_profile_id
 
         if request.method == "POST":
-            session_id = str(
-                request.query_params.get("session_id")
-                or request.headers.get("X-Ombre-Session-Id")
-                or ""
-            ).strip()
-            filename = str(request.query_params.get("filename") or "image").strip()
+            content_type = str(request.headers.get("content-type") or "").lower()
             try:
                 content_length = int(request.headers.get("content-length") or 0)
             except ValueError:
                 content_length = 0
-            if content_length > 2 * 1024 * 1024:
-                return JSONResponse({"error": "compressed image must not exceed 2 MB"}, status_code=413)
-            data = await request.body()
+            if "multipart/form-data" in content_type:
+                if content_length > 4_600_000:
+                    return JSONResponse({"error": "file upload must not exceed the gateway limit"}, status_code=413)
+                try:
+                    form = await request.form()
+                except Exception:
+                    return JSONResponse({"error": "invalid multipart attachment"}, status_code=400)
+                upload = form.get("file")
+                if upload is None or not hasattr(upload, "read"):
+                    return JSONResponse({"error": "file is required"}, status_code=400)
+                session_id = str(form.get("session_id") or "").strip()
+                filename = str(getattr(upload, "filename", "") or "file").strip()
+                kind = str(form.get("kind") or "file").strip()
+                text_content = str(form.get("text_content") or "")
+                text_truncated = self._truthy_header(form.get("text_truncated"))
+                data = await upload.read()
+            else:
+                session_id = str(
+                    request.query_params.get("session_id")
+                    or request.headers.get("X-Ombre-Session-Id")
+                    or ""
+                ).strip()
+                filename = str(request.query_params.get("filename") or "image").strip()
+                kind = "image"
+                text_content = ""
+                text_truncated = False
+                if content_length > 2 * 1024 * 1024:
+                    return JSONResponse({"error": "compressed image must not exceed 2 MB"}, status_code=413)
+                data = await request.body()
             try:
                 item = self.state_store.create_conversation_attachment(
                     profile_id=profile_id,
                     session_id=session_id,
                     filename=filename,
                     data=data,
+                    kind=kind,
+                    text_content=text_content,
+                    text_truncated=text_truncated,
                 )
                 self.state_store.cleanup_staged_conversation_attachments(older_than_hours=24)
             except ValueError as exc:
@@ -2893,6 +2917,24 @@ class GatewayService:
                 return JSONResponse({"error": "attachment not found"}, status_code=404)
             if not path or item.get("cleared"):
                 return JSONResponse({"error": "attachment was cleared"}, status_code=410)
+            if request.query_params.get("view") == "prompt":
+                prompt_item, prompt_text = self.state_store.get_conversation_attachment_text(
+                    profile_id=profile_id,
+                    attachment_id=attachment_id,
+                )
+                if prompt_item.get("kind") == "file":
+                    if not prompt_text:
+                        return JSONResponse({"error": "attachment text is unavailable"}, status_code=410)
+                    return Response(
+                        prompt_text.encode("utf-8"),
+                        media_type="text/plain; charset=utf-8",
+                        headers={
+                            "Cache-Control": "private, no-store",
+                            "X-Ombre-Attachment-Kind": "file",
+                            "X-Ombre-Original-Mime": str(prompt_item.get("mime_type") or "application/octet-stream"),
+                            "X-Ombre-Text-Truncated": "1" if prompt_item.get("text_truncated") else "0",
+                        },
+                    )
             try:
                 with open(path, "rb") as handle:
                     data = handle.read()
@@ -2905,6 +2947,9 @@ class GatewayService:
                     "Cache-Control": "private, max-age=300",
                     "Content-Disposition": "inline",
                     "X-Content-Type-Options": "nosniff",
+                    "X-Ombre-Attachment-Kind": str(item.get("kind") or "image"),
+                    "X-Ombre-Original-Mime": str(item.get("mime_type") or "application/octet-stream"),
+                    "X-Ombre-Text-Truncated": "1" if item.get("text_truncated") else "0",
                 },
             )
 
@@ -2921,6 +2966,7 @@ class GatewayService:
             count = self.state_store.clear_session_conversation_attachments(
                 profile_id=profile_id,
                 session_id=session_id,
+                kind=str(body.get("kind") or ""),
             )
             return JSONResponse({"ok": True, "cleared": count})
         attachment_id = str(body.get("attachment_id") or "").strip()

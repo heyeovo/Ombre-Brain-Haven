@@ -2,7 +2,9 @@ import os
 import json
 import sqlite3
 import hashlib
+import io
 import uuid
+import zipfile
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -214,10 +216,22 @@ class GatewayStateStore:
                 byte_size INTEGER NOT NULL,
                 sha256 TEXT NOT NULL,
                 storage_name TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'image',
+                text_content TEXT NOT NULL DEFAULT '',
+                text_truncated INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 cleared_at TEXT
             )
             """
+        )
+        self._ensure_columns(
+            conn,
+            "conversation_attachments",
+            {
+                "kind": "TEXT NOT NULL DEFAULT 'image'",
+                "text_content": "TEXT NOT NULL DEFAULT ''",
+                "text_truncated": "INTEGER NOT NULL DEFAULT 0",
+            },
         )
         conn.execute(
             """
@@ -1032,7 +1046,35 @@ class GatewayStateStore:
         raise ValueError("only JPEG, PNG, and WebP images are supported")
 
     @staticmethod
+    def _document_attachment_mime(filename: str, data: bytes) -> tuple[str, str]:
+        suffix = os.path.splitext(str(filename or ""))[1].lower()
+        mime_by_suffix = {
+            ".pdf": "application/pdf",
+            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".md": "text/markdown",
+            ".markdown": "text/markdown",
+            ".txt": "text/plain",
+            ".csv": "text/csv",
+        }
+        mime_type = mime_by_suffix.get(suffix)
+        if not mime_type:
+            raise ValueError("only PDF, DOCX, MD, TXT, and CSV files are supported")
+        if suffix == ".pdf" and not data.startswith(b"%PDF-"):
+            raise ValueError("invalid PDF file")
+        if suffix == ".docx":
+            try:
+                with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                    if "word/document.xml" not in archive.namelist():
+                        raise ValueError("invalid DOCX file")
+            except (zipfile.BadZipFile, OSError) as exc:
+                raise ValueError("invalid DOCX file") from exc
+        return mime_type, suffix
+
+    @staticmethod
     def _attachment_row_payload(row: sqlite3.Row) -> dict[str, Any]:
+        keys = set(row.keys())
+        kind = str(row["kind"] or "image") if "kind" in keys else "image"
+        text_content = str(row["text_content"] or "") if "text_content" in keys else ""
         return {
             "id": str(row["attachment_id"]),
             "session_id": str(row["session_id"]),
@@ -1042,6 +1084,9 @@ class GatewayStateStore:
             "mime_type": str(row["mime_type"]),
             "byte_size": int(row["byte_size"] or 0),
             "sha256": str(row["sha256"]),
+            "kind": kind,
+            "text_chars": len(text_content),
+            "text_truncated": bool(row["text_truncated"]) if "text_truncated" in keys else False,
             "created_at": str(row["created_at"]),
             "cleared": bool(row["cleared_at"]),
             "cleared_at": str(row["cleared_at"] or ""),
@@ -1054,19 +1099,35 @@ class GatewayStateStore:
         session_id: str,
         filename: str,
         data: bytes,
+        kind: str = "image",
+        text_content: str = "",
+        text_truncated: bool = False,
     ) -> dict[str, Any]:
         safe_profile_id = str(profile_id or "default").strip() or "default"
         safe_session_id = str(session_id or "").strip()
         if not safe_session_id:
             raise ValueError("session_id is required")
+        safe_kind = "file" if str(kind or "").strip().lower() == "file" else "image"
         if not data:
-            raise ValueError("image is empty")
-        if len(data) > 2 * 1024 * 1024:
-            raise ValueError("compressed image must not exceed 2 MB")
-        mime_type, suffix = self._attachment_mime(data)
+            raise ValueError("attachment is empty")
+        if safe_kind == "image":
+            if len(data) > 2 * 1024 * 1024:
+                raise ValueError("compressed image must not exceed 2 MB")
+            mime_type, suffix = self._attachment_mime(data)
+            safe_text_content = ""
+        else:
+            if len(data) > 4 * 1024 * 1024:
+                raise ValueError("file must not exceed 4 MB")
+            mime_type, suffix = self._document_attachment_mime(filename, data)
+            safe_text_content = str(text_content or "").replace("\x00", "").strip()
+            if not safe_text_content:
+                raise ValueError("file has no readable text")
+            if len(safe_text_content) > 121_000:
+                raise ValueError("parsed file text must not exceed 121000 characters")
         attachment_id = uuid.uuid4().hex
         storage_name = f"{attachment_id}{suffix}"
-        safe_filename = os.path.basename(str(filename or "image")).strip()[:200] or f"image{suffix}"
+        fallback_name = "image" if safe_kind == "image" else "file"
+        safe_filename = os.path.basename(str(filename or fallback_name)).strip()[:200] or f"{fallback_name}{suffix}"
         created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         sha256 = hashlib.sha256(data).hexdigest()
         final_path = os.path.join(self.conversation_attachment_dir, storage_name)
@@ -1082,8 +1143,9 @@ class GatewayStateStore:
                 """
                 INSERT INTO conversation_attachments
                 (attachment_id, profile_id, session_id, turn_id, round_id, filename,
-                 mime_type, byte_size, sha256, storage_name, created_at, cleared_at)
-                VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, NULL)
+                 mime_type, byte_size, sha256, storage_name, kind, text_content,
+                 text_truncated, created_at, cleared_at)
+                VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
                 (
                     attachment_id,
@@ -1094,6 +1156,9 @@ class GatewayStateStore:
                     len(data),
                     sha256,
                     storage_name,
+                    safe_kind,
+                    safe_text_content,
+                    1 if text_truncated else 0,
                     created_at,
                 ),
             )
@@ -1116,6 +1181,9 @@ class GatewayStateStore:
             "mime_type": mime_type,
             "byte_size": len(data),
             "sha256": sha256,
+            "kind": safe_kind,
+            "text_chars": len(safe_text_content),
+            "text_truncated": bool(text_truncated),
             "created_at": created_at,
             "cleared": False,
             "cleared_at": "",
@@ -1144,6 +1212,27 @@ class GatewayStateStore:
         if payload["cleared"]:
             return payload, ""
         return payload, os.path.join(self.conversation_attachment_dir, str(row["storage_name"]))
+
+    def get_conversation_attachment_text(
+        self,
+        *,
+        profile_id: str,
+        attachment_id: str,
+    ) -> tuple[dict[str, Any], str]:
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_id = str(attachment_id or "").strip()
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT * FROM conversation_attachments WHERE profile_id = ? AND attachment_id = ?",
+            (safe_profile_id, safe_id),
+        ).fetchone()
+        conn.close()
+        if row is None:
+            return {}, ""
+        payload = self._attachment_row_payload(row)
+        if payload["cleared"] or payload["kind"] != "file":
+            return payload, ""
+        return payload, str(row["text_content"] or "")
 
     def list_conversation_attachments(
         self,
@@ -1201,7 +1290,11 @@ class GatewayStateStore:
         except FileNotFoundError:
             pass
         conn.execute(
-            "UPDATE conversation_attachments SET cleared_at = ? WHERE attachment_id = ?",
+            """
+            UPDATE conversation_attachments
+            SET cleared_at = ?, text_content = ''
+            WHERE attachment_id = ?
+            """,
             (cleared_at, safe_id),
         )
         conn.commit()
@@ -1213,17 +1306,28 @@ class GatewayStateStore:
         *,
         profile_id: str,
         session_id: str,
+        kind: str = "",
     ) -> int:
         safe_profile_id = str(profile_id or "default").strip() or "default"
         safe_session_id = str(session_id or "").strip()
         conn = self._connect()
-        rows = conn.execute(
-            """
-            SELECT attachment_id FROM conversation_attachments
-            WHERE profile_id = ? AND session_id = ? AND cleared_at IS NULL
-            """,
-            (safe_profile_id, safe_session_id),
-        ).fetchall()
+        safe_kind = str(kind or "").strip().lower()
+        if safe_kind in {"image", "file"}:
+            rows = conn.execute(
+                """
+                SELECT attachment_id FROM conversation_attachments
+                WHERE profile_id = ? AND session_id = ? AND kind = ? AND cleared_at IS NULL
+                """,
+                (safe_profile_id, safe_session_id, safe_kind),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT attachment_id FROM conversation_attachments
+                WHERE profile_id = ? AND session_id = ? AND cleared_at IS NULL
+                """,
+                (safe_profile_id, safe_session_id),
+            ).fetchall()
         conn.close()
         count = 0
         for row in rows:

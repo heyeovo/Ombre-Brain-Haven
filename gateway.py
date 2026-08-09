@@ -3393,7 +3393,12 @@ class GatewayService:
             )
             return JSONResponse({"ok": True, "deleted": True, "session": metadata})
 
-        state_keys = {"local_engine_preference", "selfhost_overrides", "effective_engine"}
+        state_keys = {
+            "local_engine_preference",
+            "selfhost_overrides",
+            "prompt_module_overrides",
+            "effective_engine",
+        }
         updates = {key: body[key] for key in state_keys if key in body}
         title = " ".join(str(body.get("title") or "").strip().split())
         if not title and not updates:

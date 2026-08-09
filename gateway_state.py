@@ -195,6 +195,7 @@ class GatewayStateStore:
                 title TEXT NOT NULL DEFAULT '',
                 local_engine_preference TEXT NOT NULL DEFAULT 'cc',
                 selfhost_overrides_json TEXT NOT NULL DEFAULT '{}',
+                prompt_module_overrides_json TEXT NOT NULL DEFAULT '{}',
                 cc_seen_round_id INTEGER NOT NULL DEFAULT 0,
                 state_version INTEGER NOT NULL DEFAULT 0,
                 deleted_at TEXT,
@@ -252,6 +253,7 @@ class GatewayStateStore:
                 "persona_id": "TEXT NOT NULL DEFAULT 'ombre'",
                 "local_engine_preference": "TEXT NOT NULL DEFAULT 'cc'",
                 "selfhost_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
+                "prompt_module_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
                 "cc_seen_round_id": "INTEGER NOT NULL DEFAULT 0",
                 "state_version": "INTEGER NOT NULL DEFAULT 0",
             },
@@ -358,6 +360,7 @@ class GatewayStateStore:
                 purpose TEXT NOT NULL DEFAULT '',
                 description TEXT NOT NULL DEFAULT '',
                 prompt TEXT NOT NULL DEFAULT '',
+                prompt_modules TEXT NOT NULL DEFAULT '[]',
                 memory_entries TEXT NOT NULL DEFAULT '[]',
                 dirs TEXT NOT NULL DEFAULT '[]',
                 write_dirs TEXT NOT NULL DEFAULT '[]',
@@ -378,6 +381,7 @@ class GatewayStateStore:
             {
                 "dirs": "TEXT NOT NULL DEFAULT '[]'",
                 "write_dirs": "TEXT NOT NULL DEFAULT '[]'",
+                "prompt_modules": "TEXT NOT NULL DEFAULT '[]'",
                 "selfhost_defaults_json": "TEXT NOT NULL DEFAULT '{}'",
             },
         )
@@ -493,6 +497,43 @@ class GatewayStateStore:
             return {}
         return dict(value) if isinstance(value, dict) else {}
 
+    @staticmethod
+    def _cc_prompt_modules(raw: Any, legacy_prompt: str = "") -> list[dict[str, Any]]:
+        try:
+            value = json.loads(raw or "[]") if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            value = []
+        modules: list[dict[str, Any]] = []
+        if isinstance(value, list):
+            for index, item in enumerate(value[:100]):
+                if not isinstance(item, dict):
+                    continue
+                content = str(item.get("content") or "").strip()
+                if not content:
+                    continue
+                module_id = str(item.get("id") or f"module-{index + 1}").strip()
+                if not module_id:
+                    continue
+                modules.append(
+                    {
+                        "id": module_id[:120],
+                        "name": (str(item.get("name") or "未命名模块").strip() or "未命名模块")[:120],
+                        "content": content,
+                        "enabled_by_default": item.get("enabled_by_default") is not False,
+                    }
+                )
+        legacy = str(legacy_prompt or "").strip()
+        if not modules and legacy:
+            modules.append(
+                {
+                    "id": "legacy-prompt",
+                    "name": "协作者提示词",
+                    "content": legacy,
+                    "enabled_by_default": True,
+                }
+            )
+        return modules
+
     @classmethod
     def _cc_persona_row_to_dict(cls, row: sqlite3.Row) -> dict[str, Any]:
         keys = row.keys()
@@ -507,6 +548,10 @@ class GatewayStateStore:
             if "selfhost_defaults_json" in keys
             else {}
         )
+        prompt_modules = cls._cc_prompt_modules(
+            row["prompt_modules"] if "prompt_modules" in keys else "[]",
+            row["prompt"] or "",
+        )
         return {
             "id": str(row["id"]),
             "name": row["name"] or "",
@@ -516,6 +561,7 @@ class GatewayStateStore:
             "purpose": row["purpose"] or "",
             "description": row["description"] or "",
             "prompt": row["prompt"] or "",
+            "prompt_modules": prompt_modules,
             "memory_entries": entries,
             "dirs": dirs,
             "write_dirs": write_dirs,
@@ -583,6 +629,8 @@ class GatewayStateStore:
                 ]
             else:
                 merged["memory_entries"] = []
+        if "prompt_modules" in persona:
+            merged["prompt_modules"] = self._cc_prompt_modules(persona.get("prompt_modules"))
         for dir_field in ("dirs", "write_dirs"):
             if dir_field not in persona:
                 continue
@@ -604,6 +652,7 @@ class GatewayStateStore:
         merged.setdefault("engine", "api")
         merged.setdefault("sort_order", 0)
         merged.setdefault("memory_entries", [])
+        merged.setdefault("prompt_modules", self._cc_prompt_modules([], merged.get("prompt", "")))
         merged.setdefault("dirs", [])
         merged.setdefault("write_dirs", [])
         merged.setdefault("selfhost_defaults", {})
@@ -615,9 +664,9 @@ class GatewayStateStore:
             """
             INSERT OR REPLACE INTO cc_personas
             (id, name, initial, tint, user_name, purpose, description, prompt,
-             memory_entries, dirs, write_dirs, recall_on, semantic_on, engine,
+             prompt_modules, memory_entries, dirs, write_dirs, recall_on, semantic_on, engine,
              selfhost_defaults_json, sort_order, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 safe_id,
@@ -628,6 +677,7 @@ class GatewayStateStore:
                 merged["purpose"],
                 merged["description"],
                 merged["prompt"],
+                json.dumps(merged["prompt_modules"], ensure_ascii=False),
                 json.dumps(merged["memory_entries"], ensure_ascii=False),
                 json.dumps(merged["dirs"], ensure_ascii=False),
                 json.dumps(merged["write_dirs"], ensure_ascii=False),
@@ -2171,7 +2221,7 @@ class GatewayStateStore:
         row = conn.execute(
             """
             SELECT profile_id, session_id, persona_id, title,
-                   local_engine_preference, selfhost_overrides_json,
+                   local_engine_preference, selfhost_overrides_json, prompt_module_overrides_json,
                    cc_seen_round_id, state_version, deleted_at, updated_at
             FROM conversation_sessions
             WHERE profile_id = ? AND session_id = ?
@@ -2191,6 +2241,11 @@ class GatewayStateStore:
             "title": str(row["title"] or ""),
             "local_engine_preference": preference,
             "selfhost_overrides": self._json_object(row["selfhost_overrides_json"]),
+            "prompt_module_overrides": {
+                str(key): bool(value)
+                for key, value in self._json_object(row["prompt_module_overrides_json"]).items()
+                if str(key).strip() and isinstance(value, bool)
+            },
             "cc_seen_round_id": int(row["cc_seen_round_id"] or 0),
             "state_version": int(row["state_version"] or 0),
             "deleted_at": row["deleted_at"],
@@ -2217,7 +2272,7 @@ class GatewayStateStore:
             raise ValueError("updates must be an object")
         if "effective_engine" in updates:
             raise ValueError("effective_engine is runtime-only and cannot be persisted")
-        allowed = {"local_engine_preference", "selfhost_overrides"}
+        allowed = {"local_engine_preference", "selfhost_overrides", "prompt_module_overrides"}
         unknown = sorted(set(updates) - allowed)
         if unknown:
             raise ValueError(f"unsupported session state fields: {', '.join(unknown)}")
@@ -2233,6 +2288,16 @@ class GatewayStateStore:
             if not isinstance(raw_overrides, dict):
                 raise ValueError("selfhost_overrides must be an object")
             overrides = dict(raw_overrides)
+        prompt_module_overrides: dict[str, bool] | None = None
+        if "prompt_module_overrides" in updates:
+            raw_prompt_overrides = updates.get("prompt_module_overrides")
+            if not isinstance(raw_prompt_overrides, dict):
+                raise ValueError("prompt_module_overrides must be an object")
+            prompt_module_overrides = {
+                str(key).strip(): value
+                for key, value in raw_prompt_overrides.items()
+                if str(key).strip() and isinstance(value, bool)
+            }
 
         updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         conn = self._connect()
@@ -2241,6 +2306,7 @@ class GatewayStateStore:
             row = conn.execute(
                 """
                 SELECT persona_id, local_engine_preference, selfhost_overrides_json,
+                       prompt_module_overrides_json,
                        state_version
                 FROM conversation_sessions
                 WHERE profile_id = ? AND session_id = ?
@@ -2259,26 +2325,34 @@ class GatewayStateStore:
                     raise SessionStateConflictError(int(expected_state_version), current_version)
                 current_preference = str(row["local_engine_preference"] or "cc")
                 current_overrides = self._json_object(row["selfhost_overrides_json"])
+                current_prompt_module_overrides = self._json_object(row["prompt_module_overrides_json"])
             else:
                 current_version = 0
                 if expected_state_version not in (None, 0):
                     raise SessionStateConflictError(int(expected_state_version), 0)
                 current_preference = "cc"
                 current_overrides = {}
+                current_prompt_module_overrides = {}
 
             next_preference = preference or current_preference
             next_overrides = overrides if overrides is not None else current_overrides
+            next_prompt_module_overrides = (
+                prompt_module_overrides
+                if prompt_module_overrides is not None
+                else current_prompt_module_overrides
+            )
             next_version = current_version + 1
             conn.execute(
                 """
                 INSERT INTO conversation_sessions
                 (profile_id, session_id, persona_id, title, local_engine_preference,
-                 selfhost_overrides_json, cc_seen_round_id, state_version,
+                 selfhost_overrides_json, prompt_module_overrides_json, cc_seen_round_id, state_version,
                  deleted_at, updated_at)
-                VALUES (?, ?, ?, '', ?, ?, 0, ?, NULL, ?)
+                VALUES (?, ?, ?, '', ?, ?, ?, 0, ?, NULL, ?)
                 ON CONFLICT(profile_id, session_id) DO UPDATE SET
                     local_engine_preference = excluded.local_engine_preference,
                     selfhost_overrides_json = excluded.selfhost_overrides_json,
+                    prompt_module_overrides_json = excluded.prompt_module_overrides_json,
                     state_version = excluded.state_version,
                     updated_at = excluded.updated_at
                 """,
@@ -2288,6 +2362,7 @@ class GatewayStateStore:
                     safe_persona_id,
                     next_preference,
                     json.dumps(next_overrides, ensure_ascii=False),
+                    json.dumps(next_prompt_module_overrides, ensure_ascii=False),
                     next_version,
                     updated_at,
                 ),

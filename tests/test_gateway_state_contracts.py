@@ -280,6 +280,7 @@ class GatewayStateContractsTest(unittest.TestCase):
                 {
                     "id": "ombre",
                     "name": "Ombre",
+                    "prompt": "旧整块提示词",
                     "selfhost_defaults": {
                         "model": "claude-x",
                         "history_token_budget": 12000,
@@ -287,6 +288,17 @@ class GatewayStateContractsTest(unittest.TestCase):
                 }
             )
         self.assertEqual(saved["selfhost_defaults"]["model"], "claude-x")
+        self.assertEqual(
+            saved["prompt_modules"],
+            [
+                {
+                    "id": "legacy-prompt",
+                    "name": "协作者提示词",
+                    "content": "旧整块提示词",
+                    "enabled_by_default": True,
+                }
+            ],
+        )
 
         state = store.patch_conversation_session_state(
             profile_id="default",
@@ -295,11 +307,13 @@ class GatewayStateContractsTest(unittest.TestCase):
             updates={
                 "local_engine_preference": "selfhost",
                 "selfhost_overrides": {"max_history_rounds": 20},
+                "prompt_module_overrides": {"legacy-prompt": False},
             },
             expected_state_version=0,
         )
         self.assertEqual(state["local_engine_preference"], "selfhost")
         self.assertEqual(state["selfhost_overrides"], {"max_history_rounds": 20})
+        self.assertEqual(state["prompt_module_overrides"], {"legacy-prompt": False})
         with self.assertRaisesRegex(ValueError, "runtime-only"):
             store.patch_conversation_session_state(
                 profile_id="default",

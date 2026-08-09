@@ -264,7 +264,7 @@ dashboards 的 `/api/gateway/[...path]` 代理到这些路由，Bearer 网关鉴
 
 会话轮次存 `conversation_turns`，窗口状态存 `conversation_sessions`，图片/文件元数据与文件解析正文存 `conversation_attachments`；私有文件位于 `buckets_dir/cc-attachments`：
 
-- 协作者可编辑的基础提示词存 `cc_personas.base_prompt`；提示词模块存 `cc_personas.prompt_modules`，每条包含 id、名称、正文和默认启停，组装时以 `【模块名称】` 标明边界。旧 `prompt` 在读取时兼容成一个默认开启模块。当前窗口的差异化启停存 `conversation_sessions.prompt_module_overrides_json`，未覆盖的模块继续跟随协作者默认。
+- 订阅、API 中转站和 selfhost 共用的协作者基础提示词存 `cc_personas.base_prompt`，默认值为原 cc 闲聊模式提示词；短暂使用过的旧 selfhost 三句默认文案在读取时迁成该统一默认。提示词模块存 `cc_personas.prompt_modules`，每条包含 id、名称、正文和默认启停，组装时以 `【模块名称】` 标明边界。旧 `prompt` 在读取时兼容成一个默认开启模块。当前窗口的差异化启停存 `conversation_sessions.prompt_module_overrides_json`，未覆盖的模块继续跟随协作者默认。
 - 一个 `session_id` 永久绑定一个 `persona_id`；旧窗口从首轮 `client="ob2-chat/<persona>"` 回填，无主历史归 `ombre`。
 - `local_engine_preference` 只保存用户的本地首选；Vercel 的 `effective_engine=selfhost` 不得写回。
 - 严格写入用 `request_id` 防重复，用 `expected_last_round_id` 拒绝基于旧历史的跨设备追加；SQLite `BEGIN IMMEDIATE` 内统一分配下一轮。

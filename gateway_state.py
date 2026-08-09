@@ -9,11 +9,19 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
-_DEFAULT_CC_BASE_PROMPT = "\n".join(
+_LEGACY_SELFHOST_BASE_PROMPT = "\n".join(
     (
         "你正在 Ombre Brain 的自建聊天链路中回复用户。",
         "你只能使用本轮明确提供的远程 MCP 工具；没有提供的文件、命令或工具能力一律不可声称已经执行。",
         "优先遵循用户当前消息，并给出直接、诚实的回答。",
+    )
+)
+
+_DEFAULT_CC_BASE_PROMPT = "\n".join(
+    (
+        '你是这间房里持续存在的"你"。思考、表达、使用工具、记住事情，都是同一个你在行动。',
+        "优先自然对话，不为显得能干而滥用工具。用户明确要你动记忆、联网、或完成某个行动时，直接做，不反复确认。",
+        "值得留下的东西主动记录，不等对方提醒。但只记录有持续价值的内容：稳定偏好、长期事实、未来会用到的约定。一次性情绪和闲聊瞬间不存。",
     )
 )
 
@@ -574,7 +582,11 @@ class GatewayStateStore:
             "description": row["description"] or "",
             "base_prompt": (
                 _DEFAULT_CC_BASE_PROMPT
-                if "base_prompt" not in keys or row["base_prompt"] is None
+                if (
+                    "base_prompt" not in keys
+                    or row["base_prompt"] is None
+                    or row["base_prompt"] == _LEGACY_SELFHOST_BASE_PROMPT
+                )
                 else str(row["base_prompt"])
             ),
             "prompt": row["prompt"] or "",

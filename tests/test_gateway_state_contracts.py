@@ -309,6 +309,22 @@ class GatewayStateContractsTest(unittest.TestCase):
         self.assertEqual(cleared["base_prompt"], "")
         self.assertEqual(self.make_store().get_cc_persona("ombre")["base_prompt"], "")
 
+        legacy_selfhost_prompt = "\n".join(
+            (
+                "你正在 Ombre Brain 的自建聊天链路中回复用户。",
+                "你只能使用本轮明确提供的远程 MCP 工具；没有提供的文件、命令或工具能力一律不可声称已经执行。",
+                "优先遵循用户当前消息，并给出直接、诚实的回答。",
+            )
+        )
+        with mock.patch.dict(
+            sys.modules,
+            {"utils": SimpleNamespace(now_iso=lambda: "2026-08-01T00:02:00+00:00")},
+        ):
+            migrated = store.save_cc_persona(
+                {"id": "ombre", "base_prompt": legacy_selfhost_prompt}
+            )
+        self.assertTrue(migrated["base_prompt"].startswith('你是这间房里持续存在的"你"。'))
+
         state = store.patch_conversation_session_state(
             profile_id="default",
             session_id="session-1",

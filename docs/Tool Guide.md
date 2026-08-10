@@ -18,7 +18,7 @@
 - 如果上下文里出现 `[bucket_id:...]`，而本轮需要更多细节：用 read_bucket(bucket_id)。不要猜新 id。
 - 如果只出现 `[moment_id:...]`，优先使用同一段上下文里已有的 bucket_id；没有 bucket_id 时不要硬猜。
 - `[memory_detail ids="..."]` 只给 Gateway 内部二次取细节用，不是普通 MCP 工具。
-- 旧独立感受：breath(domain="feel")。domain="feel" 不包含日印象；domain="whisper" 只读悄悄话。某条旧记忆的新年轮要 read_bucket(bucket_id)。
+- 独立感受：breath(domain="feel", max_results=...)。domain="feel" 不包含日印象或历史 whisper，并同时受 max_results 条数与 max_tokens 总量限制。某条旧记忆的新年轮要 read_bucket(bucket_id)。
 - 日记：breath(domain="journal")（含上锁检测）；轨迹桶：breath(domain="journey")。
 - 自我锚点总入口：breath(domain="self_anchor")；domain="自我" / domain="self_identity" 兼容。
 - 查自我锚点分段：breath(domain="self_anchor", query="关键词")。
@@ -27,13 +27,13 @@
 
 写入：
 - 想保存/记住/别忘：单条长期事实用 hold；长片段多条信息用 grow。
-- hold 成功返回 `{status, action, bucket_id, bucket_name}`；`action=created` 表示新建，`merged` 表示并入旧桶，`commented` 表示追加年轮。
-- 知道事件日期时，写入时传 date，例如 hold(content="...", date="2026-06-15")；知道固定领域时传 domain，例如 hold(content="...", domain="relationship")；显式 domain/valence/arousal 会作为这条记忆或 whisper/feel 的元数据，不会被自动打标覆盖。
+- hold 成功返回 `{status, action, bucket_id, bucket_name}`；`action=created` 表示新建，`merged` 表示并入旧桶。追加年轮单独使用 comment_bucket。
+- 知道事件日期时，写入时传 date，例如 hold(content="...", date="2026-06-15")；知道固定领域时传 domain，例如 hold(content="...", domain="relationship")；显式 domain/valence/arousal 会作为这条记忆或独立 feel 的元数据，不会被自动打标覆盖。
 - 已有旧记忆的新感受/补充：先 read_bucket，再 comment_bucket。
 - 修改/归档/删除/沉底旧记忆：先 read_bucket，再 trace。只改事件日期用 trace(bucket_id="...", date="2026-06-15")；日期/元数据更新不会重建 embedding，正文或标题变更才会。
 - 稳定画像事实：先有证据 bucket，再 profile_fact(fact, evidence_bucket_id, ...)。
 - 不确定是否重复：先 breath/read_bucket，再写。
-- 碎碎念、突然的念头可以写 whisper：hold(content="...", whisper=True, ...)
+- 没有对应源记忆的第一人称感受：hold(content="...", feel=True, ...)。不要传 source_bucket；已有记忆的新感受用 comment_bucket(kind="feel") 写成年轮
 - 私人日记，不想进普通浮现：hold(journal=True, author="言之"或"小羊"或"共同")；可加 locked=True, unlock_hint="2026-08-01" 上锁
 - 长期悬念标签（低概率浮现）：hold(wish=True) 或 trace(bucket_id, wish=1)
 - 给记忆附上待办：hold(todo="内容", todo_done=False)；标记完成用 trace(bucket_id, todo_done=1)

@@ -58,7 +58,11 @@ OMBRE_TRANSPORT=streamable-http python server.py
 
 ### `hold` 结构化成功结果
 
-`server.py` 的 MCP `hold` 在成功新建、合并或追加年轮后统一返回 `{status, action, bucket_id, bucket_name}`，其中 `action` 为 `created`、`merged` 或 `commented`。会话执行器只有在 `status=success, action=created` 时才应把 `bucket_id` 记入本窗口新建桶排除账本。
+`server.py` 的 MCP `hold` 在成功新建或合并后统一返回 `{status, action, bucket_id, bucket_name}`，其中 `action` 为 `created` 或 `merged`。会话执行器只有在 `status=success, action=created` 时才应把 `bucket_id` 记入本窗口新建桶排除账本；年轮由 `comment_bucket` 单独写入。
+
+### feel / whisper 写入与读取
+
+无源第一人称感受用 `hold(feel=True)` 创建不带 `whisper` 标签的独立 `type=feel` 桶；已有记忆的新感受用 `comment_bucket(kind="feel")` 写成年轮，`hold(feel=True, source_bucket=...)` 会拒绝并提示改用年轮。`whisper=True` 仅保留旧客户端兼容。`breath(domain="feel")` 排除日印象和 whisper，按创建时间倒序返回，并同时受 `max_results`（默认 20）与 `max_tokens`（默认 10000）限制；历史 whisper 只能经 `domain="whisper"` 显式读取。
 
 ## 配置
 

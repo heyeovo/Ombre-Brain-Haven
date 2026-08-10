@@ -82,17 +82,18 @@ AI 对这段经历的理解、关系侧学习或以后应怎样做。
 
 Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提示。它不是事实真源，也不能独立证明召回命中。停用词和过泛词会在进入锚点或词图提示前被过滤。
 
-### 5. 年轮、whisper 与关系天气
+### 5. 年轮、独立 feel 与关系天气
 
 - **年轮 comment**：再次阅读某条记忆后的感受，挂在源 bucket 上；只能陪伴可靠命中，不能单独诱发召回。
-- **whisper**：没有源 bucket 的碎碎念或感受，保存为 `type=feel`；可单独读取，也可作为自我画像的候选证据。
+- **独立 feel**：没有源 bucket 的第一人称感受，保存为不带 `whisper` 标签的 `type=feel`；通过 `breath(domain="feel")` 独立读取，不参与普通召回。已有源 bucket 的新感受统一用 `comment_bucket(kind="feel")` 写成年轮。
+- **whisper**：只保留旧数据和旧客户端兼容；仍保存为带 `whisper` 标签的 `type=feel`，但不再作为当前写入方式。
 - **日印象 / 关系天气**：描述某天的关系温度，不等同于当天事实清单，默认不作为直接 seed。
 
 ## 写入与维护
 
 ### 手动写入
 
-`grow` 用于保存值得长期保留的记忆。`hold` 适合短暂抓住当前片段，`comment_bucket` 用于给已有记忆增加年轮。`hold` 成功时统一返回 `{status, action, bucket_id, bucket_name}`：`action` 为 `created`、`merged` 或 `commented`。会话客户端只把 `status=success, action=created` 的 bucket 写入本窗口召回排除账本；合并和追加年轮不会被误记为新桶。
+`grow` 用于保存值得长期保留的记忆。`hold` 适合短暂抓住当前片段，`comment_bucket` 用于给已有记忆增加年轮。`hold` 成功时统一返回 `{status, action, bucket_id, bucket_name}`：`action` 为 `created` 或 `merged`。会话客户端只把 `status=success, action=created` 的 bucket 写入本窗口召回排除账本；合并不会被误记为新桶。年轮由 `comment_bucket` 单独写入。
 
 自动来源调用 `grow(auto=true)` 时会经过写入门卫：低价值候选可以静默，中等候选留待重复验证，高价值或多次出现的候选才进入正常写入。门卫只控制是否值得写，不替代最终的 bucket 合并和结构化。
 
@@ -176,7 +177,7 @@ handoff 是一次性的紧凑恢复，不是每轮注入。当前内容按预算
 
 画像由后台模型维护在 `state/portrait_state.json`，不会把高分 `profile_fact` 原文直接拼成画像。Stable 可在 Dashboard 手动编辑、锁定和回滚；首次画像默认需要手动生成，之后才按配置自动生长。
 
-自我入口使用第一人称。“现在的我”可从选定 self anchor 与符合身份条件的 whisper 中更新；原始自我核心始终保持只读。旧的独立 `AI Self Portrait` 和 Gateway 每轮 `Portrait Memory` 已退休，兼容配置名可能仍存在，但运行时不会重新开启该旧注入。
+自我入口使用第一人称。“现在的我”可从选定 self anchor 与符合身份条件的历史 whisper 中更新；原始自我核心始终保持只读。旧的独立 `AI Self Portrait` 和 Gateway 每轮 `Portrait Memory` 已退休，兼容配置名可能仍存在，但运行时不会重新开启该旧注入。
 
 ### 照顾备忘不是长期记忆桶
 

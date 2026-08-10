@@ -7432,14 +7432,19 @@ async def breath(
                 feels = [b for b in feels if _is_daily_impression_feel_bucket(b)]
             else:
                 feels = [b for b in feels if not _is_daily_impression_feel_bucket(b)]
+            def is_whisper_bucket(bucket: dict) -> bool:
+                return "whisper" in {
+                    str(tag).lower() for tag in bucket["metadata"].get("tags", []) or []
+                }
+
             if domain_key == "whisper":
-                feels = [
-                    b for b in feels
-                    if "whisper" in {str(tag).lower() for tag in b["metadata"].get("tags", []) or []}
-                ]
+                feels = [b for b in feels if is_whisper_bucket(b)]
+            elif domain_key == "feel":
+                feels = [b for b in feels if not is_whisper_bucket(b)]
             if date_key:
                 feels = [b for b in feels if _bucket_matches_breath_date(b, date_key)]
             feels.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+            feels = feels[:max_results]
             if not feels:
                 if date_key:
                     return f"{date_key} 没有找到 {domain_key}。"
@@ -7448,16 +7453,25 @@ async def breath(
                 if domain_key == "daily_impression":
                     return "没有留下过 daily_impression。"
                 return "没有留下过 feel。"
-            results = []
+            title = "whisper" if domain_key == "whisper" else ("daily_impression" if domain_key == "daily_impression" else "feel")
+            response_text = f"=== 你留下的 {title} ==="
+            if max_tokens <= 0:
+                return ""
+            response_text = _trim_text_to_token_budget(response_text, max_tokens)
+            has_entry = False
             for f in feels:
                 meta = f["metadata"]
                 created = meta.get("date") or meta.get("created", "")
                 entry = f"[{created}] [bucket_id:{f['id']}]\n{strip_wikilinks(f['content'])}"
-                results.append(entry)
-                if count_tokens_approx("\n---\n".join(results)) > max_tokens:
+                separator = "\n---\n" if has_entry else "\n"
+                candidate = response_text + separator + entry
+                if count_tokens_approx(candidate) > max_tokens:
+                    if not has_entry:
+                        response_text = _trim_text_to_token_budget(candidate, max_tokens)
                     break
-            title = "whisper" if domain_key == "whisper" else ("daily_impression" if domain_key == "daily_impression" else "feel")
-            return f"=== 你留下的 {title} ===\n" + "\n---\n".join(results)
+                response_text = candidate
+                has_entry = True
+            return response_text
         except Exception as e:
             logger.error(f"Feel retrieval failed: {e}")
             if domain_key == "whisper":
@@ -7552,28 +7566,6 @@ async def breath(
         except Exception as e:
             logger.error(f"Journey retrieval failed / 轨迹检索失败: {e}")
             return "读取轨迹桶失败。"
-
-    # --- Feel retrieval: domain="feel" is a special channel ---
-    # --- Feel 检索：domain="feel" 是独立入口 ---
-    if domain.strip().lower() == "feel":
-        try:
-            all_buckets = await bucket_mgr.list_all(include_archive=False)
-            feels = [b for b in all_buckets if b["metadata"].get("type") == "feel"]
-            feels.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
-            feels = feels[:max_results]
-            if not feels:
-                return "没有留下过 feel。"
-            results = []
-            for f in feels:
-                created = f["metadata"].get("created", "")
-                entry = f"[{created}] [bucket_id:{f['id']}]\n{strip_wikilinks(f['content'])}"
-                results.append(entry)
-                if count_tokens_approx("\n---\n".join(results)) > max_tokens:
-                    break
-            return "\n---\n".join(results)
-        except Exception as e:
-            logger.error(f"Feel retrieval failed: {e}")
-            return "读取 feel 失败。"
 
     # --- Journal retrieval: domain="journal" is a fully independent channel ---
     # --- 日记检索：domain="journal" 完全独立通道，不与普通breath/search混 ---
@@ -8779,7 +8771,7 @@ async def hold(
     unlock_hint: str = "",
     event_time: str = "",
 ) -> dict | str:
-    """写入一条长期记忆；附带 todo 时必须同时传 todo_domain="tech" 或 "emotional"。"""
+    """写入一条长期记忆；无源感受用 feel=True，已有记忆的新感受用 comment_bucket(kind="feel")。附带 todo 时必须同时传 todo_domain="tech" 或 "emotional"。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -8796,10 +8788,21 @@ async def hold(
     requested_valence = valence if 0 <= valence <= 1 else None
     requested_arousal = arousal if 0 <= arousal <= 1 else None
 
-    async def create_whisper_bucket() -> str:
-        whisper_valence = requested_valence if requested_valence is not None else 0.5
-        whisper_arousal = requested_arousal if requested_arousal is not None else 0.3
-        whisper_tags = list(dict.fromkeys(extra_tags + ["whisper"]))
+    async def create_standalone_feel_bucket(*, whisper_compat: bool = False) -> dict:
+        feel_tags = list(dict.fromkeys(extra_tags + (["whisper"] if whisper_compat else [])))
+        bucket_id = await bucket_mgr.create(
+            content=content,
+            tags=feel_tags,
+            importance=5,
+            domain=requested_domain,
+            valence=requested_valence if requested_valence is not None else 0.5,
+            arousal=requested_arousal if requested_arousal is not None else 0.3,
+            name=None,
+            bucket_type="feel",
+            date=event_date or None,
+        )
+        _queue_embedding_refresh(bucket_id)
+        return _hold_success("created", bucket_id, title.strip() or bucket_id)
 
 
     # --- Journal mode: independent channel, bypasses merge entirely ---
@@ -8820,64 +8823,19 @@ async def hold(
         )
         return _hold_success("created", bucket_id, title.strip() or bucket_id)
 
-    # --- Feel mode: store as feel type, minimal metadata ---
-    # --- Feel 模式：存为 feel 类型，最少元数据 ---
+    # --- Feel mode: standalone feelings only; sourced feelings use comment_bucket ---
+    # --- Feel 模式：只写独立感受；有源感受统一使用 comment_bucket ---
     if feel:
-        # Feel valence/arousal = model's own perspective
-        feel_valence = valence if 0 <= valence <= 1 else 0.5
-        feel_arousal = arousal if 0 <= arousal <= 1 else 0.3
-
-        bucket_id = await bucket_mgr.create(
-            content=content,
-            tags=whisper_tags,
-            importance=5,
-            domain=requested_domain,
-            valence=whisper_valence,
-            arousal=whisper_arousal,
-            name=None,
-            bucket_type="feel",
-            date=event_date or None,
-        )
-        _queue_embedding_refresh(bucket_id)
-        return _hold_success("created", bucket_id, title.strip() or bucket_id)
+        if whisper:
+            return "feel 与 whisper 不能同时使用。无源感受请只传 feel=True。"
+        if source_bucket and source_bucket.strip():
+            return "hold(feel=True) 只创建独立 feel；已有记忆的新感受请用 comment_bucket(kind=\"feel\")。"
+        return await create_standalone_feel_bucket()
 
     if whisper:
         if source_bucket and source_bucket.strip():
             return "whisper 不需要 source_bucket；有源记忆的感受请用 comment_bucket。"
-        return await create_whisper_bucket()
-
-    # --- Feel mode: attach to source bucket as a ring comment when possible ---
-        # --- Feel 模式：有源记忆时挂成年轮 ---
-    if feel:
-        # Feel valence/arousal = model's own perspective
-        feel_valence = requested_valence if requested_valence is not None else 0.5
-        feel_arousal = requested_arousal if requested_arousal is not None else 0.3
-        source_id = (source_bucket or "").strip()
-        if source_id:
-            if not MEMORY_ID_RE.fullmatch(source_id):
-                return "source_bucket 无效。"
-            source = await bucket_mgr.get(source_id)
-            if not source:
-                return f"源记忆不存在: {source_id}"
-            entry = await bucket_mgr.add_comment(
-                source_id,
-                content,
-                author=_ai_author_name(),
-                kind="feel",
-                valence=feel_valence,
-                arousal=feel_arousal,
-                source="hold(feel=True)",
-                touch=True,
-            )
-            if not entry:
-                return "年轮写入失败。"
-            _queue_embedding_refresh(source_id)
-            source_name = str((source.get("metadata") or {}).get("name") or source_id)
-            return _hold_success("commented", source_id, source_name)
-
-        # No source bucket: keep a standalone feel for compatibility.
-        # 没有源记忆时保留独立 whisper，兼容旧用法。
-        return await create_whisper_bucket()
+        return await create_standalone_feel_bucket(whisper_compat=True)
 
     content = _normalize_memory_sections_for_write(content)
 

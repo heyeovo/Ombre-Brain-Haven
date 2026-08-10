@@ -9,6 +9,7 @@ from favorite_tags import GENERIC_FAVORITE_TAG, has_favorite_memory_tag
 LAYER_CORE = "core_memory"
 LAYER_ANCHOR = "long_term_anchor"
 LAYER_DYNAMIC = "dynamic_memory"
+LAYER_JOURNEY = "relationship_journey"
 LAYER_RELATIONSHIP_WEATHER = "relationship_weather"
 LAYER_AFFECT_CONTEXT = "affect_context"
 LAYER_FAVORITE = "favorite_memory"
@@ -168,6 +169,15 @@ LAYER_POLICIES: dict[str, MemoryLayerPolicy] = {
         diffusion_policy=DIFFUSE_SOURCE,
         preserves_original=True,
     ),
+    LAYER_JOURNEY: MemoryLayerPolicy(
+        layer=LAYER_JOURNEY,
+        direct_seed_policy=DIRECT_NEVER,
+        render_policy=RENDER_SUMMARY,
+        gateway_section="explicit_lookup_only",
+        cooldown_policy="not_injected",
+        diffusion_policy=DIFFUSE_NEVER,
+        preserves_original=True,
+    ),
     LAYER_RELATIONSHIP_WEATHER: MemoryLayerPolicy(
         layer=LAYER_RELATIONSHIP_WEATHER,
         direct_seed_policy=DIRECT_NEVER,
@@ -247,8 +257,13 @@ def infer_bucket_layer(bucket: dict[str, Any] | None) -> str:
     bucket = bucket if isinstance(bucket, dict) else {}
     meta = _metadata(bucket)
     tags = _tags(meta)
+    domains = _domains(meta)
     bucket_type = _lower(meta.get("type") or meta.get("bucket_type"))
 
+    # Journey is an explicit-only relationship-stage index. It must win over
+    # archived/pinned flags so closed or protected journeys never diffuse.
+    if "journey" in domains:
+        return LAYER_JOURNEY
     if _truthy(meta.get("archived")) or _truthy(meta.get("digested")) or _truthy(meta.get("resolved")):
         return LAYER_ARCHIVE
     if bucket_type == "archived":
@@ -619,6 +634,8 @@ def _moment_metadata(moment: dict[str, Any]) -> dict[str, Any]:
         mapped["protected"] = meta.get("bucket_protected")
     if "bucket_favorite_tags" in meta and "tags" not in mapped:
         mapped["tags"] = meta.get("bucket_favorite_tags")
+    if "bucket_domain" in meta and "domain" not in mapped:
+        mapped["domain"] = meta.get("bucket_domain")
     if meta.get("bucket_favorite") and "tags" not in mapped:
         mapped["tags"] = [FAVORITE_TAG]
     return mapped
@@ -631,6 +648,15 @@ def _tags(meta: dict[str, Any]) -> set[str]:
     if not isinstance(raw, (list, tuple, set)):
         return set()
     return {_lower(tag) for tag in raw if str(tag or "").strip()}
+
+
+def _domains(meta: dict[str, Any]) -> set[str]:
+    raw = meta.get("domain") or meta.get("bucket_domain") or []
+    if isinstance(raw, str):
+        raw = [part.strip() for part in raw.split(",")]
+    if not isinstance(raw, (list, tuple, set)):
+        return set()
+    return {_lower(domain) for domain in raw if str(domain or "").strip()}
 
 
 def _has_favorite_tag(tags: set[str]) -> bool:

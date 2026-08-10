@@ -1145,7 +1145,8 @@ class BucketManager:
         include_archive: bool = False,
         show_all: bool = False,   # 为True时不过滤/惩罚resolved桶
         include_noise: bool = False,  # 为True时才包含噪声桶
-        record_stats: bool = True    # 是否记录命中统计
+        record_stats: bool = True,   # 是否记录命中统计
+        include_journey: bool = False,  # 仅显式管理/查询入口允许轨迹桶
     ) -> list[dict]:
         """
         Multi-dimensional indexed search for memory buckets.
@@ -1161,6 +1162,12 @@ class BucketManager:
         if re.fullmatch(r"[0-9a-f]{12}", query.strip()):
             bucket = await self.get(query.strip())
             if bucket:
+                domains = {
+                    str(domain).strip().lower()
+                    for domain in bucket.get("metadata", {}).get("domain", []) or []
+                }
+                if "journey" in domains and not include_journey:
+                    return []
                 bucket["score"] = 100.0
                 return [bucket]
             return []
@@ -1185,6 +1192,17 @@ class BucketManager:
                 candidates = all_buckets
         else:
             candidates = all_buckets
+
+        # Journey is an explicit-only stage index. Internal memory searches
+        # exclude it by default; dashboard/manual management opts in.
+        if not include_journey:
+            candidates = [
+                bucket for bucket in candidates
+                if "journey" not in {
+                    str(domain).strip().lower()
+                    for domain in bucket.get("metadata", {}).get("domain", []) or []
+                }
+            ]
 
         # --- Layer 1.5: embedding pre-filter (optional, reduces multi-dim ranking set) ---
         # --- 第1.5层：embedding 预筛（可选，缩小精排候选集）---

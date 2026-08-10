@@ -13,7 +13,7 @@
 
 | 能力 | 场景 |
 |------|-----------|
-| `breath` | **每次对话最开头**调用一次（`is_session_start=True`）——先恢复自我入口、用户画像、关系画像、近期连续性和少量必要锚点。有明确话题时传 `query` 关键词检索；有明确日期时可传 `date` 或在 query 里写日期。传 `domain="feel"` 读取独立 feel；传 `domain="daily_impression"` 才读取日印象；传 `domain="journal"` 读取日记（含上锁检测）；传 `domain="journey"` 读取轨迹桶；传 `domain="self_anchor"` 读取你自己留下的锚点。`max_tokens` 控制返回总 token 上限（默认 10000），`max_results` 控制最大返回条数（默认 20） |
+| `breath` | **每次对话最开头**调用一次（`is_session_start=True`）——先恢复自我入口、用户画像、关系画像、近期连续性和少量必要锚点。有明确话题时传 `query` 关键词检索；有明确日期时可传 `date` 或在 query 里写日期。传 `domain="feel"` 读取独立 feel；传 `domain="daily_impression"` 才读取日印象；传 `domain="journal"` 读取日记（含上锁检测）；传 `domain="journey"` 只读取轨迹目录，选中后再 `read_bucket(bucket_id)` 读全文；传 `domain="self_anchor"` 读取你自己留下的锚点。`max_tokens` 控制返回总 token 上限（默认 10000），`max_results` 控制最大返回条数（默认 20） |
 | `read_bucket` | 按 bucket_id 精确读取完整记忆；准备追细节、写年轮、修改或删除前先读 |
 | `comment_bucket` | 给已有记忆追加年轮/评论；读到旧记忆后的新感受或补充，用它挂回源 bucket。`kind="feel"` 时 content 只写第一人称感受，不写分段标题 |
 | `hold` | 写单条长期记忆；`date` 可传事件日期；显式 `domain` 会覆盖自动领域；显式 `valence/arousal` 会覆盖自动情绪；`feel=True` 写无源独立感受；`journal=True` 写独立日记（`author` 区分作者，`locked=True` + `unlock_hint` 上锁）；`wish=True` 长期悬念标签（15% 概率随机浮现）；附带桶 Todo 时同时传 `todo` 和 `todo_domain="tech"` / `"emotional"`。已有记忆的新感受必须用 `comment_bucket`；独立 feel 的 content 只写第一人称感受。成功返回 `{status, action, bucket_id, bucket_name}` |
@@ -64,7 +64,7 @@
 - `domain`：如果明确知道话题领域可以传（如 "编程" 或 "恋爱"），缩小搜索范围
 - `domain="daily_impression"`：显式读取日印象；普通日期查询不会混入日印象。可与 `date` 一起用
 - `domain="feel"`：读取独立 feel，不包含日印象或历史 whisper；`max_results` 限制条数，`max_tokens` 限制总 token
-- `domain="journal"`：读取日记（含上锁检测）；`domain="journey"` 读取轨迹桶
+- `domain="journal"`：读取日记（含上锁检测）；`domain="journey"` 只返回轨迹目录（阶段、时间、标题、摘要、bucket_id），选中后用 `read_bucket(bucket_id)` 读取全文。journey 不参与普通检索、浮现或关联扩散
 - `domain="self_anchor"`：读取你的自我总入口；`domain="自我"` / `domain="self_identity"` 兼容
 - `domain="self_anchor", query="欲望"`：只在自我分段里按 query 查，返回相关分段，不走普通扩散
 - `query="tag:self_anchor"` / `query="tag:自我"`：管理/调试用，返回所有自我桶完整内容；裸 `query="self_anchor"` 不读，避免普通搜索误触

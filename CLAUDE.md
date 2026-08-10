@@ -68,6 +68,10 @@ OMBRE_TRANSPORT=streamable-http python server.py
 
 `hold(date=...)` 写入 `metadata.event_time`，通常为完整 ISO 时间。`breath(date=...)` 按北京时间年月日匹配，并以 `event_time` 为事实源；只有缺少 `event_time` 时才兼容旧 `metadata.date`，两者都缺失的旧桶才回退到 `created`、`updated_at` 或 `last_active`。日期结果的排序与日期标签使用同一优先级，不能因实际建桶日期误命中事件桶。启动迁移只补缺失的 `event_time`，已有值不覆盖；补值时先取旧 `date`，再取 `created`。
 
+### journey 隔离与读取
+
+`domain=["journey"]` 的桶属于独立 `relationship_journey` 记忆层。普通关键词、向量、日期、词法补召、开窗浮现、写入合并候选和 bucket/moment 关联扩散均排除 journey；dashboard `/api/search` 为人工管理显式放行，因此记忆库仍可见。`breath(domain="journey")` 只返回按阶段起始时间倒序排列的精简目录（桶 ID、阶段标题、起止时间、一句摘要），选择后再用 `read_bucket(bucket_id)` 读取全文。目录优先使用结构化阶段元数据，旧桶缺失时回退到事件/创建时间与正文第一条有效行。
+
 ## 配置
 
 ```yaml

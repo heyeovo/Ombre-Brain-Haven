@@ -496,6 +496,8 @@ Codex 接线时注意：
 | `darkroom_enter/rooms/view` | 写入、列出和在解锁后读取 Darkroom |
 | `trace` / `pulse` / `introspection` | 近期轨迹、系统脉搏与内省 |
 
+Journey 是关系阶段索引，不属于普通召回池。普通关键词、向量、日期、开窗浮现和关联扩散都不会带出 journey；Dashboard 记忆库与人工搜索仍可查看。显式调用 `breath(domain="journey")` 只返回阶段目录，选中其中的 `bucket_id` 后再用 `read_bucket(bucket_id)` 读取完整阶段记录。
+
 维修与回填工具不应塞进普通聊天客户端的日常提示词。完整说明见 [`docs/Tool Guide.md`](docs/Tool%20Guide.md)。
 
 ## 运维与验证

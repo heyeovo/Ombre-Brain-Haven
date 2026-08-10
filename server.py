@@ -1301,6 +1301,8 @@ async def _read_breath_date(
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         if meta.get("type") == "feel":
             continue
+        if "journey" in {str(item).strip().lower() for item in meta.get("domain", []) or []}:
+            continue
         if domain_set and not ({str(item).lower() for item in meta.get("domain", []) or []} & domain_set):
             continue
         if not _bucket_matches_breath_date(bucket, date_key):
@@ -3313,6 +3315,7 @@ async def breath_hook(request):
         pinned = [
             b for b in all_buckets
             if not is_self_anchor_bucket(b)
+            and "journey" not in (b["metadata"].get("domain") or [])
             and (b["metadata"].get("pinned") or b["metadata"].get("protected"))
         ]
         # top 2 unresolved by score
@@ -3729,6 +3732,8 @@ async def _find_readonly_related_bucket(
         if bucket.get("id") in exclude_ids:
             continue
         if meta.get("type") == "feel":
+            continue
+        if "journey" in (meta.get("domain") or []):
             continue
         ranked.append(bucket)
 
@@ -4444,6 +4449,8 @@ def _is_breath_recall_seed_bucket(bucket: dict | None) -> bool:
     if is_self_anchor_bucket(bucket):
         return False
     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    if "journey" in {str(domain).strip().lower() for domain in meta.get("domain", []) or []}:
+        return False
     if meta.get("type") != "feel":
         return True
     tags = {str(tag).lower() for tag in meta.get("tags", []) or []}
@@ -7356,6 +7363,81 @@ async def reminder_update(
 # With args: search by keyword + emotion coordinates
 # 有参数：按关键词+情感坐标检索记忆
 # =============================================================
+def _journey_directory_summary(bucket: dict, max_chars: int = 180) -> str:
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    for key in ("journey_summary", "stage_summary", "annotation_summary", "summary"):
+        value = str(meta.get(key) or "").strip()
+        if value:
+            return _clip_text(value, max_chars)
+
+    for raw_line in strip_wikilinks(str(bucket.get("content") or "")).splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fallback = line.lstrip("-* ").strip()
+        if fallback:
+            return _clip_text(fallback, max_chars)
+    return str(meta.get("name") or bucket.get("id") or "轨迹阶段")
+
+
+def _journey_directory_entry(bucket: dict) -> str:
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    bucket_id = str(bucket.get("id") or "")
+    title = str(meta.get("stage_name") or meta.get("name") or bucket_id or "未命名阶段").strip()
+    start = str(
+        meta.get("journey_start")
+        or meta.get("stage_start")
+        or meta.get("event_time")
+        or meta.get("date")
+        or meta.get("created")
+        or "未标注"
+    ).strip()
+    end = str(meta.get("journey_end") or meta.get("stage_end") or "").strip()
+    status = str(meta.get("journey_status") or meta.get("stage_status") or "").strip().lower()
+    if not end:
+        end = "进行中" if status == "open" else "未标注"
+    summary = _journey_directory_summary(bucket)
+    return f"[bucket_id:{bucket_id}] {title}\n时间: {start} → {end}\n摘要: {summary}"
+
+
+async def _read_journey_directory(*, max_results: int, max_tokens: int) -> str:
+    try:
+        all_buckets = await bucket_mgr.list_all(include_archive=True)
+    except Exception as e:
+        logger.error(f"Journey directory failed / 轨迹目录读取失败: {e}")
+        return "读取轨迹目录失败。"
+
+    journeys = [
+        bucket for bucket in all_buckets
+        if "journey" in {
+            str(domain).strip().lower()
+            for domain in bucket.get("metadata", {}).get("domain", []) or []
+        }
+    ]
+    journeys.sort(
+        key=lambda bucket: (
+            bucket.get("metadata", {}).get("journey_start")
+            or bucket.get("metadata", {}).get("stage_start")
+            or bucket.get("metadata", {}).get("event_time")
+            or bucket.get("metadata", {}).get("created", "")
+        ),
+        reverse=True,
+    )
+    if not journeys:
+        return "还没有轨迹桶。"
+
+    results = []
+    for bucket in journeys[:max_results]:
+        entry = _journey_directory_entry(bucket)
+        candidate = "\n---\n".join(results + [entry])
+        if count_tokens_approx(candidate) > max_tokens:
+            if not results:
+                return _trim_text_to_token_budget(entry, max_tokens)
+            break
+        results.append(entry)
+    return "\n---\n".join(results) if results else "轨迹目录无法展示。"
+
+
 @mcp.tool()
 async def breath(
     query: str = "",
@@ -7486,6 +7568,11 @@ async def breath(
     if _is_self_anchor_tag_read_request(query):
         return await _read_self_anchor_tag_breath(max_tokens=max_tokens, limit=max_results)
 
+    # Journey is an explicit-only two-step channel: directory first, then
+    # read_bucket(bucket_id) for the selected full stage record.
+    if domain.strip().lower() == "journey":
+        return await _read_journey_directory(max_results=max_results, max_tokens=max_tokens)
+
     if date_key:
         domain_filter = [d.strip() for d in domain.split(",") if d.strip()] or None
         return await _read_breath_date(
@@ -7531,44 +7618,6 @@ async def breath(
             except Exception as e:
                 logger.warning(f"importance_min dehydrate failed: {e}")
         return "\n---\n".join(results) if results else "没有可以展示的记忆。"
-
-    # --- Journey retrieval: domain="journey" — 轨迹桶独立通道 ---
-    # --- 轨迹检索：按 event_time 倒序，不受常规浮现限制 ---
-    if domain.strip().lower() == "journey":
-        try:
-            all_buckets = await bucket_mgr.list_all(include_archive=False)
-            journeys = [
-                b for b in all_buckets
-                if "journey" in (b["metadata"].get("domain") or [])
-                and b["metadata"].get("type") not in ("feel", "archived")
-            ]
-            journeys.sort(
-                key=lambda b: b["metadata"].get("event_time", b["metadata"].get("created", "")),
-                reverse=True,
-            )
-            journeys = journeys[:max_results]
-            if not journeys:
-                return "还没有轨迹桶。"
-            results = []
-            token_used = 0
-            for j in journeys:
-                meta = j["metadata"]
-                event_time = meta.get("event_time", meta.get("created", ""))
-                name = meta.get("name", j["id"])
-                try:
-                    clean_meta = {k: v for k, v in meta.items() if k != "tags"}
-                    summary = await dehydrator.dehydrate(strip_wikilinks(j["content"]), clean_meta)
-                    t = count_tokens_approx(summary)
-                    if token_used + t > max_tokens:
-                        break
-                    results.append(f"[{event_time}] [bucket_id:{j['id']}] {name}\n{summary}")
-                    token_used += t
-                except Exception as e:
-                    logger.warning(f"Journey dehydrate failed / 轨迹脱水失败: {e}")
-            return "\n---\n".join(results) if results else "轨迹桶内容无法展示。"
-        except Exception as e:
-            logger.error(f"Journey retrieval failed / 轨迹检索失败: {e}")
-            return "读取轨迹桶失败。"
 
     # --- Journal retrieval: domain="journal" is a fully independent channel ---
     # --- 日记检索：domain="journal" 完全独立通道，不与普通breath/search混 ---
@@ -12108,7 +12157,8 @@ async def api_search(request):
         include_vector = request.query_params.get("include_vector", "false").lower() in ("1", "true")
         matches = await bucket_mgr.search(query, limit=limit, include_archive=include_archive,
                                           show_all=show_all, include_noise=include_noise,
-                                          record_stats=not simulate)  # 即时模拟不记统计
+                                          record_stats=not simulate,
+                                          include_journey=True)  # dashboard 人工搜索仍可见轨迹桶
 
         # --- Simulate mode: enrich with vector similarity ---
         vector_map = {}

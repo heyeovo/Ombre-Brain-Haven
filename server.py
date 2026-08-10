@@ -8635,8 +8635,14 @@ async def comment_bucket(
         return "bucket_id 无效"
     if not content or not content.strip():
         return "内容为空，无法写入年轮"
-    if not await bucket_mgr.get(bucket_id):
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
         return f"未找到记忆桶: {bucket_id}"
+    if "journey" in {
+        str(domain).strip().lower()
+        for domain in bucket.get("metadata", {}).get("domain", []) or []
+    }:
+        return "普通聊天窗口不能修改轨迹桶；轨迹阶段由 Haven 后台任务维护。"
 
     entry = await bucket_mgr.add_comment(
         bucket_id,
@@ -8667,8 +8673,14 @@ async def delete_bucket_comment(bucket_id: str, comment_id: str) -> str:
         return "bucket_id 无效"
     if not comment_id or not MEMORY_ID_RE.fullmatch(comment_id):
         return "comment_id 无效"
-    if not await bucket_mgr.get(bucket_id):
+    bucket = await bucket_mgr.get(bucket_id)
+    if not bucket:
         return f"未找到记忆桶: {bucket_id}"
+    if "journey" in {
+        str(domain).strip().lower()
+        for domain in bucket.get("metadata", {}).get("domain", []) or []
+    }:
+        return "普通聊天窗口不能修改轨迹桶；轨迹阶段由 Haven 后台任务维护。"
 
     result = await bucket_mgr.delete_comment(
         bucket_id,
@@ -8823,7 +8835,7 @@ async def hold(
     unlock_hint: str = "",
     event_time: str = "",
 ) -> dict | str:
-    """写入一条长期记忆；无源感受用 feel=True，已有记忆的新感受用 comment_bucket(kind="feel")。附带 todo 时必须同时传 todo_domain="tech" 或 "emotional"。"""
+    """写入一条长期记忆；无源感受用 feel=True，已有记忆的新感受用 comment_bucket(kind="feel")。journey=True 或 domain="journey" 会拒绝，轨迹阶段只由后台维护。附带 todo 时必须同时传 todo_domain="tech" 或 "emotional"。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -8891,41 +8903,13 @@ async def hold(
 
     content = _normalize_memory_sections_for_write(content)
 
-    # --- Journey mode: normal bucket with domain=["journey"], excluded from regular surfacing ---
-    # --- 轨迹模式：普通桶但 domain=["journey"]，不参与普通浮现和搜索 ---
-    if journey:
-        # Auto-tag for title generation (domain stays forced to ["journey"])
-        try:
-            analysis = await dehydrator.analyze(content)
-            suggested_name = analysis.get("suggested_name", "")
-            auto_tags = analysis.get("tags", [])
-            auto_valence = analysis.get("valence", 0.5)
-            auto_arousal = analysis.get("arousal", 0.3)
-        except Exception as e:
-            logger.warning(f"Journey auto-tagging failed, using defaults / 轨迹自动打标失败: {e}")
-            suggested_name = ""
-            auto_tags = []
-            auto_valence = 0.5
-            auto_arousal = 0.3
-
-        all_tags = list(dict.fromkeys(auto_tags + extra_tags))
-        final_valence = valence if 0 <= valence <= 1 else auto_valence
-        final_arousal = arousal if 0 <= arousal <= 1 else auto_arousal
-
-        bucket_id = await bucket_mgr.create(
-            content=content,
-            tags=all_tags,
-            importance=importance,
-            domain=["journey"],
-            valence=final_valence,
-            arousal=final_arousal,
-            name=suggested_name or None,
+    # Journey is maintained only by the internal background lifecycle. Keep
+    # the public flag for old clients, but never let a chat window write it.
+    if journey or "journey" in {str(item).strip().lower() for item in requested_domain}:
+        return (
+            "普通聊天窗口不能创建或修改轨迹桶。"
+            "轨迹阶段由 Haven 后台周任务统一判断和维护；本窗口只能提出阶段变化候选。"
         )
-        try:
-            await embedding_engine.generate_and_store(bucket_id, content)
-        except Exception:
-            pass
-        return _hold_success("created", bucket_id, suggested_name or bucket_id)
 
     # --- Step 1: auto-tagging / 自动打标 ---
     try:
@@ -9522,6 +9506,13 @@ async def trace(
     if todo and str(todo_domain or "").strip().lower() not in TODO_DOMAINS:
         return "修改 todo 时，todo_domain 必须是 tech 或 emotional。"
 
+    journey_target = await bucket_mgr.get(bucket_id)
+    if journey_target and "journey" in {
+        str(domain).strip().lower()
+        for domain in journey_target.get("metadata", {}).get("domain", []) or []
+    }:
+        return "普通聊天窗口不能修改或删除轨迹桶；轨迹阶段由 Haven 后台任务维护。"
+
     # --- Touch / activate ---
     if touch:
         if ripple:
@@ -9540,7 +9531,7 @@ async def trace(
             else f"未找到记忆桶: {bucket_id}"
         )
 
-    bucket = await bucket_mgr.get(bucket_id)
+    bucket = journey_target or await bucket_mgr.get(bucket_id)
     if not bucket:
         return f"未找到记忆桶: {bucket_id}"
 

@@ -496,7 +496,7 @@ Codex 接线时注意：
 | `darkroom_enter/rooms/view` | 写入、列出和在解锁后读取 Darkroom |
 | `trace` / `pulse` / `introspection` | 近期轨迹、系统脉搏与内省 |
 
-Journey 是关系阶段索引，不属于普通召回池。普通关键词、向量、日期、开窗浮现和关联扩散都不会带出 journey；Dashboard 记忆库与人工搜索仍可查看。显式调用 `breath(domain="journey")` 只返回阶段目录，选中其中的 `bucket_id` 后再用 `read_bucket(bucket_id)` 读取完整阶段记录。
+Journey 是关系阶段索引，不属于普通召回池。普通关键词、向量、日期、开窗浮现和关联扩散都不会带出 journey；Dashboard 记忆库与人工搜索仍可查看并人工纠错。显式调用 `breath(domain="journey")` 只返回阶段目录，选中其中的 `bucket_id` 后再用 `read_bucket(bucket_id)` 读取完整阶段记录。普通聊天 MCP 不能创建、追加、修改或删除 journey；公共 `hold` 即使传 `journey=True` 或 `domain="journey"` 也会拒绝，阶段状态只由 Haven 后台生命周期维护。
 
 维修与回填工具不应塞进普通聊天客户端的日常提示词。完整说明见 [`docs/Tool Guide.md`](docs/Tool%20Guide.md)。
 

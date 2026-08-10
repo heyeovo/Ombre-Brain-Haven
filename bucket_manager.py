@@ -456,6 +456,178 @@ class BucketManager:
         return self._load_bucket(file_path)
 
     # ---------------------------------------------------------
+    # Internal journey stage lifecycle (not exposed as MCP tools)
+    # 后台轨迹阶段生命周期（不暴露给普通聊天 LLM）
+    # ---------------------------------------------------------
+    async def list_journey_stages(self) -> list[dict]:
+        buckets = await self.list_all(include_archive=True)
+        return [
+            bucket for bucket in buckets
+            if "journey" in {
+                str(domain).strip().lower()
+                for domain in bucket.get("metadata", {}).get("domain", []) or []
+            }
+        ]
+
+    async def get_open_journey_stage(self) -> Optional[dict]:
+        open_stages = [
+            bucket for bucket in await self.list_journey_stages()
+            if str(bucket.get("metadata", {}).get("journey_status") or "").strip().lower() == "open"
+        ]
+        if len(open_stages) > 1:
+            raise RuntimeError("发现多个开放的 journey 阶段，需先人工修正。")
+        return open_stages[0] if open_stages else None
+
+    async def create_journey_stage(
+        self,
+        *,
+        content: str,
+        name: str,
+        stage_start: str,
+        summary: str = "",
+        status: str = "open",
+        stage_end: str = "",
+        source_bucket_ids: list[str] | None = None,
+        operation_id: str = "",
+        importance: int = 7,
+        valence: float = 0.5,
+        arousal: float = 0.3,
+    ) -> dict:
+        normalized_status = str(status or "open").strip().lower()
+        if normalized_status not in {"open", "closed"}:
+            raise ValueError("journey status 必须是 open 或 closed。")
+        if not str(content or "").strip() or not str(name or "").strip() or not str(stage_start or "").strip():
+            raise ValueError("创建 journey 阶段需要 content、name 和 stage_start。")
+        if normalized_status == "closed" and not str(stage_end or "").strip():
+            raise ValueError("创建已关闭 journey 阶段时必须提供 stage_end。")
+
+        operation_key = str(operation_id or "").strip()
+        stages = await self.list_journey_stages()
+        if operation_key:
+            for stage in stages:
+                operation_ids = stage.get("metadata", {}).get("journey_operation_ids", []) or []
+                if operation_key in {str(item) for item in operation_ids}:
+                    return {"status": "duplicate", "bucket_id": stage.get("id")}
+        if normalized_status == "open":
+            open_stages = [
+                stage for stage in stages
+                if str(stage.get("metadata", {}).get("journey_status") or "").strip().lower() == "open"
+            ]
+            if open_stages:
+                raise ValueError(f"已有开放的 journey 阶段: {open_stages[0].get('id')}")
+
+        source_ids = list(dict.fromkeys(str(item).strip() for item in source_bucket_ids or [] if str(item).strip()))
+        extra_metadata = {
+            "journey_status": normalized_status,
+            "journey_start": str(stage_start).strip(),
+            "journey_summary": str(summary or "").strip(),
+            "journey_source_bucket_ids": source_ids,
+            "journey_operation_ids": [operation_key] if operation_key else [],
+        }
+        if normalized_status == "closed":
+            extra_metadata["journey_end"] = str(stage_end).strip()
+
+        bucket_id = await self.create(
+            content=str(content).strip(),
+            tags=["journey"],
+            importance=importance,
+            domain=["journey"],
+            valence=valence,
+            arousal=arousal,
+            name=str(name).strip(),
+            event_time=str(stage_start).strip(),
+            source="journey_background",
+            extra_metadata=extra_metadata,
+        )
+        return {"status": "created", "bucket_id": bucket_id}
+
+    async def append_open_journey_stage(
+        self,
+        *,
+        content: str,
+        summary: str = "",
+        source_bucket_ids: list[str] | None = None,
+        operation_id: str = "",
+    ) -> dict:
+        addition = str(content or "").strip()
+        if not addition:
+            raise ValueError("追加 journey 阶段时 content 不能为空。")
+        operation_key = str(operation_id or "").strip()
+        if operation_key:
+            for existing_stage in await self.list_journey_stages():
+                existing_operations = existing_stage.get("metadata", {}).get("journey_operation_ids", []) or []
+                if operation_key in {str(item) for item in existing_operations}:
+                    return {"status": "duplicate", "bucket_id": existing_stage.get("id")}
+        stage = await self.get_open_journey_stage()
+        if not stage:
+            raise ValueError("当前没有开放的 journey 阶段。")
+
+        meta = stage.get("metadata", {})
+        operation_ids = [str(item) for item in meta.get("journey_operation_ids", []) or []]
+        if operation_key:
+            operation_ids.append(operation_key)
+
+        existing_source_ids = [str(item) for item in meta.get("journey_source_bucket_ids", []) or []]
+        merged_source_ids = list(dict.fromkeys(
+            existing_source_ids
+            + [str(item).strip() for item in source_bucket_ids or [] if str(item).strip()]
+        ))
+        current_content = str(stage.get("content") or "").rstrip()
+        updated_content = f"{current_content}\n\n{addition}" if current_content else addition
+        extra_metadata = {
+            "journey_operation_ids": operation_ids,
+            "journey_source_bucket_ids": merged_source_ids,
+        }
+        if str(summary or "").strip():
+            extra_metadata["journey_summary"] = str(summary).strip()
+
+        updated = await self.update(
+            stage["id"],
+            content=updated_content,
+            extra_metadata=extra_metadata,
+        )
+        if not updated:
+            raise RuntimeError(f"追加 journey 阶段失败: {stage['id']}")
+        return {"status": "appended", "bucket_id": stage["id"]}
+
+    async def close_open_journey_stage(
+        self,
+        *,
+        stage_end: str,
+        summary: str = "",
+        operation_id: str = "",
+    ) -> dict:
+        end_value = str(stage_end or "").strip()
+        if not end_value:
+            raise ValueError("关闭 journey 阶段时必须提供 stage_end。")
+        operation_key = str(operation_id or "").strip()
+        if operation_key:
+            for existing_stage in await self.list_journey_stages():
+                existing_operations = existing_stage.get("metadata", {}).get("journey_operation_ids", []) or []
+                if operation_key in {str(item) for item in existing_operations}:
+                    return {"status": "duplicate", "bucket_id": existing_stage.get("id")}
+        stage = await self.get_open_journey_stage()
+        if not stage:
+            raise ValueError("当前没有开放的 journey 阶段。")
+
+        meta = stage.get("metadata", {})
+        operation_ids = [str(item) for item in meta.get("journey_operation_ids", []) or []]
+        if operation_key:
+            operation_ids.append(operation_key)
+        extra_metadata = {
+            "journey_status": "closed",
+            "journey_end": end_value,
+            "journey_operation_ids": operation_ids,
+        }
+        if str(summary or "").strip():
+            extra_metadata["journey_summary"] = str(summary).strip()
+
+        updated = await self.update(stage["id"], extra_metadata=extra_metadata)
+        if not updated:
+            raise RuntimeError(f"关闭 journey 阶段失败: {stage['id']}")
+        return {"status": "closed", "bucket_id": stage["id"]}
+
+    # ---------------------------------------------------------
     # Move bucket between directories
     # 在目录间移动桶文件
     # ---------------------------------------------------------

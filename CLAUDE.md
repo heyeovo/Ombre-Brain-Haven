@@ -45,6 +45,8 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `decay_engine.py` | 衰减引擎，计算 score |
 | `embedding_engine.py` | 向量嵌入 + 相似度搜索 |
 | `import_memory.py` | 对话历史导入引擎（含成本追踪） |
+| `raw_events.py` | 隔离的原文 SQLite、显式原文检索、运行时/历史档案 scope、消息与导入幂等、私密白名单聊天档案分块归档 |
+| `raw_archive_import.py` | Claude 官方与 Kelivo 导出的流式白名单适配、预览审计、跨来源疑似重复、可见聊天＋推理档案打包及确认式上传 CLI；工具和附件内容不入 Haven |
 | `recall_policy.py` | 召回策略（vague 闸、相对日期、分词整词判断） |
 | `reflection_engine.py` | 反思/日印象引擎 |
 | `daily_review_engine.py` | 每日 4 点通过 Anthropic-compatible `/v1/messages` 按协作者生成第一人称日回顾；写 D 日时以 D-2、D-1 两个精确日历日的现存日回顾作连续性参考，闲聊用完整可见原文，工作用较早脉络摘要 + 最后 10 轮，结果不进记忆桶 |
@@ -147,7 +149,7 @@ GET /api/search?q=&simulate=&include_vector=&include_noise=&include_archive=&lim
 # include_vector=true → 附加 vector_similarity
 # include_noise=true → 包含噪声桶
 # record_stats 由后端控制（simulate 时不记录）
-GET /api/search-raw   # 原文检索（GET / JSON POST）
+GET /api/search-raw   # 原文检索（GET / JSON POST）；usage_scope=runtime|historical_archive|all
 ```
 
 ### 相似 & 合并
@@ -221,7 +223,7 @@ GET  /api/todos / POST /api/todos / POST /api/todos/{id}/writeback   # 待办
 GET  /api/reminders / POST /api/reminders / DELETE /api/reminders/{id}  # 照顾备忘
 GET  /api/persona / GET /api/portrait-state*                        # 画像
 GET  /api/moments / GET /api/edges / GET /api/word-map*              # 记忆图
-POST /api/ingest-raw / POST /api/memories                            # 原文写入
+POST /api/ingest-raw / POST /api/memories                            # 原文写入；前者兼容历史档案查重/分块归档动作
 GET  /api/daily-chat-memory/pending | /run | /confirm                # 每日聊天记忆
 GET|PATCH /api/daily-reviews                                            # 日回顾列表 / 手动微调
 POST /api/daily-reviews/run                                             # 指定日期手动生成日回顾

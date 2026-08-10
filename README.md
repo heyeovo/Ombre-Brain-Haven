@@ -40,7 +40,9 @@ flowchart LR
 
 ### 1. 原文层
 
-`raw_events.sqlite` 保存 user / assistant 原始对话，用于查原句、指定日期和长期记忆没有覆盖的细节。它不是普通语义记忆池，也不会自动整段注入。
+`raw_events.sqlite` 保存 user / assistant 原始对话，用于查原句、指定日期和长期记忆没有覆盖的细节。记录分为默认 `runtime` 与显式 `historical_archive` 两种 scope；普通日期召回、回顾、自动记忆和 handoff 默认只能读取 `runtime`，历史档案只有显式 `/api/search-raw` 或专用后台流程才能读取。它不是普通语义记忆池，也不会自动整段注入。
+
+Claude 官方与 Kelivo 导出由 `raw_archive_import.py` 流式筛选：未选窗口不会解析为标准化消息，也不会进入 Haven。白名单窗口会生成私密的“可见聊天＋推理”档案并保存到 `state/raw-archives/`，标准化可见正文仍写入同一 `raw_events` 底座；thinking/reasoning 只在私密档案中保留，不进入检索正文。tool use/result、toolEvents、附件、文件和运行统计不进入 Haven；完整官方导出继续只留在用户本地。
 
 询问“那天原话是什么”或给出明确日期时，应优先走原文 / 日期检索；当天没有证据，就不拿附近日期的语义记忆代替。
 
@@ -426,7 +428,7 @@ curl -sS -b ombre.cookies \
   http://127.0.0.1:8000/api/ingest-raw
 ```
 
-端点只接受 user / assistant 原文；system、developer、tool、记忆注入块和客户端自动附件会被拒绝或清理。相同 source + event hash 会去重。
+端点只接受 user / assistant 原文；system、developer、tool、记忆注入块和客户端自动附件会被拒绝或清理。相同 source + event hash 会去重；相同 source + source_event_id 但内容变化会报告 conflict，不会静默覆盖。历史导入传 `usage_scope=historical_archive`，并可使用 `check-canonical`、`archive-chunk`、`archive-commit` 三个认证动作做正式导入前查重和私密原档幂等上传。
 
 按原句和日期检索：
 
@@ -440,7 +442,7 @@ curl -sS -b ombre.cookies -G \
   http://127.0.0.1:8000/api/search-raw
 ```
 
-`/api/search-raw` 同时支持 GET 与 JSON POST，可用 `source`、`role`、`conversation_id`、`session_id`、`since`、`until` 过滤。`q` 留空时返回过滤范围内的最近原文。
+`/api/search-raw` 同时支持 GET 与 JSON POST，可用 `source`、`role`、`conversation_id`、`session_id`、`since`、`until`、`usage_scope` 过滤。默认只查 `runtime`；历史档案必须显式传 `usage_scope=historical_archive`，人工审计可传 `all`。`q` 留空时返回过滤范围内的最近原文。
 
 ### Claude Code / Codex Hook 端点
 

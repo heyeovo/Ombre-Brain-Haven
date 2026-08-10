@@ -12259,6 +12259,8 @@ def _raw_ingest_events_from_body(
         "conversation_id": body.get("conversation_id") or fallback_conversation_id,
         "session_id": body.get("session_id") or fallback_session_id,
         "client": body.get("client"),
+        "usage_scope": body.get("usage_scope"),
+        "import_id": body.get("import_id"),
     }
     for event in events:
         for key, value in common.items():
@@ -12280,6 +12282,34 @@ async def api_ingest_raw(request):
         body = {}
     if not isinstance(body, dict):
         return JSONResponse({"error": "request body must be an object"}, status_code=400)
+
+    action = str(body.get("action") or "").strip().lower()
+    try:
+        if action == "check-canonical":
+            hashes = body.get("canonical_hashes") if isinstance(body.get("canonical_hashes"), list) else []
+            return JSONResponse({"ok": True, "matches": raw_event_store.find_canonical_matches(hashes)})
+        if action == "archive-chunk":
+            return JSONResponse(
+                raw_event_store.put_archive_chunk(
+                    import_id=str(body.get("import_id") or ""),
+                    index=int(body.get("index") or 0),
+                    total_chunks=int(body.get("total_chunks") or 0),
+                    data_base64=str(body.get("data_base64") or ""),
+                    chunk_sha256=str(body.get("chunk_sha256") or ""),
+                    source=str(body.get("source") or "raw_archive"),
+                    source_file_sha256=str(body.get("source_file_sha256") or ""),
+                    selection_hash=str(body.get("selection_hash") or ""),
+                    archive_sha256=str(body.get("archive_sha256") or ""),
+                    metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else {},
+                )
+            )
+        if action == "archive-commit":
+            return JSONResponse(raw_event_store.commit_archive(str(body.get("import_id") or "")))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.warning("raw archive action failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
     header_session_id = str(request.headers.get("X-Ombre-Session-Id") or "").strip()
     events = _raw_ingest_events_from_body(
@@ -12329,6 +12359,7 @@ async def api_search_raw(request):
             session_id=str(value("session_id", "") or ""),
             since=str(value("since", "") or ""),
             until=str(value("until", "") or ""),
+            usage_scope=str(value("usage_scope", "runtime") or "runtime"),
         )
         return JSONResponse(result)
     except Exception as exc:

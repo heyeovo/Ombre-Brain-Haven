@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any
@@ -14,6 +16,9 @@ logger = logging.getLogger("ombre_brain.raw_events")
 
 ALLOWED_RAW_ROLES = {"user", "assistant"}
 RAW_EVENT_DEFAULT_SOURCE = "raw"
+RAW_EVENT_RUNTIME_SCOPE = "runtime"
+RAW_EVENT_ARCHIVE_SCOPE = "historical_archive"
+ALLOWED_RAW_USAGE_SCOPES = {RAW_EVENT_RUNTIME_SCOPE, RAW_EVENT_ARCHIVE_SCOPE}
 
 INJECTION_SECTION_RE = re.compile(
     r"(?im)^\s*(?:"
@@ -106,8 +111,10 @@ class RawEventStore:
             "state",
         )
         self.db_path = str(raw_cfg.get("db_path") or os.path.join(state_dir, "raw_events.sqlite"))
+        self.archive_dir = str(raw_cfg.get("archive_dir") or os.path.join(state_dir, "raw-archives"))
         self.max_ingest_batch = max(1, min(5000, int(raw_cfg.get("max_ingest_batch", 1000))))
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        os.makedirs(self.archive_dir, exist_ok=True)
         self.fts_enabled = False
         self._init_db()
 
@@ -133,13 +140,76 @@ class RawEventStore:
                 session_id TEXT NOT NULL DEFAULT '',
                 client TEXT NOT NULL DEFAULT '',
                 metadata_json TEXT NOT NULL DEFAULT '{}',
+                usage_scope TEXT NOT NULL DEFAULT 'runtime',
+                canonical_hash TEXT NOT NULL DEFAULT '',
+                import_id TEXT NOT NULL DEFAULT '',
                 UNIQUE(source, event_hash)
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS raw_imports (
+                import_id TEXT PRIMARY KEY,
+                source TEXT NOT NULL DEFAULT '',
+                source_file_sha256 TEXT NOT NULL DEFAULT '',
+                selection_hash TEXT NOT NULL DEFAULT '',
+                archive_sha256 TEXT NOT NULL DEFAULT '',
+                archive_path TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'staging',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_imports_file_selection "
+            "ON raw_imports(source, source_file_sha256, selection_hash) "
+            "WHERE source_file_sha256 != '' AND selection_hash != ''"
+        )
+        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(raw_events)").fetchall()}
+        if "usage_scope" not in columns:
+            conn.execute(
+                "ALTER TABLE raw_events ADD COLUMN usage_scope TEXT NOT NULL DEFAULT 'runtime'"
+            )
+        if "canonical_hash" not in columns:
+            conn.execute(
+                "ALTER TABLE raw_events ADD COLUMN canonical_hash TEXT NOT NULL DEFAULT ''"
+            )
+        if "import_id" not in columns:
+            conn.execute(
+                "ALTER TABLE raw_events ADD COLUMN import_id TEXT NOT NULL DEFAULT ''"
+            )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_events_created ON raw_events(created_at DESC, id DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_events_source ON raw_events(source, created_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_raw_events_role ON raw_events(role, created_at DESC)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_raw_events_scope_created "
+            "ON raw_events(usage_scope, created_at DESC, id DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_raw_events_canonical "
+            "ON raw_events(canonical_hash) WHERE canonical_hash != ''"
+        )
+        missing_canonical = conn.execute(
+            "SELECT id, role, text, created_at FROM raw_events WHERE canonical_hash = ''"
+        ).fetchall()
+        if missing_canonical:
+            conn.executemany(
+                "UPDATE raw_events SET canonical_hash = ? WHERE id = ?",
+                [
+                    (
+                        self.canonical_event_hash(
+                            role=str(row["role"] or ""),
+                            text=str(row["text"] or ""),
+                            created_at=str(row["created_at"] or ""),
+                        ),
+                        int(row["id"]),
+                    )
+                    for row in missing_canonical
+                ],
+            )
         conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_events_source_event_id
@@ -161,12 +231,174 @@ class RawEventStore:
         conn.commit()
         conn.close()
 
+    def find_canonical_matches(self, hashes: list[str], *, limit: int = 5000) -> dict[str, list[dict[str, Any]]]:
+        cleaned = list(dict.fromkeys(str(value or "").strip() for value in hashes if str(value or "").strip()))
+        cleaned = cleaned[: max(1, min(int(limit or 5000), 5000))]
+        if not cleaned:
+            return {}
+        result: dict[str, list[dict[str, Any]]] = {}
+        conn = self._connect()
+        try:
+            for start in range(0, len(cleaned), 500):
+                batch = cleaned[start : start + 500]
+                placeholders = ",".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"SELECT id, source, source_event_id, conversation_id, created_at, canonical_hash, usage_scope "
+                    f"FROM raw_events WHERE canonical_hash IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                for row in rows:
+                    result.setdefault(str(row["canonical_hash"]), []).append(
+                        {
+                            "id": int(row["id"]),
+                            "source": row["source"],
+                            "source_event_id": row["source_event_id"],
+                            "conversation_id": row["conversation_id"],
+                            "created_at": row["created_at"],
+                            "usage_scope": row["usage_scope"],
+                        }
+                    )
+        finally:
+            conn.close()
+        return result
+
+    @staticmethod
+    def _clean_import_id(value: Any) -> str:
+        import_id = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(value or "").strip())[:120]
+        if not import_id:
+            raise ValueError("missing import_id")
+        return import_id
+
+    def put_archive_chunk(
+        self,
+        *,
+        import_id: str,
+        index: int,
+        total_chunks: int,
+        data_base64: str,
+        chunk_sha256: str,
+        source: str,
+        source_file_sha256: str,
+        selection_hash: str,
+        archive_sha256: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        safe_id = self._clean_import_id(import_id)
+        safe_index = int(index)
+        safe_total = int(total_chunks)
+        if safe_index < 0 or safe_total < 1 or safe_index >= safe_total:
+            raise ValueError("invalid archive chunk position")
+        try:
+            payload = base64.b64decode(str(data_base64 or ""), validate=True)
+        except Exception as exc:
+            raise ValueError("invalid archive chunk encoding") from exc
+        if len(payload) > 2 * 1024 * 1024:
+            raise ValueError("archive chunk exceeds 2 MiB")
+        digest = hashlib.sha256(payload).hexdigest()
+        if digest != str(chunk_sha256 or "").strip().lower():
+            raise ValueError("archive chunk hash mismatch")
+        staging_dir = os.path.abspath(os.path.join(self.archive_dir, ".staging", safe_id))
+        archive_root = os.path.abspath(self.archive_dir)
+        if os.path.commonpath([archive_root, staging_dir]) != archive_root:
+            raise ValueError("invalid archive staging path")
+        os.makedirs(staging_dir, exist_ok=True)
+        chunk_path = os.path.join(staging_dir, f"{safe_index:08d}.part")
+        if os.path.exists(chunk_path):
+            with open(chunk_path, "rb") as existing:
+                existing_hash = hashlib.sha256(existing.read()).hexdigest()
+            if existing_hash != digest:
+                raise ValueError("archive chunk conflict")
+            status = "duplicate"
+        else:
+            with open(chunk_path, "wb") as stream:
+                stream.write(payload)
+            status = "stored"
+        now = self._now_iso()
+        manifest = {
+            **(metadata or {}),
+            "total_chunks": safe_total,
+            "archive_sha256": str(archive_sha256 or "").strip().lower(),
+        }
+        conn = self._connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO raw_imports
+                (import_id, source, source_file_sha256, selection_hash, archive_sha256,
+                 status, metadata_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'staging', ?, ?, ?)
+                ON CONFLICT(import_id) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    metadata_json = excluded.metadata_json
+                """,
+                (
+                    safe_id,
+                    self._clean_source(source),
+                    str(source_file_sha256 or "").strip().lower(),
+                    str(selection_hash or "").strip().lower(),
+                    str(archive_sha256 or "").strip().lower(),
+                    json.dumps(manifest, ensure_ascii=False, sort_keys=True),
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True, "status": status, "import_id": safe_id, "index": safe_index}
+
+    def commit_archive(self, import_id: str) -> dict[str, Any]:
+        safe_id = self._clean_import_id(import_id)
+        conn = self._connect()
+        row = conn.execute("SELECT * FROM raw_imports WHERE import_id = ?", (safe_id,)).fetchone()
+        conn.close()
+        if not row:
+            raise ValueError("archive import not found")
+        if row["status"] == "archived" and os.path.isfile(row["archive_path"]):
+            return {"ok": True, "status": "duplicate", "import_id": safe_id, "archive_path": row["archive_path"]}
+        metadata = json.loads(row["metadata_json"] or "{}")
+        total_chunks = int(metadata.get("total_chunks") or 0)
+        expected_hash = str(row["archive_sha256"] or "").strip().lower()
+        staging_dir = os.path.join(self.archive_dir, ".staging", safe_id)
+        chunk_paths = [os.path.join(staging_dir, f"{index:08d}.part") for index in range(total_chunks)]
+        if total_chunks < 1 or not all(os.path.isfile(path) for path in chunk_paths):
+            raise ValueError("archive chunks incomplete")
+        final_path = os.path.abspath(os.path.join(self.archive_dir, f"{safe_id}.zip"))
+        temp_path = final_path + ".tmp"
+        digest = hashlib.sha256()
+        with open(temp_path, "wb") as output:
+            for chunk_path in chunk_paths:
+                with open(chunk_path, "rb") as source_stream:
+                    while True:
+                        chunk = source_stream.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                        output.write(chunk)
+        if digest.hexdigest() != expected_hash:
+            os.remove(temp_path)
+            raise ValueError("archive hash mismatch")
+        os.replace(temp_path, final_path)
+        shutil.rmtree(staging_dir)
+        now = self._now_iso()
+        conn = self._connect()
+        try:
+            conn.execute(
+                "UPDATE raw_imports SET status = 'archived', archive_path = ?, updated_at = ? WHERE import_id = ?",
+                (final_path, now, safe_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True, "status": "archived", "import_id": safe_id, "archive_path": final_path}
+
     def ingest(self, events: list[dict[str, Any]], *, source: str = "") -> dict[str, Any]:
         safe_source = self._clean_source(source)
         now = self._now_iso()
         items = []
         inserted = 0
         duplicate = 0
+        conflict = 0
         rejected = 0
         for raw in list(events or [])[: self.max_ingest_batch]:
             normalized, reason = self._normalize_event(raw, default_source=safe_source, ingested_at=now)
@@ -183,6 +415,8 @@ class RawEventStore:
             status, row_id = self._insert_event(normalized)
             if status == "inserted":
                 inserted += 1
+            elif status == "conflict":
+                conflict += 1
             else:
                 duplicate += 1
             items.append(
@@ -198,6 +432,7 @@ class RawEventStore:
             "ok": True,
             "inserted": inserted,
             "duplicate": duplicate,
+            "conflict": conflict,
             "rejected": rejected,
             "items": items,
         }
@@ -213,6 +448,7 @@ class RawEventStore:
         session_id: str = "",
         since: str = "",
         until: str = "",
+        usage_scope: str = RAW_EVENT_RUNTIME_SCOPE,
     ) -> dict[str, Any]:
         safe_limit = max(1, min(100, int(limit or 10)))
         cleaned_query = str(query or "").strip()
@@ -223,6 +459,7 @@ class RawEventStore:
             session_id=session_id,
             since=since,
             until=until,
+            usage_scope=usage_scope,
         )
         rows = self._search_fts(cleaned_query, filters, params, safe_limit) if cleaned_query else []
         if len(rows) < safe_limit:
@@ -247,6 +484,7 @@ class RawEventStore:
         source: str = "",
         conversation_id: str = "",
         session_id: str = "",
+        usage_scope: str = RAW_EVENT_RUNTIME_SCOPE,
     ) -> list[dict[str, Any]]:
         try:
             raw_limit = int(limit)
@@ -257,6 +495,7 @@ class RawEventStore:
             source=source,
             conversation_id=conversation_id,
             session_id=session_id,
+            usage_scope=usage_scope,
         )
         conn = self._connect()
         if safe_limit > 0:
@@ -328,8 +567,9 @@ class RawEventStore:
                 """
                 INSERT OR IGNORE INTO raw_events
                 (source, source_event_id, event_hash, role, text, created_at, ingested_at,
-                 conversation_id, session_id, client, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 conversation_id, session_id, client, metadata_json, usage_scope,
+                 canonical_hash, import_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event["source"],
@@ -343,6 +583,9 @@ class RawEventStore:
                     event["session_id"],
                     event["client"],
                     event["metadata_json"],
+                    event["usage_scope"],
+                    event["canonical_hash"],
+                    event["import_id"],
                 ),
             )
             if cursor.rowcount:
@@ -367,6 +610,15 @@ class RawEventStore:
                 conn.commit()
                 return "inserted", row_id
             conn.commit()
+            if event.get("source_event_id"):
+                existing = conn.execute(
+                    "SELECT id, event_hash FROM raw_events "
+                    "WHERE source = ? AND source_event_id = ? LIMIT 1",
+                    (event["source"], event["source_event_id"]),
+                ).fetchone()
+                if existing:
+                    status = "duplicate" if existing["event_hash"] == event["event_hash"] else "conflict"
+                    return status, int(existing["id"])
             row_id = self._find_existing_id(conn, event)
             return "duplicate", row_id
         finally:
@@ -409,7 +661,11 @@ class RawEventStore:
         conversation_id = str(raw.get("conversation_id") or raw.get("thread_id") or "").strip()
         session_id = str(raw.get("session_id") or "").strip()
         client = str(raw.get("client") or "").strip()
-        created_at = self._clean_time(raw.get("created_at") or raw.get("timestamp") or raw.get("time") or ingested_at)
+        usage_scope = self._clean_usage_scope(raw.get("usage_scope"))
+        raw_time = raw.get("created_at") or raw.get("timestamp") or raw.get("time")
+        created_at = self._clean_time(
+            raw_time if raw_time is not None else ("" if usage_scope == RAW_EVENT_ARCHIVE_SCOPE else ingested_at)
+        )
         metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
         metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
         event_hash = self._event_hash(
@@ -420,6 +676,11 @@ class RawEventStore:
             created_at=created_at,
             conversation_id=conversation_id,
             session_id=session_id,
+        )
+        canonical_hash = self.canonical_event_hash(
+            role=role,
+            text=text,
+            created_at=created_at,
         )
         return {
             "source": source,
@@ -433,6 +694,9 @@ class RawEventStore:
             "session_id": session_id,
             "client": client,
             "metadata_json": metadata_json,
+            "usage_scope": usage_scope,
+            "canonical_hash": canonical_hash,
+            "import_id": str(raw.get("import_id") or "").strip()[:160],
         }, ""
 
     @staticmethod
@@ -443,9 +707,12 @@ class RawEventStore:
     @staticmethod
     def _clean_time(value: Any) -> str:
         text = str(value or "").strip()
-        if not text:
-            return RawEventStore._now_iso()
         return text[:80]
+
+    @staticmethod
+    def _clean_usage_scope(value: Any) -> str:
+        scope = str(value or RAW_EVENT_RUNTIME_SCOPE).strip().lower()
+        return scope if scope in ALLOWED_RAW_USAGE_SCOPES else RAW_EVENT_RUNTIME_SCOPE
 
     @staticmethod
     def _now_iso() -> str:
@@ -480,6 +747,20 @@ class RawEventStore:
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     @staticmethod
+    def canonical_event_hash(*, role: str, text: str, created_at: str = "") -> str:
+        normalized_text = re.sub(r"\s+", " ", str(text or "")).strip()
+        payload = json.dumps(
+            {
+                "role": str(role or "").strip().lower(),
+                "text": normalized_text,
+                "created_at": str(created_at or "").strip(),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
     def _row_to_event(row: sqlite3.Row) -> dict[str, Any]:
         metadata = {}
         try:
@@ -497,6 +778,9 @@ class RawEventStore:
             "conversation_id": row["conversation_id"],
             "session_id": row["session_id"],
             "client": row["client"],
+            "usage_scope": row["usage_scope"],
+            "canonical_hash": row["canonical_hash"],
+            "import_id": row["import_id"],
             "metadata": metadata,
         }
 
@@ -509,6 +793,7 @@ class RawEventStore:
         session_id: str = "",
         since: str = "",
         until: str = "",
+        usage_scope: str = RAW_EVENT_RUNTIME_SCOPE,
     ) -> tuple[str, list[Any]]:
         clauses = []
         params: list[Any] = []
@@ -531,6 +816,10 @@ class RawEventStore:
         if until:
             clauses.append("e.created_at <= ?")
             params.append(str(until))
+        scope = str(usage_scope or "").strip().lower()
+        if scope != "all":
+            clauses.append("e.usage_scope = ?")
+            params.append(self._clean_usage_scope(scope))
         return (" AND " + " AND ".join(clauses)) if clauses else "", params
 
     def _search_fts(self, query: str, filters: str, params: list[Any], limit: int) -> list[sqlite3.Row]:

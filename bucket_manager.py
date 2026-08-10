@@ -145,7 +145,7 @@ class BucketManager:
         self._migrate_event_time()
 
     def _migrate_event_time(self) -> None:
-        """Backfill event_time = created for buckets that don't have it yet."""
+        """Backfill missing event_time from legacy date, then created."""
         all_dirs = [self.permanent_dir, self.dynamic_dir, self.feel_dir,
                      self.archive_dir]
         migrated = 0
@@ -159,12 +159,14 @@ class BucketManager:
                     file_path = os.path.join(root, filename)
                     try:
                         post = frontmatter.load(file_path)
-                        if "event_time" in post.metadata:
+                        if str(post.get("event_time") or "").strip():
                             continue
+                        legacy_date = post.get("date", "")
                         created = post.get("created", "")
-                        if not created:
+                        event_time = legacy_date or created
+                        if not event_time:
                             continue
-                        post["event_time"] = created
+                        post["event_time"] = event_time
                         with open(file_path, "w", encoding="utf-8") as f:
                             f.write(frontmatter.dumps(post))
                         migrated += 1
@@ -173,7 +175,7 @@ class BucketManager:
         if migrated:
             logger.info(
                 f"event_time migration: backfilled {migrated} buckets "
-                f"with event_time=created"
+                f"from legacy date or created"
             )
 
     # Runtime-tunable scoring keys whitelist (for /api/scoring-config)

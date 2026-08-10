@@ -1160,6 +1160,8 @@ def _filter_by_created_date(
 
 def _bucket_matches_breath_date(bucket: dict, date_key: str) -> bool:
     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    if meta.get("event_time"):
+        return local_date_key(meta.get("event_time")) == date_key
     if meta.get("date"):
         return local_date_key(meta.get("date")) == date_key
     for key in ("created", "updated_at", "last_active"):
@@ -1170,7 +1172,7 @@ def _bucket_matches_breath_date(bucket: dict, date_key: str) -> bool:
 
 def _breath_date_bucket_sort_key(bucket: dict) -> tuple[str, int]:
     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-    date_value = str(meta.get("date") or "")
+    date_value = str(meta.get("event_time") or meta.get("date") or "")
     if not date_value:
         date_value = max(str(meta.get(key) or "") for key in ("updated_at", "last_active", "created"))
     try:
@@ -5241,7 +5243,8 @@ def _bucket_date_meta_parts(bucket: dict | None = None, moment: dict | None = No
     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
     moment_meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
     event_date = _date_yyyy_mm_dd(
-        meta.get("date")
+        meta.get("event_time")
+        or meta.get("date")
         or moment_meta.get("bucket_date")
         or moment_meta.get("date")
     )

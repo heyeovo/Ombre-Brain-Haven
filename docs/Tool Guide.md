@@ -12,7 +12,7 @@
 - 新窗口第一轮，即使用户直接问“昨天/昨晚/前天/记不记得昨天/昨天做了什么/昨天聊了什么”：先 breath(mode="handoff") 恢复身份和生活背景；细节不够时再 breath(query="日期 + 主题")。
 - 还记得/之前/某个暗号/项目/偏好/边界：breath(query="关键词或原句")。
 - 如果想查明确日期的具体普通记忆：breath(date="YYYY-MM-DD") 或 breath(query="YYYY-MM-DD + 主题")。支持 2026-06-15、2026.06.15、2026年6月15日、25年6月15日、6月15日；没有年份的“6月15日”默认按今年查。
-- 日期查询优先看 bucket 的事件日期 date；没有 date 的旧桶才回退看 created/updated_at/last_active。带了 date 的桶不会因为创建日期误入别的日期。
+- 日期查询优先看 bucket 的事件时间 event_time，并按本地年月日匹配；没有 event_time 时兼容旧 date，两者都没有的旧桶才回退看 created/updated_at/last_active。带了事件时间的桶不会因为创建日期误入别的日期。
 - 日印象不会混进普通日期查询；想读日印象必须显式 breath(domain="daily_impression")，也可以加 date，例如 breath(domain="daily_impression", date="2026-06-15")。
 - 刚刚/刚才/上一句/刚说的暗号：优先看消息中的Just Now Chat Context，不要默认 breath(query="刚刚...")。
 - 如果上下文里出现 `[bucket_id:...]`，而本轮需要更多细节：用 read_bucket(bucket_id)。不要猜新 id。

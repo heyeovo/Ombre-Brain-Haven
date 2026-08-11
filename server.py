@@ -8623,6 +8623,157 @@ async def resurface(max_results: int = 1, include_archive: bool = True, max_toke
 # Tool 1.5: read_bucket — exact archive-cabinet read
 # 工具 1.5：read_bucket — 按 ID 精确读桶
 # =============================================================
+def _daily_review_date_range(
+    start_date: str = "",
+    end_date: str = "",
+    last_days: int = 0,
+    *,
+    today=None,
+) -> tuple[str, str, list[str]]:
+    """Resolve an inclusive explicit range or the latest ended Hong Kong calendar days."""
+    safe_start = str(start_date or "").strip()
+    safe_end = str(end_date or "").strip()
+    try:
+        safe_last_days = int(last_days or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("last_days must be an integer") from exc
+    if safe_start or safe_end:
+        if not safe_start or not safe_end:
+            raise ValueError("start_date and end_date must be provided together")
+        if safe_last_days > 0:
+            raise ValueError("use either start_date/end_date or last_days, not both")
+        try:
+            start_value = datetime.strptime(safe_start, "%Y-%m-%d").date()
+            end_value = datetime.strptime(safe_end, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise ValueError("start_date and end_date must be YYYY-MM-DD") from exc
+        if start_value > end_value:
+            raise ValueError("start_date cannot be after end_date")
+        if (end_value - start_value).days >= 366:
+            raise ValueError("daily review range cannot exceed 366 days")
+    else:
+        days = 7 if safe_last_days <= 0 else safe_last_days
+        if days < 1 or days > 366:
+            raise ValueError("last_days must be between 1 and 366")
+        local_today = today or datetime.now(LOCAL_TZ).date()
+        end_value = local_today - timedelta(days=1)
+        start_value = end_value - timedelta(days=days - 1)
+    dates = [
+        (start_value + timedelta(days=offset)).isoformat()
+        for offset in range((end_value - start_value).days + 1)
+    ]
+    return start_value.isoformat(), end_value.isoformat(), dates
+
+
+def _resolve_daily_review_persona(persona_id: str = "") -> dict:
+    personas = [
+        item for item in gateway_state_store.list_cc_personas()
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    ]
+    requested = str(persona_id or "").strip()
+    if requested:
+        persona = next((item for item in personas if str(item.get("id") or "") == requested), None)
+        if not persona:
+            raise ValueError("persona_id not found")
+        return persona
+    if len(personas) == 1:
+        return personas[0]
+    if not personas:
+        raise ValueError("no persona is available for daily reviews")
+    available = ", ".join(str(item.get("id") or "") for item in personas)
+    raise ValueError(f"persona_id is required; available: {available}")
+
+
+def _daily_review_payload_with_budget(payload: dict, max_tokens: int) -> dict:
+    budget = _int_between(max_tokens, 4000, 200, 20000)
+    payload["max_tokens"] = budget
+    payload["truncated"] = False
+    payload["truncated_dates"] = []
+
+    def payload_tokens() -> int:
+        return count_tokens_approx(_json_lib.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    guard = 0
+    while payload_tokens() > budget and payload.get("reviews") and guard < 1000:
+        guard += 1
+        row = payload["reviews"][-1]
+        content = str(row.get("content") or "")
+        if content:
+            overflow = max(1, payload_tokens() - budget)
+            current_tokens = count_tokens_approx(content)
+            target = max(0, current_tokens - overflow - 8)
+            trimmed = _trim_text_to_token_budget(content, target)
+            if trimmed == content and target < current_tokens:
+                trimmed = content[: max(0, len(content) - max(8, overflow * 2))].rstrip()
+            row["content"] = trimmed
+            row["content_truncated"] = True
+            payload["truncated"] = True
+            if trimmed:
+                continue
+        removed = payload["reviews"].pop()
+        payload["truncated_dates"].insert(0, str(removed.get("date") or ""))
+        payload["truncated"] = True
+    return payload
+
+
+@mcp.tool()
+async def read_daily_reviews(
+    start_date: str = "",
+    end_date: str = "",
+    last_days: int = 0,
+    persona_id: str = "",
+    max_tokens: int = 4000,
+) -> dict:
+    """只读读取独立日回顾。显式日期范围为闭区间；last_days 默认读取截至昨天的最近 7 个香港日历日。返回正文、协作者、用户编辑状态、更新时间和缺失日期，不返回来源会话 ID，也不进入普通记忆召回。"""
+    try:
+        resolved_start, resolved_end, expected_dates = _daily_review_date_range(
+            start_date=start_date,
+            end_date=end_date,
+            last_days=last_days,
+        )
+        persona = _resolve_daily_review_persona(persona_id)
+        safe_persona_id = str(persona.get("id") or "")
+        rows = gateway_state_store.list_daily_reviews(
+            profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
+            persona_id=safe_persona_id,
+            start_date=resolved_start,
+            end_date=resolved_end,
+            limit=len(expected_dates),
+        )
+        by_date = {
+            str(item.get("review_date") or ""): item
+            for item in rows
+            if isinstance(item, dict) and str(item.get("review_date") or "")
+        }
+        public_rows = []
+        for review_date in expected_dates:
+            item = by_date.get(review_date)
+            if not item:
+                continue
+            public_rows.append({
+                "date": review_date,
+                "content": str(item.get("content") or ""),
+                "persona_id": safe_persona_id,
+                "persona_name": str(persona.get("name") or safe_persona_id),
+                "edited_by_user": bool(item.get("edited_by_user")),
+                "updated_at": str(item.get("updated_at") or ""),
+            })
+        payload = {
+            "status": "success",
+            "start_date": resolved_start,
+            "end_date": resolved_end,
+            "persona": {
+                "id": safe_persona_id,
+                "name": str(persona.get("name") or safe_persona_id),
+            },
+            "reviews": public_rows,
+            "missing_dates": [date_key for date_key in expected_dates if date_key not in by_date],
+        }
+        return _daily_review_payload_with_budget(payload, max_tokens)
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc), "reviews": [], "missing_dates": []}
+
+
 @mcp.tool()
 async def read_bucket(bucket_id: str) -> str:
     """按 bucket_id 精确读取完整记忆桶；包含正文和所有年轮。只读，不刷新活跃度。"""
@@ -11555,6 +11706,15 @@ def _automation_public_run(run: dict) -> dict:
         "daily_review_count": len(snapshot.get("daily_reviews") or []),
         "missing_daily_review_dates": list(snapshot.get("missing_daily_review_dates") or []),
         "material_count": len(snapshot.get("materials") or []),
+        "materials": [
+            {
+                "id": str(item.get("bucket_id") or ""),
+                "name": str(item.get("bucket_name") or item.get("bucket_id") or ""),
+                "material_kinds": [str(kind) for kind in item.get("material_kinds", []) or []],
+            }
+            for item in snapshot.get("materials", []) or []
+            if isinstance(item, dict) and str(item.get("bucket_id") or "")
+        ],
     }
     return payload
 

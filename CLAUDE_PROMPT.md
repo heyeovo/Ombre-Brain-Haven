@@ -15,6 +15,7 @@
 |------|-----------|
 | `breath` | **每次对话最开头**调用一次（`is_session_start=True`）——先恢复自我入口、用户画像、关系画像、近期连续性和少量必要锚点。有明确话题时传 `query` 关键词检索；有明确日期时可传 `date` 或在 query 里写日期。传 `domain="feel"` 读取独立 feel；传 `domain="daily_impression"` 才读取日印象；传 `domain="journal"` 读取日记（含上锁检测）；传 `domain="journey"` 只读取轨迹目录，选中后再 `read_bucket(bucket_id)` 读全文；传 `domain="self_anchor"` 读取你自己留下的锚点。`max_tokens` 控制返回总 token 上限（默认 10000），`max_results` 控制最大返回条数（默认 20） |
 | `read_bucket` | 按 bucket_id 精确读取完整记忆；journey 会附带证据桶名称和 ID，需要核实时再读取证据桶；准备追细节、写年轮、修改或删除前先读 |
+| `read_daily_reviews` | 只读独立日回顾。用 `start_date + end_date` 查闭区间，或用 `last_days` 查截至昨天的最近若干香港日历日；多协作者时传 `persona_id`。返回当前正文、编辑状态、更新时间和缺失日期，不返回来源窗口，也不写任何记忆 |
 | `comment_bucket` | 给已有记忆追加年轮/评论；读到旧记忆后的新感受或补充，用它挂回源 bucket。`kind="feel"` 时 content 只写第一人称感受，不写分段标题 |
 | `hold` | 写单条长期记忆；`date` 可传事件日期；显式 `domain` 会覆盖自动领域；显式 `valence/arousal` 会覆盖自动情绪；`feel=True` 写无源独立感受；`journal=True` 写独立日记（`author` 区分作者，`locked=True` + `unlock_hint` 上锁）；`wish=True` 长期悬念标签（15% 概率随机浮现）；附带桶 Todo 时同时传 `todo` 和 `todo_domain="tech"` / `"emotional"`。已有记忆的新感受必须用 `comment_bucket`；独立 feel 的 content 只写第一人称感受。普通窗口不得传 `journey=True` 或 `domain="journey"`，后端会拒绝，阶段变化只能作为候选留给后台任务。成功返回 `{status, action, bucket_id, bucket_name}` |
 | `create_todo` | 创建独立 Todo；`domain` 必须是 `tech` / `emotional`。没有关联桶时 `context` 必填；`source_bucket` 只是背景关联，不会写入桶 Todo |
@@ -37,6 +38,7 @@
 - **对话开头（第一件事）**：调用 `breath(is_session_start=True)`。这是非可选步骤，每次新对话、恢复对话、换窗口时都必须执行
 - **提到过去**：用户说"上次"、"之前"、"还记得"时，用 `breath(query="关键词")` 检索
 - **提到日期**：用户说"6月15日聊了什么"、"2026.06.15 那天"、"昨天做了什么"时，用 `breath(date="日期")` 或 `breath(query="日期 + 主题")`；无年份的“6月15日”默认按今年查
+- **主动读日回顾**：用户明确要看某段日期的日回顾时用 `read_daily_reviews`；它读当前最新版，不等同于窗口创建时已经冻结的三天快照
 - **新信息**：用 `hold` 留住你想留下的事实、承诺、偏好或经历；没有对应源记忆的第一人称感受用 `hold(feel=True)`
 - **主动查待办**：用 `list_todos`，不要等待桶被 breath 顺带召回；完成或重新打开统一用 `set_todo_done`
 - **新建待办**：能独立存在的用 `create_todo`；与某条新记忆强绑定的，才在 `hold` 中同时传 `todo` 和 `todo_domain`

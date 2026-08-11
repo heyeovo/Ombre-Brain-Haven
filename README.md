@@ -119,7 +119,7 @@ Daily Reflection 可根据当天聊天、已有 auto-memory 产物和近期记�
 
 Haven 已有通用自动化持久底座，并以 `weekly_journey` 作为第一个任务类型。它按香港时区的完整自然周读取当前开放 journey、日回顾、本周新桶、本周独立 feel 与旧桶本周新增的 feel 年轮，按 bucket ID 去重后只生成 `no_change`、`append_current` 或 `transition` 候选。候选与输入快照保存在独立 SQLite 状态中，不进入普通记忆、召回或关联扩散。
 
-候选只能经认证接口人工编辑、拒绝或确认。编辑保存为新 revision 并保留原始 preview；确认只接收页面已展示 revision 的 hash，由服务端冻结 approved payload/hash。白名单执行器当前只注册 `weekly_journey`：`no_change` 零写入，`append_current` 只追加开放阶段，`transition` 使用独立 `:close` / `:create` operation ID。确认前若开放阶段、批准稿或证据桶已变化，会保存可解释冲突而不覆盖当前状态；重复确认与 close 成功、create 失败后的重试保持幂等。当前仍没有定时线程，候选只可手动生成，未确认候选不会改变 journey。
+候选只能经认证接口人工编辑、拒绝或确认。Dashboard 自动化设置页显示只读状态、最近运行、待确认数量和手动生成入口；关系轨迹页显示输入完整性、原始 preview、当前 draft/revision/hash、证据桶和预计差异。编辑保存为新 revision 并保留原始 preview；确认只接收页面已展示 revision 的 hash，由服务端冻结 approved payload/hash。白名单执行器当前只注册 `weekly_journey`：`no_change` 零写入，`append_current` 只追加开放阶段，`transition` 使用独立 `:close` / `:create` operation ID。确认前若开放阶段、批准稿或证据桶已变化，会保存可解释冲突而不覆盖当前状态；重复确认与 close 成功、create 失败后的重试保持幂等。当前仍没有定时线程，候选只可手动生成，未确认和已拒绝候选不会改变 journey。
 
 即使使用 `auto`，候选仍需经过记忆写入、去重和合并边界。原始聊天继续留在 raw events；自动记忆只保存脱水后仍值得长期带走的部分。
 
@@ -499,6 +499,7 @@ Codex 接线时注意：
 | `grow` | 写入或合并长期记忆 |
 | `hold` | 暂存当前值得抓住的片段；成功返回 `{status, action, bucket_id, bucket_name}` |
 | `read_bucket` | 读取指定 bucket 原文；journey 额外列出证据桶名称与 ID |
+| `read_daily_reviews` | 按日期范围或最近若干已结束日历日只读当前独立日回顾；返回缺失日期，不暴露来源窗口 |
 | `comment_bucket` / `delete_bucket_comment` | 添加或删除年轮 |
 | `profile_fact` | 管理带证据的画像事实 |
 | `reminder_create/list/update` | 管理独立照顾备忘 |
@@ -506,6 +507,8 @@ Codex 接线时注意：
 | `trace` / `pulse` / `introspection` | 近期轨迹、系统脉搏与内省 |
 
 Journey 是关系阶段索引，不属于普通召回池。普通关键词、向量、日期、开窗浮现和关联扩散都不会带出 journey；Dashboard 使用独立关系轨迹页查看并人工纠错，普通记忆库不混排。显式调用 `breath(domain="journey")` 只返回阶段目录，选中其中的 `bucket_id` 后再用 `read_bucket(bucket_id)` 读取完整阶段记录与证据桶名称/ID；需要核实时再按证据 ID 读取原桶。普通聊天 MCP 和通用 Dashboard 新建入口都不能创建、追加、修改或删除 journey；公共 `hold` 即使传 `journey=True` 或 `domain="journey"` 也会拒绝，阶段状态只由 Haven 后台生命周期维护，认证的 journey 专用 REST 接口保留人工纠错能力。
+
+`read_daily_reviews(start_date, end_date, last_days, persona_id, max_tokens)` 直接读取独立 `daily_reviews` 表。显式日期范围为闭区间；未传范围时默认读取截至昨天的最近 7 个香港日历日，`last_days` 与显式范围不能同时使用。多协作者环境必须指定 `persona_id`。返回日期、正文、协作者、是否经用户编辑、更新时间、缺失日期及截断状态，不返回 `source_session_ids`。它读取当前最新版日回顾，但不会修改窗口创建时已经冻结的最近三天快照，也不进入 bucket、普通 recall、搜索、关联扩散或 journey 自动写入。
 
 维修与回填工具不应塞进普通聊天客户端的日常提示词。完整说明见 [`docs/Tool Guide.md`](docs/Tool%20Guide.md)。
 

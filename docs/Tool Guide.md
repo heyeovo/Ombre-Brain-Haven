@@ -19,6 +19,7 @@
 - 如果只出现 `[moment_id:...]`，优先使用同一段上下文里已有的 bucket_id；没有 bucket_id 时不要硬猜。
 - `[memory_detail ids="..."]` 只给 Gateway 内部二次取细节用，不是普通 MCP 工具。
 - 独立感受：breath(domain="feel", max_results=...)。domain="feel" 不包含日印象或历史 whisper，并同时受 max_results 条数与 max_tokens 总量限制。某条旧记忆的新年轮要 read_bucket(bucket_id)。
+- 独立日回顾：read_daily_reviews(start_date="YYYY-MM-DD", end_date="YYYY-MM-DD", persona_id="...")；也可改用 last_days=N 读取截至昨天的最近 N 个香港日历日，不能和显式范围同时传。返回当前正文、用户编辑状态、更新时间和缺失日期；不返回来源窗口，不写 bucket，也不会改变窗口已经冻结的三天快照。
 - 日记：breath(domain="journal")（含上锁检测）。轨迹桶不参与普通检索、浮现或关联扩散；显式 breath(domain="journey") 只返回阶段目录，选中 bucket_id 后再 read_bucket(bucket_id) 读取全文和证据桶名称/ID；需要核实时再 read_bucket(证据桶ID)。
 - 自我锚点总入口：breath(domain="self_anchor")；domain="自我" / domain="self_identity" 兼容。
 - 查自我锚点分段：breath(domain="self_anchor", query="关键词")。

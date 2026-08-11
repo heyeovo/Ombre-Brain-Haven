@@ -362,6 +362,26 @@ class WeeklyJourneyEngineContractsTest(unittest.IsolatedAsyncioTestCase):
 
 
 class AutomationRoutesContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_public_run_exposes_snapshot_evidence_names_without_content(self):
+        public_run = load_server_function("_automation_public_run", {})
+        result = public_run({
+            "run_id": "run-1",
+            "input_snapshot": {
+                "materials": [{
+                    "bucket_id": "memory-1",
+                    "bucket_name": "一次重要谈话",
+                    "material_kinds": ["new_bucket", "new_feel_ring"],
+                    "content": "不应暴露给 dashboard 的材料正文",
+                }],
+            },
+        })
+        self.assertEqual(result["input_summary"]["materials"], [{
+            "id": "memory-1",
+            "name": "一次重要谈话",
+            "material_kinds": ["new_bucket", "new_feel_ring"],
+        }])
+        self.assertNotIn("content", str(result["input_summary"]["materials"]))
+
     async def test_manual_run_route_requires_dashboard_auth_before_generation(self):
         denied = object()
         weekly_journey_engine = SimpleNamespace(run_manual=AsyncMock())

@@ -40,8 +40,9 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `server.py` | **Brain** 入口（~640KB）。MCP 工具注册（`@mcp.custom_route`）+ REST API + 记忆核心 |
 | `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线 + cc 持久化路由（`Route()` 注册） |
 | `gateway_state.py` | Gateway/cc SQLite 状态：会话原文、窗口闲聊/工作模式、固定日回顾快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、cc 游标与桶排除账本 |
-| `automation_store.py` | 通用自动化 SQLite 控制面：持久 schedule、run、candidate，兼容旧库重复迁移；候选审批状态与普通记忆桶隔离 |
-| `journey_weekly_engine.py` | 每周 journey 只读输入聚合与严格三类候选生成；按香港自然周读取开放阶段、日回顾、新桶/独立 feel/旧桶 feel 年轮，当前只支持手动生成预览 |
+| `automation_store.py` | 通用自动化 SQLite 控制面：持久 schedule、run、candidate，兼容旧库重复迁移；候选 revision CAS、批准冻结、执行状态和任务 lease 与普通记忆桶隔离 |
+| `automation_executor.py` | 人工批准候选的白名单执行器；当前只注册 `weekly_journey`，负责冲突校验、批准稿 hash、派生 operation ID、重复确认回放与两步切换恢复 |
+| `journey_weekly_engine.py` | 每周 journey 只读输入聚合与严格三类候选生成；按香港自然周读取开放阶段、日回顾、新桶/独立 feel/旧桶 feel 年轮，当前只支持手动生成候选 |
 | `bucket_manager.py` | 桶 CRUD、搜索、评分、回收站、命中统计、分词 |
 | `dehydrator.py` | LLM 脱水、合并、打标（含 `_last_merge_usage` 成本追踪） |
 | `decay_engine.py` | 衰减引擎，计算 score |
@@ -78,11 +79,13 @@ OMBRE_TRANSPORT=streamable-http python server.py
 
 普通 MCP 写入口不能维护 journey：`hold(journey=True)`、`hold(domain="journey")`、`comment_bucket`、`delete_bucket_comment` 和 `trace` 对 journey 均返回拒绝；通用 Dashboard 新建入口也拒绝 journey。独立关系轨迹页通过认证的 `/api/journeys*` 读取与人工纠错，证据只维护阶段级 `journey_source_bucket_ids`；`read_bucket` 会附带证据桶名称与 ID。后台使用 `BucketManager.create_journey_stage()`、`append_open_journey_stage()` 和 `close_open_journey_stage()` 管理状态。新阶段写 `journey_status=open`，同一时间只允许一个开放阶段；关闭后写 `journey_status=closed` 与 `journey_end`，后台追加只接受开放阶段。可传 `operation_id` 幂等去重；旧 journey 不自动迁成开放状态。
 
-### 每周 journey 候选（phase 1）
+### 每周 journey 候选与人工批准
 
 `automation_schedules`、`automation_runs`、`automation_candidates` 存在独立 `state/automations.sqlite`，不写成普通 bucket。`weekly_journey` 按 `Asia/Hong_Kong` 的完整自然周聚合材料：新桶看 `metadata.created`，独立 feel 排除 whisper，旧桶新增 feel 年轮看 `comments[].created`，最终按 bucket ID 去重。日回顾使用当前 Haven `profile_id` 与明确协作者按日期范围读取。
 
-候选只允许 `no_change`、`append_current`、`transition`，证据 ID 必须来自固定输入快照；同一 `cycle_key + input_hash` 重试回放同一 run/candidate。当前只有认证手动生成与只读查询接口，没有确认/拒绝写入接口，也没有定时线程；候选生成路径不调用 `BucketManager` 的 journey 创建、追加或关闭方法。模型连接复用 `daily_review` 的 Anthropic-compatible `/v1/messages` 配置。
+候选只允许 `no_change`、`append_current`、`transition`，证据 ID 必须来自固定输入快照；同一 `cycle_key + input_hash` 重试回放同一 run/candidate。编辑只替换 draft 并增加 revision，原始 preview 保留；确认请求只提交 `expected_revision + approved_payload_hash`，服务端重新规范化并冻结完整 approved payload/hash，浏览器不能临时提交另一份正文。
+
+`automation_executor.py` 只注册 `weekly_journey`。首次确认前会校验候选仍 pending、开放 journey 完整快照、批准稿 hash 和证据桶存在且非 journey；冲突保存结构化原因，不覆盖当前阶段。同一任务的持久 lease 串行化并发确认。`no_change` 零写入；`append_current` 只调用开放阶段追加；`transition` 以稳定的 `:close` / `:create` 派生 operation ID 两步执行。关闭成功而创建失败时保留部分结果，重试幂等回放 close 后继续 create；已完成候选的重复确认只回放结果。当前仍只有手动候选生成，没有定时线程。模型连接复用 `daily_review` 的 Anthropic-compatible `/v1/messages` 配置。
 
 ## 配置
 
@@ -217,12 +220,15 @@ GET   /api/journeys/{bucket_id}          # 完整正文、阶段字段与证据�
 PATCH /api/journeys/{bucket_id}          # 认证人工纠错；校验唯一 open 与证据桶
 ```
 
-### 自动化候选（phase 1）
+### 自动化候选
 ```
 GET  /api/automations/status?task_type=weekly_journey
 POST /api/automations/weekly-journey/run       # 手动生成 pending 候选；不写 journey
 GET  /api/automations/candidates?task_type=weekly_journey&status=pending
 GET  /api/automations/candidates/{candidate_id}
+PATCH /api/automations/candidates/{candidate_id}          # expected_revision + draft；保存新 revision
+POST /api/automations/candidates/{candidate_id}/reject    # 只拒绝 pending 候选，零 journey 写入
+POST /api/automations/candidates/{candidate_id}/confirm   # expected_revision + approved_payload_hash
 ```
 
 ### 导入

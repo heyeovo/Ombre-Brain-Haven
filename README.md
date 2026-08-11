@@ -119,7 +119,7 @@ Daily Reflection 可根据当天聊天、已有 auto-memory 产物和近期记�
 
 Haven 已有通用自动化持久底座，并以 `weekly_journey` 作为第一个任务类型。它按香港时区的完整自然周读取当前开放 journey、日回顾、本周新桶、本周独立 feel 与旧桶本周新增的 feel 年轮，按 bucket ID 去重后只生成 `no_change`、`append_current` 或 `transition` 候选。候选与输入快照保存在独立 SQLite 状态中，不进入普通记忆、召回或关联扩散。
 
-当前 phase 1 只开放认证的手动候选生成和只读查询：没有定时线程，没有确认写入接口，也不会调用 journey 创建、追加或关闭方法。后续人工审批执行器完成前，生成候选不会改变任何 journey。
+候选只能经认证接口人工编辑、拒绝或确认。编辑保存为新 revision 并保留原始 preview；确认只接收页面已展示 revision 的 hash，由服务端冻结 approved payload/hash。白名单执行器当前只注册 `weekly_journey`：`no_change` 零写入，`append_current` 只追加开放阶段，`transition` 使用独立 `:close` / `:create` operation ID。确认前若开放阶段、批准稿或证据桶已变化，会保存可解释冲突而不覆盖当前状态；重复确认与 close 成功、create 失败后的重试保持幂等。当前仍没有定时线程，候选只可手动生成，未确认候选不会改变 journey。
 
 即使使用 `auto`，候选仍需经过记忆写入、去重和合并边界。原始聊天继续留在 raw events；自动记忆只保存脱水后仍值得长期带走的部分。
 
@@ -547,7 +547,7 @@ Python 直跑时对应端口为 `8000/8010`。
 - Dream、relationship weather、comment 和 affect anchor 不能单独证明当前话题。
 - `gateway.portrait_memory_*` 为旧兼容字段；旧的每轮 Portrait Memory 已退休。
 - 派生索引损坏时应从 Markdown / raw source 重建，不要把 SQLite 当唯一真源。
-- 每周 journey 自动化当前只有手动候选预览；没有定时生成、批准执行或自动写入路径。
+- 每周 journey 当前只手动生成候选并由人确认后执行；没有定时生成、自动确认或定时自动写入路径。
 
 更细的行为边界见 [`docs/memory-layer-contract.md`](docs/memory-layer-contract.md)，部署补充见 [`docs/deploy-zeabur.md`](docs/deploy-zeabur.md)。
 

@@ -6,7 +6,7 @@ import json
 import os
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -17,6 +17,12 @@ CANDIDATE_STATUSES = {"pending", "rejected", "applying", "completed", "conflict"
 
 def _now_iso() -> str:
     return datetime.now(ZoneInfo("Asia/Hong_Kong")).isoformat(timespec="seconds")
+
+
+def _lease_until_iso(seconds: int) -> str:
+    return (
+        datetime.now(ZoneInfo("Asia/Hong_Kong")) + timedelta(seconds=max(30, int(seconds)))
+    ).isoformat(timespec="seconds")
 
 
 class AutomationStore:
@@ -298,6 +304,54 @@ class AutomationStore:
         finally:
             conn.close()
 
+    def acquire_task_lease(
+        self, *, task_type: str, owner: str, lease_seconds: int = 120,
+    ) -> bool:
+        """Claim one persisted task lease; expired leases may be recovered."""
+        safe_owner = str(owner or "").strip()
+        if not safe_owner:
+            raise ValueError("automation lease owner is required")
+        now = _now_iso()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE automation_schedules
+                SET lease_owner = ?, lease_until = ?, updated_at = ?
+                WHERE task_type = ?
+                  AND (lease_owner = '' OR lease_owner = ? OR lease_until = '' OR lease_until <= ?)
+                """,
+                (
+                    safe_owner, _lease_until_iso(lease_seconds), now,
+                    str(task_type), safe_owner, now,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def release_task_lease(self, *, task_type: str, owner: str) -> bool:
+        safe_owner = str(owner or "").strip()
+        conn = self._connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE automation_schedules
+                    SET lease_owner = '', lease_until = '', updated_at = ?
+                    WHERE task_type = ? AND lease_owner = ?
+                    """,
+                    (_now_iso(), str(task_type), safe_owner),
+                )
+            return cursor.rowcount == 1
+        finally:
+            conn.close()
+
     def start_run(
         self,
         *,
@@ -467,6 +521,184 @@ class AutomationStore:
         try:
             row = conn.execute(
                 "SELECT * FROM automation_candidates WHERE run_id = ?", (str(run_id),)
+            ).fetchone()
+            return self._candidate_payload(row)
+        finally:
+            conn.close()
+
+    def update_candidate_draft(
+        self,
+        candidate_id: str,
+        *,
+        expected_revision: int,
+        draft: dict,
+    ) -> tuple[str, dict]:
+        """Save one edited draft as a new revision without changing the original preview."""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM automation_candidates WHERE candidate_id = ?",
+                (str(candidate_id),),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return "not_found", {}
+            current = self._candidate_payload(row)
+            if current.get("status") != "pending":
+                conn.rollback()
+                return "not_pending", current
+            if int(current.get("revision") or 0) != int(expected_revision):
+                conn.rollback()
+                return "revision_mismatch", current
+            next_revision = int(expected_revision) + 1
+            conn.execute(
+                """
+                UPDATE automation_candidates
+                SET draft_json = ?, revision = ?, updated_at = ?
+                WHERE candidate_id = ? AND status = 'pending' AND revision = ?
+                """,
+                (
+                    self._json_dump(draft or {}), next_revision, _now_iso(),
+                    str(candidate_id), int(expected_revision),
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM automation_candidates WHERE candidate_id = ?",
+                (str(candidate_id),),
+            ).fetchone()
+            conn.commit()
+            return "updated", self._candidate_payload(row)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def reject_candidate(
+        self, candidate_id: str, *, expected_revision: int,
+    ) -> tuple[str, dict]:
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM automation_candidates WHERE candidate_id = ?",
+                (str(candidate_id),),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return "not_found", {}
+            current = self._candidate_payload(row)
+            if current.get("status") != "pending":
+                conn.rollback()
+                return "not_pending", current
+            if int(current.get("revision") or 0) != int(expected_revision):
+                conn.rollback()
+                return "revision_mismatch", current
+            now = _now_iso()
+            conn.execute(
+                """
+                UPDATE automation_candidates
+                SET status = 'rejected', error = '', updated_at = ?, confirmed_at = ?
+                WHERE candidate_id = ? AND status = 'pending' AND revision = ?
+                """,
+                (now, now, str(candidate_id), int(expected_revision)),
+            )
+            row = conn.execute(
+                "SELECT * FROM automation_candidates WHERE candidate_id = ?",
+                (str(candidate_id),),
+            ).fetchone()
+            conn.commit()
+            return "rejected", self._candidate_payload(row)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def freeze_candidate_approval(
+        self,
+        candidate_id: str,
+        *,
+        expected_revision: int,
+        approved_payload: dict,
+        approved_payload_hash: str,
+        operation_id: str,
+    ) -> tuple[str, dict]:
+        """Atomically freeze the displayed revision before any lifecycle write."""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM automation_candidates WHERE candidate_id = ?",
+                (str(candidate_id),),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return "not_found", {}
+            current = self._candidate_payload(row)
+            if current.get("status") != "pending":
+                conn.rollback()
+                return "not_pending", current
+            if int(current.get("revision") or 0) != int(expected_revision):
+                conn.rollback()
+                return "revision_mismatch", current
+            now = _now_iso()
+            conn.execute(
+                """
+                UPDATE automation_candidates
+                SET status = 'applying', approved_payload_json = ?, approved_payload_hash = ?,
+                    operation_id = ?, result_json = '{}', error = '', updated_at = ?, confirmed_at = ?
+                WHERE candidate_id = ? AND status = 'pending' AND revision = ?
+                """,
+                (
+                    self._json_dump(approved_payload), str(approved_payload_hash),
+                    str(operation_id), now, now, str(candidate_id), int(expected_revision),
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM automation_candidates WHERE candidate_id = ?",
+                (str(candidate_id),),
+            ).fetchone()
+            conn.commit()
+            return "frozen", self._candidate_payload(row)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def set_candidate_execution(
+        self,
+        candidate_id: str,
+        *,
+        status: str,
+        result: dict | None = None,
+        error: str = "",
+    ) -> dict:
+        safe_status = str(status or "").strip().lower()
+        if safe_status not in {"applying", "completed", "conflict", "failed"}:
+            raise ValueError("invalid automation candidate execution status")
+        now = _now_iso()
+        applied_at = now if safe_status == "completed" else ""
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    UPDATE automation_candidates
+                    SET status = ?, result_json = ?, error = ?, updated_at = ?, applied_at = ?
+                    WHERE candidate_id = ?
+                      AND status IN ('pending', 'applying', 'failed')
+                    """,
+                    (
+                        safe_status, self._json_dump(result or {}), str(error or "")[:2000],
+                        now, applied_at, str(candidate_id),
+                    ),
+                )
+            row = conn.execute(
+                "SELECT * FROM automation_candidates WHERE candidate_id = ?",
+                (str(candidate_id),),
             ).fetchone()
             return self._candidate_payload(row)
         finally:

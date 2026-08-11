@@ -130,6 +130,7 @@ from raw_events import RawEventStore
 from reflection_engine import ReflectionEngine
 from daily_review_engine import DailyReviewEngine
 from automation_store import AutomationStore
+from automation_executor import AutomationExecutor
 from journey_weekly_engine import TASK_TYPE as WEEKLY_JOURNEY_TASK_TYPE, WeeklyJourneyEngine
 from recall_diagnostics import RecallDiagnosticsLogger
 from reminder_store import ReminderStore
@@ -266,6 +267,7 @@ weekly_journey_engine = WeeklyJourneyEngine(
     profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
     message_client=daily_review_engine,
 )
+automation_executor = AutomationExecutor(automation_store, bucket_mgr, weekly_journey_engine)
 raw_event_store = RawEventStore(config)                  # Raw dialogue archive / 原文保险箱
 reminder_store = ReminderStore(config)                    # Standalone care memos / 独立照顾备忘
 todo_store = TodoStore(config)                            # Standalone todos / 独立待办
@@ -11557,6 +11559,33 @@ def _automation_public_run(run: dict) -> dict:
     return payload
 
 
+def _automation_expected_revision(body: dict) -> int:
+    try:
+        revision = int(body.get("expected_revision"))
+    except (TypeError, ValueError):
+        revision = 0
+    if revision < 1:
+        raise ValueError("expected_revision must be a positive integer")
+    return revision
+
+
+def _automation_mutation_status(result: dict) -> int:
+    status = str(result.get("status") or "")
+    if status == "not_found":
+        return 404
+    if status == "in_progress":
+        return 202
+    if status in {
+        "revision_mismatch", "not_pending", "conflict", "approved_payload_changed",
+    }:
+        return 409
+    if status in {"unsupported_task"}:
+        return 400
+    if status == "failed":
+        return 500
+    return 200
+
+
 @mcp.custom_route("/api/automations/status", methods=["GET"])
 async def api_automation_status(request):
     """Read persisted status for a registered review-only automation."""
@@ -11594,6 +11623,8 @@ async def api_weekly_journey_run(request):
         return JSONResponse({"error": str(exc)}, status_code=400)
     result = dict(result)
     result["run"] = _automation_public_run(result.get("run") or {})
+    if result.get("candidate"):
+        result["candidate"] = automation_executor.candidate_for_review(result["candidate"])
     return JSONResponse(result, status_code=500 if result.get("status") == "failed" else 200)
 
 
@@ -11615,7 +11646,8 @@ async def api_automation_candidates(request):
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    return JSONResponse({"task_type": task_type, "count": len(items), "items": items})
+    public_items = [automation_executor.candidate_for_review(item) for item in items]
+    return JSONResponse({"task_type": task_type, "count": len(public_items), "items": public_items})
 
 
 @mcp.custom_route("/api/automations/candidates/{candidate_id}", methods=["GET"])
@@ -11632,7 +11664,92 @@ async def api_automation_candidate_detail(request):
     if not candidate:
         return JSONResponse({"error": "candidate not found"}, status_code=404)
     run = automation_store.get_run(str(candidate.get("run_id") or ""))
-    return JSONResponse({"candidate": candidate, "run": _automation_public_run(run)})
+    return JSONResponse({
+        "candidate": automation_executor.candidate_for_review(candidate),
+        "run": _automation_public_run(run),
+    })
+
+
+@mcp.custom_route("/api/automations/candidates/{candidate_id}", methods=["PATCH"])
+async def api_automation_candidate_edit(request):
+    """Save a human-edited draft as a new pending revision."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    candidate_id = str(request.path_params.get("candidate_id") or "").strip()
+    if not candidate_id or not MEMORY_ID_RE.fullmatch(candidate_id):
+        return JSONResponse({"error": "invalid candidate_id"}, status_code=400)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict) or not isinstance(body.get("draft"), dict):
+        return JSONResponse({"error": "draft must be an object"}, status_code=400)
+    try:
+        result = automation_executor.edit_candidate(
+            candidate_id,
+            expected_revision=_automation_expected_revision(body),
+            draft=body["draft"],
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(result, status_code=_automation_mutation_status(result))
+
+
+@mcp.custom_route("/api/automations/candidates/{candidate_id}/reject", methods=["POST"])
+async def api_automation_candidate_reject(request):
+    """Reject one pending candidate without invoking any task handler."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    candidate_id = str(request.path_params.get("candidate_id") or "").strip()
+    if not candidate_id or not MEMORY_ID_RE.fullmatch(candidate_id):
+        return JSONResponse({"error": "invalid candidate_id"}, status_code=400)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    try:
+        result = automation_executor.reject_candidate(
+            candidate_id, expected_revision=_automation_expected_revision(body),
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(result, status_code=_automation_mutation_status(result))
+
+
+@mcp.custom_route("/api/automations/candidates/{candidate_id}/confirm", methods=["POST"])
+async def api_automation_candidate_confirm(request):
+    """Freeze and execute the exact displayed candidate revision."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    candidate_id = str(request.path_params.get("candidate_id") or "").strip()
+    if not candidate_id or not MEMORY_ID_RE.fullmatch(candidate_id):
+        return JSONResponse({"error": "invalid candidate_id"}, status_code=400)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    approved_hash = str(body.get("approved_payload_hash") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", approved_hash):
+        return JSONResponse({"error": "approved_payload_hash must be a SHA-256 hex digest"}, status_code=400)
+    try:
+        result = await automation_executor.confirm_candidate(
+            candidate_id,
+            expected_revision=_automation_expected_revision(body),
+            approved_payload_hash=approved_hash,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(result, status_code=_automation_mutation_status(result))
 
 
 @mcp.custom_route("/api/moments", methods=["GET"])
@@ -13900,7 +14017,7 @@ async def api_config_update(request):
     """Hot-update runtime config. Optionally persist to config.yaml."""
     from starlette.responses import JSONResponse
     import yaml
-    global dream_engine, persona_engine, portrait_engine, reflection_engine, reranker_engine, daily_review_engine, weekly_journey_engine
+    global dream_engine, persona_engine, portrait_engine, reflection_engine, reranker_engine, daily_review_engine, weekly_journey_engine, automation_executor
     err = _require_dashboard_auth(request)
     if err:
         return err
@@ -15042,6 +15159,7 @@ async def api_config_update(request):
         profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
         message_client=daily_review_engine,
     )
+    automation_executor = AutomationExecutor(automation_store, bucket_mgr, weekly_journey_engine)
     return JSONResponse({"updated": updated, "ok": True})
 
 

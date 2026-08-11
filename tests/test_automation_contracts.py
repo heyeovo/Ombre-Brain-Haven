@@ -392,6 +392,7 @@ class AutomationRoutesContractTest(unittest.IsolatedAsyncioTestCase):
         route = load_server_function("api_weekly_journey_run", {
             "_require_dashboard_auth": lambda request: None,
             "weekly_journey_engine": weekly_journey_engine,
+            "automation_executor": SimpleNamespace(candidate_for_review=lambda candidate: candidate),
             "_automation_public_run": lambda run: {"run_id": run.get("run_id")},
         })
         request = SimpleNamespace(json=AsyncMock(return_value={

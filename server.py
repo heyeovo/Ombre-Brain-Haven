@@ -7380,6 +7380,75 @@ def _journey_directory_summary(bucket: dict, max_chars: int = 180) -> str:
     return str(meta.get("name") or bucket.get("id") or "轨迹阶段")
 
 
+def _is_journey_bucket(bucket: dict) -> bool:
+    meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
+    return "journey" in {
+        str(domain).strip().lower()
+        for domain in meta.get("domain", []) or []
+    }
+
+
+def _journey_dashboard_payload(bucket: dict, *, include_content: bool = False) -> dict:
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    bucket_id = str(bucket.get("id") or "")
+    start = str(
+        meta.get("journey_start")
+        or meta.get("stage_start")
+        or meta.get("event_time")
+        or meta.get("date")
+        or meta.get("created")
+        or ""
+    ).strip()
+    end = str(meta.get("journey_end") or meta.get("stage_end") or "").strip()
+    status = str(meta.get("journey_status") or meta.get("stage_status") or "").strip().lower()
+    raw_summary = str(meta.get("journey_summary") or "").strip()
+    source_ids = list(dict.fromkeys(
+        str(item).strip()
+        for item in meta.get("journey_source_bucket_ids", []) or []
+        if str(item).strip()
+    ))
+    missing_fields = []
+    if not meta.get("journey_start"):
+        missing_fields.append("journey_start")
+    if not status:
+        missing_fields.append("journey_status")
+    if status == "closed" and not meta.get("journey_end"):
+        missing_fields.append("journey_end")
+    if "journey_summary" not in meta:
+        missing_fields.append("journey_summary")
+    if "journey_source_bucket_ids" not in meta:
+        missing_fields.append("journey_source_bucket_ids")
+    payload = {
+        "id": bucket_id,
+        "name": str(meta.get("stage_name") or meta.get("name") or bucket_id or "未命名阶段").strip(),
+        "journey_start": start,
+        "journey_end": end,
+        "journey_status": status or "unmarked",
+        "journey_summary": raw_summary or _journey_directory_summary(bucket),
+        "journey_source_bucket_ids": source_ids,
+        "missing_fields": missing_fields,
+    }
+    if include_content:
+        payload["content"] = strip_wikilinks(str(bucket.get("content") or ""))
+    return payload
+
+
+async def _journey_evidence_rows(source_ids: list[str]) -> list[dict]:
+    rows = []
+    for source_id in source_ids:
+        source = await bucket_mgr.get(source_id)
+        if not source:
+            rows.append({"id": source_id, "name": "证据桶不存在", "exists": False})
+            continue
+        source_meta = source.get("metadata", {})
+        rows.append({
+            "id": source_id,
+            "name": str(source_meta.get("name") or source_id),
+            "exists": True,
+        })
+    return rows
+
+
 def _journey_directory_entry(bucket: dict) -> str:
     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
     bucket_id = str(bucket.get("id") or "")
@@ -8569,6 +8638,22 @@ async def read_bucket(bucket_id: str) -> str:
         header += f" [日期:{created}]"
 
     lines = [header, "", strip_wikilinks(bucket.get("content", ""))]
+
+    if _is_journey_bucket(bucket):
+        source_ids = list(dict.fromkeys(
+            str(item).strip()
+            for item in meta.get("journey_source_bucket_ids", []) or []
+            if str(item).strip()
+        ))
+        if source_ids:
+            lines.extend(["", "证据桶："])
+            for source_id in source_ids:
+                source = await bucket_mgr.get(source_id)
+                source_name = (
+                    str(source.get("metadata", {}).get("name") or source_id)
+                    if source else "证据桶不存在"
+                )
+                lines.append(f"- {source_name} [bucket_id:{source_id}]")
 
     comments = meta.get("comments") or []
     if isinstance(comments, list) and comments:
@@ -11366,6 +11451,79 @@ async def api_bucket_detail(request):
     return JSONResponse(_bucket_read_payload(bucket))
 
 
+@mcp.custom_route("/api/journeys", methods=["GET"])
+async def api_journeys(request):
+    """List journey stages for the dedicated dashboard page."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    stages = await bucket_mgr.list_journey_stages()
+    stages.sort(
+        key=lambda bucket: (
+            bucket.get("metadata", {}).get("journey_start")
+            or bucket.get("metadata", {}).get("stage_start")
+            or bucket.get("metadata", {}).get("event_time")
+            or bucket.get("metadata", {}).get("created", "")
+        ),
+        reverse=True,
+    )
+    return JSONResponse({
+        "count": len(stages),
+        "journeys": [_journey_dashboard_payload(stage) for stage in stages],
+    })
+
+
+@mcp.custom_route("/api/journeys/{bucket_id}", methods=["GET", "PATCH"])
+async def api_journey_detail(request):
+    """Read or manually correct one journey stage from the dashboard."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    bucket_id = str(request.path_params.get("bucket_id") or "").strip()
+    if not bucket_id or not MEMORY_ID_RE.fullmatch(bucket_id):
+        return JSONResponse({"error": "invalid bucket_id"}, status_code=400)
+    stage = await bucket_mgr.get(bucket_id)
+    if not stage or not _is_journey_bucket(stage):
+        return JSONResponse({"error": "journey not found"}, status_code=404)
+
+    if request.method == "PATCH":
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid json body"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "json body must be an object"}, status_code=400)
+        field_map = {
+            "name": "name",
+            "content": "content",
+            "journey_summary": "summary",
+            "journey_start": "stage_start",
+            "journey_end": "stage_end",
+            "journey_status": "status",
+            "journey_source_bucket_ids": "source_bucket_ids",
+        }
+        kwargs = {target: body[source] for source, target in field_map.items() if source in body}
+        if "source_bucket_ids" in kwargs and not isinstance(kwargs["source_bucket_ids"], list):
+            return JSONResponse({"error": "journey_source_bucket_ids must be a list"}, status_code=400)
+        if "source_bucket_ids" in kwargs and any(
+            not MEMORY_ID_RE.fullmatch(str(source_id or "").strip())
+            for source_id in kwargs["source_bucket_ids"]
+        ):
+            return JSONResponse({"error": "invalid journey evidence bucket_id"}, status_code=400)
+        try:
+            stage = await bucket_mgr.correct_journey_stage(bucket_id, **kwargs)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except RuntimeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    payload = _journey_dashboard_payload(stage, include_content=True)
+    payload["evidence_buckets"] = await _journey_evidence_rows(payload["journey_source_bucket_ids"])
+    return JSONResponse(payload)
+
+
 @mcp.custom_route("/api/moments", methods=["GET"])
 async def api_moments(request):
     """Return dashboard diagnostics for indexed memory moments."""
@@ -11764,6 +11922,15 @@ async def api_create_bucket(request):
     content = body.get("content", "")
     if not content or not content.strip():
         return JSONResponse({"error": "content required"}, status_code=400)
+    raw_requested_domains = body.get("domain") or []
+    if isinstance(raw_requested_domains, str):
+        raw_requested_domains = [raw_requested_domains]
+    requested_domains = {
+        str(item).strip().lower()
+        for item in raw_requested_domains
+    }
+    if "journey" in requested_domains:
+        return JSONResponse({"error": "journey must use the dedicated lifecycle"}, status_code=400)
     raw_tags = body.get("tags", [])
     if isinstance(raw_tags, str):
         tags = [t.strip() for t in raw_tags.split(",") if t.strip()]

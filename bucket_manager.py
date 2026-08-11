@@ -627,6 +627,96 @@ class BucketManager:
             raise RuntimeError(f"关闭 journey 阶段失败: {stage['id']}")
         return {"status": "closed", "bucket_id": stage["id"]}
 
+    async def correct_journey_stage(
+        self,
+        bucket_id: str,
+        *,
+        name: Optional[str] = None,
+        content: Optional[str] = None,
+        summary: Optional[str] = None,
+        stage_start: Optional[str] = None,
+        stage_end: Optional[str] = None,
+        status: Optional[str] = None,
+        source_bucket_ids: Optional[list[str]] = None,
+    ) -> dict:
+        """Dashboard-only manual correction for one journey stage."""
+        stage = await self.get(bucket_id)
+        if not stage:
+            raise ValueError(f"未找到 journey 阶段: {bucket_id}")
+        meta = stage.get("metadata", {})
+        domains = {str(item).strip().lower() for item in meta.get("domain", []) or []}
+        if "journey" not in domains:
+            raise ValueError("只能通过 journey 纠错入口修改轨迹桶。")
+
+        updates: dict = {}
+        extra_metadata: dict = {}
+        if name is not None:
+            if not str(name).strip():
+                raise ValueError("阶段标题不能为空。")
+            updates["name"] = str(name).strip()
+        if content is not None:
+            if not str(content).strip():
+                raise ValueError("journey 正文不能为空。")
+            updates["content"] = str(content).strip()
+        if summary is not None:
+            extra_metadata["journey_summary"] = str(summary).strip()
+        if stage_start is not None:
+            if not str(stage_start).strip():
+                raise ValueError("阶段开始日期不能为空。")
+            extra_metadata["journey_start"] = str(stage_start).strip()
+
+        normalized_status = None
+        if status is not None:
+            normalized_status = str(status).strip().lower()
+            if normalized_status not in {"open", "closed"}:
+                raise ValueError("journey status 必须是 open 或 closed。")
+            if normalized_status == "open":
+                for other in await self.list_journey_stages():
+                    if other.get("id") == bucket_id:
+                        continue
+                    other_status = str(other.get("metadata", {}).get("journey_status") or "").strip().lower()
+                    if other_status == "open":
+                        raise ValueError(f"已有开放的 journey 阶段: {other.get('id')}")
+                extra_metadata["journey_end"] = ""
+            extra_metadata["journey_status"] = normalized_status
+
+        if stage_end is not None:
+            extra_metadata["journey_end"] = str(stage_end).strip()
+
+        effective_status = normalized_status or str(meta.get("journey_status") or "").strip().lower()
+        effective_end = (
+            str(stage_end).strip()
+            if stage_end is not None
+            else str(meta.get("journey_end") or meta.get("stage_end") or "").strip()
+        )
+        if (status is not None or stage_end is not None) and effective_status == "closed" and not effective_end:
+            raise ValueError("closed 阶段必须填写结束日期。")
+
+        if source_bucket_ids is not None:
+            normalized_ids = list(dict.fromkeys(
+                str(item).strip() for item in source_bucket_ids if str(item).strip()
+            ))
+            for source_id in normalized_ids:
+                source = await self.get(source_id)
+                if not source:
+                    raise ValueError(f"证据桶不存在: {source_id}")
+                source_domains = {
+                    str(item).strip().lower()
+                    for item in source.get("metadata", {}).get("domain", []) or []
+                }
+                if "journey" in source_domains:
+                    raise ValueError(f"journey 不能作为证据桶: {source_id}")
+            extra_metadata["journey_source_bucket_ids"] = normalized_ids
+
+        if extra_metadata:
+            updates["extra_metadata"] = extra_metadata
+        if not updates:
+            raise ValueError("没有可更新的 journey 字段。")
+        updated = await self.update(bucket_id, **updates)
+        if not updated:
+            raise RuntimeError(f"journey 纠错失败: {bucket_id}")
+        return await self.get(bucket_id)
+
     # ---------------------------------------------------------
     # Move bucket between directories
     # 在目录间移动桶文件

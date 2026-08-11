@@ -72,9 +72,9 @@ OMBRE_TRANSPORT=streamable-http python server.py
 
 ### journey 隔离与读取
 
-`domain=["journey"]` 的桶属于独立 `relationship_journey` 记忆层。普通关键词、向量、日期、词法补召、开窗浮现、写入合并候选和 bucket/moment 关联扩散均排除 journey；dashboard `/api/search` 为人工管理显式放行，因此记忆库仍可见。`breath(domain="journey")` 只返回按阶段起始时间倒序排列的精简目录（桶 ID、阶段标题、起止时间、一句摘要），选择后再用 `read_bucket(bucket_id)` 读取全文。目录优先使用结构化阶段元数据，旧桶缺失时回退到事件/创建时间与正文第一条有效行。
+`domain=["journey"]` 的桶属于独立 `relationship_journey` 记忆层。普通关键词、向量、日期、词法补召、开窗浮现、写入合并候选和 bucket/moment 关联扩散均排除 journey；dashboard `/api/search` 为人工管理显式放行，但普通记忆库前端会过滤 journey，独立关系轨迹页使用专用接口读取。`breath(domain="journey")` 只返回按阶段起始时间倒序排列的精简目录（桶 ID、阶段标题、起止时间、一句摘要），选择后再用 `read_bucket(bucket_id)` 读取全文。目录优先使用结构化阶段元数据，旧桶缺失时回退到事件/创建时间与正文第一条有效行。
 
-普通 MCP 写入口不能维护 journey：`hold(journey=True)`、`hold(domain="journey")`、`comment_bucket`、`delete_bucket_comment` 和 `trace` 对 journey 均返回拒绝；dashboard 的认证 PATCH 仍保留人工纠错能力。后台使用 `BucketManager.create_journey_stage()`、`append_open_journey_stage()` 和 `close_open_journey_stage()` 管理状态。新阶段写 `journey_status=open`，同一时间只允许一个开放阶段；关闭后写 `journey_status=closed` 与 `journey_end`，后台追加只接受开放阶段。可传 `operation_id` 幂等去重；旧 journey 不自动迁成开放状态。
+普通 MCP 写入口不能维护 journey：`hold(journey=True)`、`hold(domain="journey")`、`comment_bucket`、`delete_bucket_comment` 和 `trace` 对 journey 均返回拒绝；通用 Dashboard 新建入口也拒绝 journey。独立关系轨迹页通过认证的 `/api/journeys*` 读取与人工纠错，证据只维护阶段级 `journey_source_bucket_ids`；`read_bucket` 会附带证据桶名称与 ID。后台使用 `BucketManager.create_journey_stage()`、`append_open_journey_stage()` 和 `close_open_journey_stage()` 管理状态。新阶段写 `journey_status=open`，同一时间只允许一个开放阶段；关闭后写 `journey_status=closed` 与 `journey_end`，后台追加只接受开放阶段。可传 `operation_id` 幂等去重；旧 journey 不自动迁成开放状态。
 
 ## 配置
 
@@ -200,6 +200,13 @@ GET  /api/status                                                 # 状态
 GET  /api/journal                        # 列表（60s 内存缓存）
 POST /api/journal                        # 新建（自动 invalidate 缓存）
 POST /api/bucket/{bucket_id}/to-journal  # 桶转日记（不可逆）
+```
+
+### 关系轨迹
+```
+GET   /api/journeys                      # 阶段目录，兼容旧 journey 缺失字段
+GET   /api/journeys/{bucket_id}          # 完整正文、阶段字段与证据桶名称/ID
+PATCH /api/journeys/{bucket_id}          # 认证人工纠错；校验唯一 open 与证据桶
 ```
 
 ### 导入

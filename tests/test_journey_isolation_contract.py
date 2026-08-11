@@ -1,10 +1,11 @@
 import ast
 import re
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from memory_layers import (
     LAYER_JOURNEY,
@@ -47,6 +48,7 @@ def load_bucket_manager_class():
         "create_journey_stage",
         "append_open_journey_stage",
         "close_open_journey_stage",
+        "correct_journey_stage",
     }
     methods = [
         node for node in class_node.body
@@ -183,12 +185,18 @@ class JourneyLifecycleContractTest(unittest.IsolatedAsyncioTestCase):
                 return False
             if "content" in kwargs:
                 bucket["content"] = kwargs["content"]
+            if "name" in kwargs:
+                bucket["metadata"]["name"] = kwargs["name"]
             bucket["metadata"].update(kwargs.get("extra_metadata") or {})
             return True
+
+        async def get(bucket_id):
+            return store.get(bucket_id)
 
         manager.list_all = list_all
         manager.create = create
         manager.update = update
+        manager.get = get
         return manager, store
 
     async def test_open_stage_is_unique_and_background_append_is_idempotent(self):
@@ -247,8 +255,78 @@ class JourneyLifecycleContractTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await manager.append_open_journey_stage(content="不应追加")
 
+    async def test_dashboard_correction_updates_simple_stage_evidence_list(self):
+        manager, store = self.manager_with_store()
+        created = await manager.create_journey_stage(
+            content="阶段初始状态",
+            name="正在靠近",
+            stage_start="2026-08-01",
+        )
+        store["memory-1"] = {
+            "id": "memory-1",
+            "content": "重要证据",
+            "metadata": {"name": "重要的一天", "domain": ["relationship"]},
+        }
+
+        updated = await manager.correct_journey_stage(
+            created["bucket_id"],
+            name="重新靠近",
+            summary="一段简短摘要",
+            source_bucket_ids=["memory-1", "memory-1"],
+        )
+
+        self.assertEqual(updated["metadata"]["name"], "重新靠近")
+        self.assertEqual(updated["metadata"]["journey_summary"], "一段简短摘要")
+        self.assertEqual(updated["metadata"]["journey_source_bucket_ids"], ["memory-1"])
+
+    async def test_dashboard_correction_rejects_missing_or_journey_evidence(self):
+        manager, store = self.manager_with_store()
+        created = await manager.create_journey_stage(
+            content="阶段初始状态",
+            name="正在靠近",
+            stage_start="2026-08-01",
+        )
+
+        with self.assertRaisesRegex(ValueError, "证据桶不存在"):
+            await manager.correct_journey_stage(
+                created["bucket_id"],
+                source_bucket_ids=["missing-1"],
+            )
+        with self.assertRaisesRegex(ValueError, "不能作为证据桶"):
+            await manager.correct_journey_stage(
+                created["bucket_id"],
+                source_bucket_ids=[created["bucket_id"]],
+            )
+
 
 class JourneyPublicWriteContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_dashboard_generic_create_cannot_bypass_journey_lifecycle(self):
+        class FakeJSONResponse:
+            def __init__(self, body, status_code=200):
+                self.body = body
+                self.status_code = status_code
+
+        bucket_mgr = SimpleNamespace(create=AsyncMock())
+        namespace = {
+            "bucket_mgr": bucket_mgr,
+            "_require_dashboard_auth": lambda request: None,
+        }
+        functions = load_server_functions("api_create_bucket", namespace=namespace)
+        request = SimpleNamespace(json=AsyncMock(return_value={
+            "content": "不应创建的轨迹",
+            "domain": ["journey"],
+        }))
+
+        fake_responses = SimpleNamespace(JSONResponse=FakeJSONResponse)
+        with patch.dict(sys.modules, {
+            "starlette": SimpleNamespace(responses=fake_responses),
+            "starlette.responses": fake_responses,
+        }):
+            response = await functions["api_create_bucket"](request)
+
+        self.assertEqual(response.status_code, 400)
+        bucket_mgr.create.assert_not_awaited()
+
     async def test_hold_journey_is_rejected_without_creating_bucket(self):
         bucket_mgr = SimpleNamespace(create=AsyncMock())
         namespace = {
@@ -302,6 +380,32 @@ class JourneyPublicWriteContractTest(unittest.IsolatedAsyncioTestCase):
 
 
 class JourneyDirectoryContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_read_bucket_lists_journey_evidence_name_and_id(self):
+        stage = journey_bucket(journey_source_bucket_ids=["memory-1"])
+        evidence = {
+            "id": "memory-1",
+            "content": "证据正文",
+            "metadata": {"name": "重要的一天", "domain": ["relationship"]},
+        }
+        namespace = {
+            "bucket_mgr": SimpleNamespace(
+                get=AsyncMock(side_effect=lambda bucket_id: stage if bucket_id == "journey-1" else evidence),
+            ),
+            "_coerce_memory_id": lambda value: value,
+            "MEMORY_ID_RE": re.compile(r"^[A-Za-z0-9_-]+$"),
+            "strip_wikilinks": lambda text: text,
+        }
+        functions = load_server_functions(
+            "_is_journey_bucket",
+            "read_bucket",
+            namespace=namespace,
+        )
+
+        result = await functions["read_bucket"]("journey-1")
+
+        self.assertIn("证据桶：", result)
+        self.assertIn("重要的一天 [bucket_id:memory-1]", result)
+
     async def test_directory_returns_metadata_and_one_line_summary_not_full_body(self):
         bucket = journey_bucket(
             journey_start="2026-05-01",

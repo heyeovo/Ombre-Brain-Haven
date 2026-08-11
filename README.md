@@ -32,7 +32,7 @@ flowchart LR
 | Ombre Brain | MCP 工具、记忆读写、召回、画像维护、Dashboard | `server.py`；VPS 默认 `:18001`，容器内 / Python 直跑 `:8000` |
 | Ombre Gateway | 转发聊天请求，并在请求前注入经过门控的上下文 | `gateway.py`；VPS 默认 `:18002`，容器内 / Python 直跑 `:8010` |
 | Buckets | 可读、可编辑、可同步的长期记忆正文 | `buckets/*.md` |
-| State | embedding、moment、edge、原文、画像、提醒等运行状态 | `state/` |
+| State | embedding、moment、edge、原文、画像、提醒、自动化运行与候选等状态 | `state/` |
 
 只需要 MCP 和 Dashboard 时可以单独运行 Brain；需要聊天客户端自动召回与注入时，应同时运行 Brain 和 Gateway。
 
@@ -114,6 +114,12 @@ Daily Reflection 可根据当天聊天、已有 auto-memory 产物和近期记�
 - `review`：只生成待审候选，由人在 Dashboard 确认；默认推荐。
 - `auto`：达到较高置信度的候选自动进入正常写入链路。
 - `off`：关闭当天聊天的自动记忆整理。
+
+#### 每周关系轨迹候选
+
+Haven 已有通用自动化持久底座，并以 `weekly_journey` 作为第一个任务类型。它按香港时区的完整自然周读取当前开放 journey、日回顾、本周新桶、本周独立 feel 与旧桶本周新增的 feel 年轮，按 bucket ID 去重后只生成 `no_change`、`append_current` 或 `transition` 候选。候选与输入快照保存在独立 SQLite 状态中，不进入普通记忆、召回或关联扩散。
+
+当前 phase 1 只开放认证的手动候选生成和只读查询：没有定时线程，没有确认写入接口，也不会调用 journey 创建、追加或关闭方法。后续人工审批执行器完成前，生成候选不会改变任何 journey。
 
 即使使用 `auto`，候选仍需经过记忆写入、去重和合并边界。原始聊天继续留在 raw events；自动记忆只保存脱水后仍值得长期带走的部分。
 
@@ -342,6 +348,7 @@ python gateway.py
 | `gateway.upstreams` | 聊天模型上游和模型路由 |
 | `memory_diffusion` | 图召回、扩散和门控参数 |
 | `reflection` / `daily_review` / `portrait` | 已暂停的旧日印象、独立日回顾与画像维护策略 |
+| `weekly_journey` | 每周 journey 候选的时区、输入边界与输出 token；模型连接复用 `daily_review` |
 | `raw_events` | 原文存储和检索配置 |
 | `word_map` / `dream` | 默认可关闭的派生能力 |
 
@@ -540,6 +547,7 @@ Python 直跑时对应端口为 `8000/8010`。
 - Dream、relationship weather、comment 和 affect anchor 不能单独证明当前话题。
 - `gateway.portrait_memory_*` 为旧兼容字段；旧的每轮 Portrait Memory 已退休。
 - 派生索引损坏时应从 Markdown / raw source 重建，不要把 SQLite 当唯一真源。
+- 每周 journey 自动化当前只有手动候选预览；没有定时生成、批准执行或自动写入路径。
 
 更细的行为边界见 [`docs/memory-layer-contract.md`](docs/memory-layer-contract.md)，部署补充见 [`docs/deploy-zeabur.md`](docs/deploy-zeabur.md)。
 

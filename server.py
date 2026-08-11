@@ -129,6 +129,8 @@ from portrait_engine import DailyPortraitMaintainer
 from raw_events import RawEventStore
 from reflection_engine import ReflectionEngine
 from daily_review_engine import DailyReviewEngine
+from automation_store import AutomationStore
+from journey_weekly_engine import TASK_TYPE as WEEKLY_JOURNEY_TASK_TYPE, WeeklyJourneyEngine
 from recall_diagnostics import RecallDiagnosticsLogger
 from reminder_store import ReminderStore
 from todo_store import TODO_DOMAINS, TodoStore
@@ -255,6 +257,15 @@ word_map_store = WordMapStore(config)                   # Derived generic word c
 darkroom_store = DarkroomStore(config)                  # Private reflection room / 不回显正文的暗房
 gateway_state_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gateway_state.db"))
 daily_review_engine = DailyReviewEngine(config, gateway_state_store)
+automation_store = AutomationStore(config)
+weekly_journey_engine = WeeklyJourneyEngine(
+    config,
+    automation_store,
+    bucket_mgr,
+    gateway_state_store,
+    profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
+    message_client=daily_review_engine,
+)
 raw_event_store = RawEventStore(config)                  # Raw dialogue archive / 原文保险箱
 reminder_store = ReminderStore(config)                    # Standalone care memos / 独立照顾备忘
 todo_store = TodoStore(config)                            # Standalone todos / 独立待办
@@ -11524,6 +11535,106 @@ async def api_journey_detail(request):
     return JSONResponse(payload)
 
 
+def _automation_public_run(run: dict) -> dict:
+    if not isinstance(run, dict) or not run:
+        return {}
+    payload = dict(run)
+    snapshot = payload.pop("input_snapshot", {})
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    current = snapshot.get("current_journey") if isinstance(snapshot.get("current_journey"), dict) else {}
+    payload["input_summary"] = {
+        "persona": snapshot.get("persona") if isinstance(snapshot.get("persona"), dict) else {},
+        "current_journey": {
+            "id": str(current.get("id") or ""),
+            "name": str(current.get("name") or ""),
+            "status": str(current.get("status") or ""),
+        },
+        "daily_review_count": len(snapshot.get("daily_reviews") or []),
+        "missing_daily_review_dates": list(snapshot.get("missing_daily_review_dates") or []),
+        "material_count": len(snapshot.get("materials") or []),
+    }
+    return payload
+
+
+@mcp.custom_route("/api/automations/status", methods=["GET"])
+async def api_automation_status(request):
+    """Read persisted status for a registered review-only automation."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    task_type = str(request.query_params.get("task_type") or WEEKLY_JOURNEY_TASK_TYPE).strip()
+    if task_type != WEEKLY_JOURNEY_TASK_TYPE:
+        return JSONResponse({"error": "unsupported task_type"}, status_code=400)
+    payload = automation_store.task_status(task_type=task_type)
+    payload["latest_run"] = _automation_public_run(payload.get("latest_run") or {})
+    return JSONResponse(payload)
+
+
+@mcp.custom_route("/api/automations/weekly-journey/run", methods=["POST"])
+async def api_weekly_journey_run(request):
+    """Manually generate one pending weekly journey candidate; never writes journey."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    try:
+        result = await weekly_journey_engine.run_manual(
+            cycle_key=str(body.get("cycle_key") or ""),
+            persona_id=str(body.get("persona_id") or ""),
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    result = dict(result)
+    result["run"] = _automation_public_run(result.get("run") or {})
+    return JSONResponse(result, status_code=500 if result.get("status") == "failed" else 200)
+
+
+@mcp.custom_route("/api/automations/candidates", methods=["GET"])
+async def api_automation_candidates(request):
+    """List automation candidates for dashboard review."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    task_type = str(request.query_params.get("task_type") or WEEKLY_JOURNEY_TASK_TYPE).strip()
+    if task_type != WEEKLY_JOURNEY_TASK_TYPE:
+        return JSONResponse({"error": "unsupported task_type"}, status_code=400)
+    try:
+        items = automation_store.list_candidates(
+            task_type=task_type,
+            status=str(request.query_params.get("status") or "pending"),
+            limit=_int_between(request.query_params.get("limit"), 50, 1, 200),
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse({"task_type": task_type, "count": len(items), "items": items})
+
+
+@mcp.custom_route("/api/automations/candidates/{candidate_id}", methods=["GET"])
+async def api_automation_candidate_detail(request):
+    """Read one candidate and its immutable input summary."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    candidate_id = str(request.path_params.get("candidate_id") or "").strip()
+    if not candidate_id or not MEMORY_ID_RE.fullmatch(candidate_id):
+        return JSONResponse({"error": "invalid candidate_id"}, status_code=400)
+    candidate = automation_store.get_candidate(candidate_id)
+    if not candidate:
+        return JSONResponse({"error": "candidate not found"}, status_code=404)
+    run = automation_store.get_run(str(candidate.get("run_id") or ""))
+    return JSONResponse({"candidate": candidate, "run": _automation_public_run(run)})
+
+
 @mcp.custom_route("/api/moments", methods=["GET"])
 async def api_moments(request):
     """Return dashboard diagnostics for indexed memory moments."""
@@ -13789,7 +13900,7 @@ async def api_config_update(request):
     """Hot-update runtime config. Optionally persist to config.yaml."""
     from starlette.responses import JSONResponse
     import yaml
-    global dream_engine, persona_engine, portrait_engine, reflection_engine, reranker_engine, daily_review_engine
+    global dream_engine, persona_engine, portrait_engine, reflection_engine, reranker_engine, daily_review_engine, weekly_journey_engine
     err = _require_dashboard_auth(request)
     if err:
         return err
@@ -14923,6 +15034,14 @@ async def api_config_update(request):
                 status_code=500,
             )
 
+    weekly_journey_engine = WeeklyJourneyEngine(
+        config,
+        automation_store,
+        bucket_mgr,
+        gateway_state_store,
+        profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
+        message_client=daily_review_engine,
+    )
     return JSONResponse({"updated": updated, "ok": True})
 
 

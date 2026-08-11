@@ -40,6 +40,8 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `server.py` | **Brain** 入口（~640KB）。MCP 工具注册（`@mcp.custom_route`）+ REST API + 记忆核心 |
 | `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线 + cc 持久化路由（`Route()` 注册） |
 | `gateway_state.py` | Gateway/cc SQLite 状态：会话原文、窗口闲聊/工作模式、固定日回顾快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、cc 游标与桶排除账本 |
+| `automation_store.py` | 通用自动化 SQLite 控制面：持久 schedule、run、candidate，兼容旧库重复迁移；候选审批状态与普通记忆桶隔离 |
+| `journey_weekly_engine.py` | 每周 journey 只读输入聚合与严格三类候选生成；按香港自然周读取开放阶段、日回顾、新桶/独立 feel/旧桶 feel 年轮，当前只支持手动生成预览 |
 | `bucket_manager.py` | 桶 CRUD、搜索、评分、回收站、命中统计、分词 |
 | `dehydrator.py` | LLM 脱水、合并、打标（含 `_last_merge_usage` 成本追踪） |
 | `decay_engine.py` | 衰减引擎，计算 score |
@@ -75,6 +77,12 @@ OMBRE_TRANSPORT=streamable-http python server.py
 `domain=["journey"]` 的桶属于独立 `relationship_journey` 记忆层。普通关键词、向量、日期、词法补召、开窗浮现、写入合并候选和 bucket/moment 关联扩散均排除 journey；dashboard `/api/search` 为人工管理显式放行，但普通记忆库前端会过滤 journey，独立关系轨迹页使用专用接口读取。`breath(domain="journey")` 只返回按阶段起始时间倒序排列的精简目录（桶 ID、阶段标题、起止时间、一句摘要），选择后再用 `read_bucket(bucket_id)` 读取全文。目录优先使用结构化阶段元数据，旧桶缺失时回退到事件/创建时间与正文第一条有效行。
 
 普通 MCP 写入口不能维护 journey：`hold(journey=True)`、`hold(domain="journey")`、`comment_bucket`、`delete_bucket_comment` 和 `trace` 对 journey 均返回拒绝；通用 Dashboard 新建入口也拒绝 journey。独立关系轨迹页通过认证的 `/api/journeys*` 读取与人工纠错，证据只维护阶段级 `journey_source_bucket_ids`；`read_bucket` 会附带证据桶名称与 ID。后台使用 `BucketManager.create_journey_stage()`、`append_open_journey_stage()` 和 `close_open_journey_stage()` 管理状态。新阶段写 `journey_status=open`，同一时间只允许一个开放阶段；关闭后写 `journey_status=closed` 与 `journey_end`，后台追加只接受开放阶段。可传 `operation_id` 幂等去重；旧 journey 不自动迁成开放状态。
+
+### 每周 journey 候选（phase 1）
+
+`automation_schedules`、`automation_runs`、`automation_candidates` 存在独立 `state/automations.sqlite`，不写成普通 bucket。`weekly_journey` 按 `Asia/Hong_Kong` 的完整自然周聚合材料：新桶看 `metadata.created`，独立 feel 排除 whisper，旧桶新增 feel 年轮看 `comments[].created`，最终按 bucket ID 去重。日回顾使用当前 Haven `profile_id` 与明确协作者按日期范围读取。
+
+候选只允许 `no_change`、`append_current`、`transition`，证据 ID 必须来自固定输入快照；同一 `cycle_key + input_hash` 重试回放同一 run/candidate。当前只有认证手动生成与只读查询接口，没有确认/拒绝写入接口，也没有定时线程；候选生成路径不调用 `BucketManager` 的 journey 创建、追加或关闭方法。模型连接复用 `daily_review` 的 Anthropic-compatible `/v1/messages` 配置。
 
 ## 配置
 
@@ -207,6 +215,14 @@ POST /api/bucket/{bucket_id}/to-journal  # 桶转日记（不可逆）
 GET   /api/journeys                      # 阶段目录，兼容旧 journey 缺失字段
 GET   /api/journeys/{bucket_id}          # 完整正文、阶段字段与证据桶名称/ID
 PATCH /api/journeys/{bucket_id}          # 认证人工纠错；校验唯一 open 与证据桶
+```
+
+### 自动化候选（phase 1）
+```
+GET  /api/automations/status?task_type=weekly_journey
+POST /api/automations/weekly-journey/run       # 手动生成 pending 候选；不写 journey
+GET  /api/automations/candidates?task_type=weekly_journey&status=pending
+GET  /api/automations/candidates/{candidate_id}
 ```
 
 ### 导入

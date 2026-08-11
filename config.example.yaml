@@ -718,6 +718,16 @@ daily_review:
   work_tail_turns: 10              # work windows keep only their latest turns
   # api_key: ""                   # use OMBRE_DAILY_REVIEW_API_KEY; falls back to reflection key
 
+# --- Weekly Journey Candidate / 每周关系轨迹候选 ---
+# Phase 1 only supports authenticated manual candidate generation. It reuses
+# the daily_review model connection and never calls journey lifecycle writes.
+weekly_journey:
+  timezone: "Asia/Hong_Kong"
+  max_material_chars: 4000         # per bucket / feel ring content boundary
+  max_journey_chars: 16000         # current open journey content boundary
+  max_input_chars: 240000          # fail safely instead of silently dropping evidence
+  max_tokens: 2400
+
 # --- Daily Portrait Maintainer / 每日画像维护 ---
 # Writes only an inspectable state/portrait_state.json. It does not edit
 # pinned/protected/Core Memory, and profile_fact/anchor changes stay as

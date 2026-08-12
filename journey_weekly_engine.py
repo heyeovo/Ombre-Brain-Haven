@@ -235,6 +235,10 @@ class WeeklyJourneyEngine:
             created_at = self._parse_timestamp(meta.get("created"))
             bucket_type = str(meta.get("type") or "dynamic").strip().lower()
             tags = {str(item).strip().lower() for item in meta.get("tags", []) or []}
+            if bucket_type == "feel" and {
+                "daily_impression", "weekly_impression", "relationship_weather"
+            } & tags:
+                continue
             material_kinds: list[str] = []
             feel_rings: list[dict] = []
             if created_at and start <= created_at < end:

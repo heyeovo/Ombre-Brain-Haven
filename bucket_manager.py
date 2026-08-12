@@ -786,10 +786,30 @@ class BucketManager:
             if "importance_before_noise" in post:
                 del post["importance_before_noise"]
 
-        # --- Pinned/protected buckets: lock importance to 10, ignore importance changes ---
-        # --- 钉选/保护桶：importance 不可修改，强制保持 10 ---
-        is_pinned = post.get("pinned", False) or post.get("protected", False)
-        if is_pinned:
+        # --- Pin transitions are reversible: preserve the pre-pin state once. ---
+        # --- 钉选切换必须可逆：首次钉选时保存原 importance/type，取消时恢复。---
+        was_pinned = bool(post.get("pinned", False))
+        is_protected = bool(post.get("protected", False))
+        requested_pinned = kwargs.get("pinned")
+        pinning = requested_pinned is True and not was_pinned
+        unpinning = (requested_pinned is False or requested_pinned == 0) and was_pinned
+
+        if pinning:
+            if "importance_before_pin" not in post:
+                post["importance_before_pin"] = int(post.get("importance", 5))
+            if "type_before_pin" not in post:
+                post["type_before_pin"] = str(post.get("type") or "dynamic")
+
+        if unpinning and not is_protected:
+            # Old pinned buckets did not keep backups. Restore them to a neutral
+            # dynamic bucket instead of leaving permanent/importance=10 residues.
+            kwargs["importance"] = int(post.get("importance_before_pin", 5))
+            post["type"] = str(post.get("type_before_pin") or "dynamic")
+            post.pop("importance_before_pin", None)
+            post.pop("type_before_pin", None)
+
+        # --- Pinned/protected buckets keep importance locked except while unpinning. ---
+        if is_protected or (was_pinned and not unpinning):
             kwargs.pop("importance", None)  # silently ignore importance update
 
         # --- Update only fields that were passed in / 只改传入的字段 ---
@@ -902,6 +922,10 @@ class BucketManager:
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(frontmatter.dumps(post))
             self._move_bucket(file_path, self.permanent_dir, domain)
+        elif unpinning and not is_protected:
+            restored_type = str(post.get("type") or "dynamic")
+            target_dir = self.permanent_dir if restored_type == "permanent" else self.dynamic_dir
+            self._move_bucket(file_path, target_dir, domain)
         elif "domain" in kwargs and post.get("type") != "feel":
             bucket_type = str(post.get("type") or "dynamic")
             if bucket_type == "archived":
@@ -1213,6 +1237,62 @@ class BucketManager:
     # update()/delete() 等常规接口的查找范围(_find_bucket_file 不搜 journal_dir)，
     # 只能通过 journal 专属接口编辑——这是有意为之，跟 create() 里 journal 的隔离设计一致。
     # ---------------------------------------------------------
+    def _find_journal_file(self, journal_id: str) -> Optional[str]:
+        """Find one journal file without exposing journal_dir to normal bucket lookup."""
+        if not journal_id or not os.path.exists(self.journal_dir):
+            return None
+        for root, _, files in os.walk(self.journal_dir):
+            for fname in files:
+                if not fname.endswith(".md"):
+                    continue
+                name_part = fname[:-3]
+                if name_part == journal_id or name_part.endswith(f"_{journal_id}"):
+                    return os.path.join(root, fname)
+        return None
+
+    async def get_journal(self, journal_id: str) -> Optional[dict]:
+        file_path = self._find_journal_file(journal_id)
+        return self._load_bucket(file_path) if file_path else None
+
+    async def update_journal(self, journal_id: str, **kwargs) -> bool:
+        """Update isolated journal fields and move the file if its author changes."""
+        file_path = self._find_journal_file(journal_id)
+        if not file_path:
+            return False
+        try:
+            post = frontmatter.load(file_path)
+        except Exception as e:
+            logger.warning(f"Failed to load journal / 加载日记失败: {file_path}: {e}")
+            return False
+
+        if "content" in kwargs:
+            post.content = str(kwargs["content"])
+        if "name" in kwargs:
+            post["name"] = sanitize_name(str(kwargs["name"]))
+        if "author" in kwargs:
+            post["author"] = str(kwargs["author"] or "共同")
+        if "event_time" in kwargs:
+            post["event_time"] = str(kwargs["event_time"])
+        if "locked" in kwargs:
+            post["locked"] = bool(kwargs["locked"])
+        if "unlock_hint" in kwargs:
+            post["unlock_hint"] = str(kwargs["unlock_hint"] or "") if post.get("locked") else ""
+        elif "locked" in kwargs and not post.get("locked"):
+            post["unlock_hint"] = ""
+        post["updated_at"] = now_iso()
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(frontmatter.dumps(post))
+        except OSError as e:
+            logger.error(f"Failed to update journal / 更新日记失败: {file_path}: {e}")
+            return False
+
+        if "author" in kwargs:
+            self._move_bucket(file_path, self.journal_dir, [str(post.get("author") or "共同")])
+        logger.info(f"Updated journal entry / 更新日记: {journal_id}")
+        return True
+
     async def convert_to_journal(self, bucket_id: str, author: str = "共同", locked: bool = False, unlock_hint: str = "") -> bool:
         """把一个已有桶转为日记桶：物理移动文件到 journal_dir/<author>/ 下。"""
         file_path = self._find_bucket_file(bucket_id)
@@ -1246,23 +1326,16 @@ class BucketManager:
         Delete a journal entry. 日记专属删除——独立于常规 delete()。
         Searches journal_dir directly (not _find_bucket_file which excludes journals).
         """
-        if not os.path.exists(self.journal_dir):
+        file_path = self._find_journal_file(journal_id)
+        if not file_path:
             return False
-        for root, _, files in os.walk(self.journal_dir):
-            for fname in files:
-                if not fname.endswith(".md"):
-                    continue
-                name_part = fname[:-3]
-                if name_part == journal_id or name_part.endswith(f"_{journal_id}"):
-                    file_path = os.path.join(root, fname)
-                    try:
-                        os.remove(file_path)
-                        logger.info(f"Deleted journal entry / 已删除日记: {journal_id}")
-                        return True
-                    except OSError as e:
-                        logger.error(f"Failed to delete journal / 删除日记失败: {file_path}: {e}")
-                        return False
-        return False
+        try:
+            os.remove(file_path)
+            logger.info(f"Deleted journal entry / 已删除日记: {journal_id}")
+            return True
+        except OSError as e:
+            logger.error(f"Failed to delete journal / 删除日记失败: {file_path}: {e}")
+            return False
 
 
     # ---------------------------------------------------------

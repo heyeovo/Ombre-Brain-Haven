@@ -36,7 +36,7 @@
 - 不确定是否重复：先 breath/read_bucket，再写。
 - 没有对应源记忆的第一人称感受：hold(content="...", feel=True, ...)。不要传 source_bucket；已有记忆的新感受用 comment_bucket(kind="feel") 写成年轮
 - 普通聊天窗口不能创建或修改轨迹桶：不要传 hold(journey=True) 或 hold(domain="journey")，也不要对 journey 使用 comment_bucket / trace；发现可能的阶段变化时只提出候选
-- 私人日记，不想进普通浮现：hold(journal=True, author="言之"或"小羊"或"共同")；可加 locked=True, unlock_hint="2026-08-01" 上锁
+- 私人日记，不想进普通浮现：hold(journal=True, title="日记标题", event_time="2026-08-01T21:30:00+08:00", author="言之"或"小羊"或"共同")；应自己写标题和日记发生时间，可加 locked=True, unlock_hint="2026-08-01" 上锁
 - 长期悬念标签（低概率浮现）：hold(wish=True) 或 trace(bucket_id, wish=1)
 - 给记忆附上待办：hold(todo="内容", todo_done=False)；标记完成用 trace(bucket_id, todo_done=1)
 - 手动关联桶：trace(bucket_id, related="id1,id2")

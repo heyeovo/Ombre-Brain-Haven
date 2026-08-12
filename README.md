@@ -99,7 +99,9 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 
 ### 手动写入
 
-`grow` 用于保存值得长期保留的记忆。`hold` 适合短暂抓住当前片段，`comment_bucket` 用于给已有记忆增加年轮。`hold` 成功时统一返回 `{status, action, bucket_id, bucket_name}`：`action` 为 `created` 或 `merged`。会话客户端只把 `status=success, action=created` 的 bucket 写入本窗口召回排除账本；合并不会被误记为新桶。年轮由 `comment_bucket` 单独写入。
+`grow` 用于保存值得长期保留的记忆。`hold` 适合短暂抓住当前片段，`comment_bucket` 用于给已有记忆增加年轮。`hold` 成功时统一返回 `{status, action, bucket_id, bucket_name}`：`action` 为 `created` 或 `merged`。会话客户端只把 `status=success, action=created` 的 bucket 写入本窗口召回排除账本；合并不会被误记为新桶。年轮由 `comment_bucket` 单独写入。钉选会保存钉选前的 importance/type；取消钉选时恢复，旧无备份钉选桶回退为 importance 5 的普通 dynamic 桶，不再残留 999 权重。
+
+Journal 是独立目录，不进入普通搜索、浮现或注入。`hold(journal=True)` 会实际保存模型提供的标题与 `event_time`；Dashboard 的 journal 专属接口支持读取和修改标题、正文、作者、事件时间与锁定状态，`created` 始终保留为写入时间。
 
 自动来源调用 `grow(auto=true)` 时会经过写入门卫：低价值候选可以静默，中等候选留待重复验证，高价值或多次出现的候选才进入正常写入。门卫只控制是否值得写，不替代最终的 bucket 合并和结构化。
 
@@ -121,7 +123,7 @@ Daily Reflection 可根据当天聊天、已有 auto-memory 产物和近期记�
 
 Haven 的通用自动化底座以 `state/automations.sqlite` 持久保存日回顾与 `weekly_journey` 的启停、时分、下次运行、运行错误和任务 lease。香港时区的“OB 日”固定为 04:00–次日 04:00，默认 04:30 生成并归到开始日；“OB 周”固定为周一 04:00–下周一 04:00，默认周一 05:00 生成上一周 journey 候选，等待周日日回顾先完成。Dashboard「自动化与状态」可调整两类任务的生成时间，weekly journey 还可调整星期和协作者；时区与 04:00 日界线只读固定。
 
-`weekly_journey` 读取当前开放 journey、该 OB 周日回顾、新桶、独立 feel 与旧桶新增的 feel 年轮，按 bucket ID 去重后只生成 `no_change`、`append_current` 或 `transition` 候选。候选与输入快照保存在独立 SQLite 状态中，不进入普通记忆、召回或关联扩散。
+`weekly_journey` 读取当前开放 journey、该 OB 周日回顾、新桶、独立 feel 与旧桶新增的 feel 年轮，按 bucket ID 去重后只生成 `no_change`、`append_current` 或 `transition` 候选。旧 `daily_impression`、`weekly_impression`、`relationship_weather` feel 明确排除，不作为轨迹材料。候选与输入快照保存在独立 SQLite 状态中，不进入普通记忆、召回或关联扩散。
 
 候选只能经认证接口人工编辑、拒绝或确认。关系轨迹页显示输入完整性、原始 preview、当前 draft/revision/hash、证据桶和预计差异。编辑保存为新 revision 并保留原始 preview；确认只接收页面已展示 revision 的 hash，由服务端冻结 approved payload/hash。白名单执行器当前只注册 `weekly_journey`：`no_change` 零写入，`append_current` 只追加开放阶段，`transition` 使用独立 `:close` / `:create` operation ID。确认前若开放阶段、批准稿或证据桶已变化，会保存可解释冲突而不覆盖当前状态；重复确认与 close 成功、create 失败后的重试保持幂等。定时运行也只新增 `pending` 候选，未确认和已拒绝候选不会改变 journey。
 
@@ -131,7 +133,7 @@ Haven 的通用自动化底座以 `state/automations.sqlite` 持久保存日回�
 
 日印象不是天气记录，也不是事件日报。它是 AI 对当天关系温度的第一人称小结：今天靠近还是疏远、轻快还是疲惫、哪些互动留下了余温。它可参考当天普通记忆、聊天原文、已经筛出的自动记忆和少量 Persona 事件；有直接材料时，不应让 Persona 的数字状态代替真实对话。
 
-日印象保存为 `relationship_weather + daily_impression` 的 feel bucket，可供 Dashboard、画像维护和日期 trace 参考。它默认不能作为普通主题的 direct seed，也不应因为提到某个词就召回一件无关旧事。周印象默认关闭。
+日印象保存为 `relationship_weather + daily_impression` 的 feel bucket。旧生成机制已经暂停，历史数据只保留人工查看/删除能力；它不进入普通主题召回，也不再作为 weekly journey 材料。周印象同样不作为当前写入机制。
 
 #### Dream
 

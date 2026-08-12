@@ -17,7 +17,7 @@
 | `read_bucket` | 按 bucket_id 精确读取完整记忆；journey 会附带证据桶名称和 ID，需要核实时再读取证据桶；准备追细节、写年轮、修改或删除前先读 |
 | `read_daily_reviews` | 只读独立日回顾。用 `start_date + end_date` 查闭区间，或用 `last_days` 查截至昨天的最近若干香港日历日；多协作者时传 `persona_id`。返回当前正文、编辑状态、更新时间和缺失日期，不返回来源窗口，也不写任何记忆 |
 | `comment_bucket` | 给已有记忆追加年轮/评论；读到旧记忆后的新感受或补充，用它挂回源 bucket。`kind="feel"` 时 content 只写第一人称感受，不写分段标题 |
-| `hold` | 写单条长期记忆；`date` 可传事件日期；显式 `domain` 会覆盖自动领域；显式 `valence/arousal` 会覆盖自动情绪；`feel=True` 写无源独立感受；`journal=True` 写独立日记（`author` 区分作者，`locked=True` + `unlock_hint` 上锁）；`wish=True` 长期悬念标签（15% 概率随机浮现）；附带桶 Todo 时同时传 `todo` 和 `todo_domain="tech"` / `"emotional"`。已有记忆的新感受必须用 `comment_bucket`；独立 feel 的 content 只写第一人称感受。普通窗口不得传 `journey=True` 或 `domain="journey"`，后端会拒绝，阶段变化只能作为候选留给后台任务。成功返回 `{status, action, bucket_id, bucket_name}` |
+| `hold` | 写单条长期记忆；`date` 可传事件日期；显式 `domain` 会覆盖自动领域；显式 `valence/arousal` 会覆盖自动情绪；`feel=True` 写无源独立感受；`journal=True` 写独立日记，此时应主动提供 `title` 和 `event_time`，并用 `author` 区分作者，`locked=True` + `unlock_hint` 上锁；`wish=True` 长期悬念标签（15% 概率随机浮现）；附带桶 Todo 时同时传 `todo` 和 `todo_domain="tech"` / `"emotional"`。已有记忆的新感受必须用 `comment_bucket`；独立 feel 的 content 只写第一人称感受。普通窗口不得传 `journey=True` 或 `domain="journey"`，后端会拒绝，阶段变化只能作为候选留给后台任务。成功返回 `{status, action, bucket_id, bucket_name}` |
 | `create_todo` | 创建独立 Todo；`domain` 必须是 `tech` / `emotional`。没有关联桶时 `context` 必填；`source_bucket` 只是背景关联，不会写入桶 Todo |
 | `list_todos` | 主动查询 Todo；合并独立 Todo 与非归档桶 Todo，可按 `domain` / `done` 筛选。返回的方括号 ID 可直接交给 `set_todo_done` |
 | `set_todo_done` | 完成或重新打开 Todo。独立 Todo 传自身 ID；桶 Todo 必须原样传 `bucket:<桶ID>`，不要删掉 `bucket:`，也不要改用 `trace(todo_done=...)` |

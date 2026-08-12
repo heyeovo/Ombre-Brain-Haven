@@ -259,6 +259,16 @@ class FakeBucketManager:
                 },
             },
             {
+                "id": "daily-impression-new",
+                "content": "旧日印象关系天气",
+                "metadata": {
+                    "name": "2026-08-06 日印象",
+                    "type": "feel",
+                    "tags": ["daily_impression", "relationship_weather"],
+                    "created": "2026-08-06T11:00:00+08:00",
+                },
+            },
+            {
                 "id": "old-with-ring",
                 "content": "旧桶正文",
                 "metadata": {

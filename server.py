@@ -7079,6 +7079,25 @@ async def inspect_moments(bucket_id: str = "", limit: int = 20) -> dict:
         moments = memory_moment_store.upsert_bucket(bucket)
         edges = memory_moment_store.list_edges(bucket_id)
         meta = bucket.get("metadata", {}) or {}
+        cross_bucket_edges = []
+        for edge in memory_edge_store.list_edges():
+            source_id = str(edge.get("source") or edge.get("source_memory_id") or "").strip()
+            target_id = str(edge.get("target") or edge.get("target_memory_id") or "").strip()
+            if bucket_id not in {source_id, target_id}:
+                continue
+            other_id = target_id if source_id == bucket_id else source_id
+            other = await bucket_mgr.get(other_id)
+            other_meta = (other or {}).get("metadata", {})
+            cross_bucket_edges.append({
+                "direction": "outgoing" if source_id == bucket_id else "incoming",
+                "source_bucket_id": source_id,
+                "target_bucket_id": target_id,
+                "related_bucket_id": other_id,
+                "related_bucket_name": str(other_meta.get("name") or other_id),
+                "relation_type": str(edge.get("relation_type") or edge.get("type") or "relates_to"),
+                "confidence": edge.get("confidence", 0.5),
+                "reason": str(edge.get("reason") or ""),
+            })
         return {
             "status": "ok",
             "mode": "bucket",
@@ -7097,6 +7116,7 @@ async def inspect_moments(bucket_id: str = "", limit: int = 20) -> dict:
                 for moment in moments[:limit]
             ],
             "edges": edges[:limit],
+            "cross_bucket_edges": cross_bucket_edges[:limit],
         }
 
     buckets = await bucket_mgr.list_all(include_archive=False)
@@ -9187,6 +9207,8 @@ async def hold(
     # --- Journal mode: independent channel, bypasses merge entirely ---
     # --- 日记模式：独立通道，完全不走合并 ---
     if journal:
+        journal_title = title.strip() or _clip_text(" ".join(strip_wikilinks(content).split()), 32)
+        journal_event_time = str(event_time or event_date or "").strip()
         bucket_id = await bucket_mgr.create(
             content=content,
             tags=extra_tags,
@@ -9194,13 +9216,14 @@ async def hold(
             domain=[],
             valence=valence if 0 <= valence <= 1 else 0.5,
             arousal=arousal if 0 <= arousal <= 1 else 0.3,
-            name=None,
+            name=journal_title or None,
             bucket_type="journal",
             author=author or "共同",
             locked=locked,
             unlock_hint=unlock_hint,
+            event_time=journal_event_time,
         )
-        return _hold_success("created", bucket_id, title.strip() or bucket_id)
+        return _hold_success("created", bucket_id, journal_title or bucket_id)
 
     # --- Feel mode: standalone feelings only; sourced feelings use comment_bucket ---
     # --- Feel 模式：只写独立感受；有源感受统一使用 comment_bucket ---
@@ -12693,7 +12716,10 @@ async def api_list_journal(request):
         return JSONResponse(_JOURNAL_CACHE["payload"])
     try:
         entries = await bucket_mgr.list_journal()
-        entries.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+        entries.sort(
+            key=lambda b: b["metadata"].get("event_time") or b["metadata"].get("created", ""),
+            reverse=True,
+        )
         result = []
         for j in entries:
             meta = j["metadata"]
@@ -12702,7 +12728,10 @@ async def api_list_journal(request):
                 "name": meta.get("name", j["id"]),
                 "author": meta.get("author", "共同"),
                 "created": meta.get("created", ""),
+                "updated_at": meta.get("updated_at", ""),
+                "event_time": meta.get("event_time") or meta.get("created", ""),
                 "locked": bool(meta.get("locked", False)),
+                "unlock_hint": meta.get("unlock_hint", ""),
             }
             if meta.get("locked"):
                 hint = meta.get("unlock_hint", "")
@@ -12738,6 +12767,10 @@ async def api_create_journal(request):
     content = body.get("content", "")
     if not content or not content.strip():
         return JSONResponse({"error": "content required"}, status_code=400)
+    journal_name = str(body.get("name") or "").strip() or _clip_text(
+        " ".join(strip_wikilinks(content).split()), 32
+    )
+    event_time = str(body.get("event_time") or body.get("date") or "").strip()
     bucket_id = await bucket_mgr.create(
         content=content,
         tags=body.get("tags", []),
@@ -12745,27 +12778,67 @@ async def api_create_journal(request):
         domain=[],
         valence=float(body.get("valence", 0.5)),
         arousal=float(body.get("arousal", 0.3)),
-        name=body.get("name") or None,
+        name=journal_name or None,
         bucket_type="journal",
         author=body.get("author", "共同"),
         locked=bool(body.get("locked", False)),
         unlock_hint=body.get("unlock_hint", ""),
+        event_time=event_time,
     )
     _invalidate_cache("JOURNAL")
     return JSONResponse({"ok": True, "id": bucket_id})
 
-@mcp.custom_route("/api/journal/{journal_id}", methods=["DELETE"])
-async def api_delete_journal(request):
-    """删除日记条目(前端日记弹窗的抹除按钮用)。"""
+@mcp.custom_route("/api/journal/{journal_id}", methods=["GET", "PATCH", "DELETE"])
+async def api_journal_detail(request):
+    """Read, update, or delete one isolated journal entry."""
     from starlette.responses import JSONResponse
     err = _require_dashboard_auth(request)
     if err: return err
     journal_id = request.path_params["journal_id"]
-    success = await bucket_mgr.delete_journal(journal_id)
-    if not success:
+    if request.method == "DELETE":
+        success = await bucket_mgr.delete_journal(journal_id)
+        if not success:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        _invalidate_cache("JOURNAL")
+        return JSONResponse({"ok": True})
+
+    journal = await bucket_mgr.get_journal(journal_id)
+    if not journal:
         return JSONResponse({"error": "not found"}, status_code=404)
-    _invalidate_cache("JOURNAL")
-    return JSONResponse({"ok": True})
+
+    if request.method == "PATCH":
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid json body"}, status_code=400)
+        allowed_fields = {"name", "content", "author", "event_time", "locked", "unlock_hint"}
+        updates = {key: value for key, value in body.items() if key in allowed_fields}
+        if not updates:
+            return JSONResponse({"error": "no recognized fields in body"}, status_code=400)
+        author = updates.get("author")
+        if author is not None and author not in {"言之", "小羊", "共同"}:
+            return JSONResponse({"error": "invalid author"}, status_code=400)
+        if "content" in updates and not str(updates["content"]).strip():
+            return JSONResponse({"error": "content required"}, status_code=400)
+        if "name" in updates and not str(updates["name"]).strip():
+            return JSONResponse({"error": "name required"}, status_code=400)
+        if not await bucket_mgr.update_journal(journal_id, **updates):
+            return JSONResponse({"error": "update failed"}, status_code=500)
+        _invalidate_cache("JOURNAL")
+        journal = await bucket_mgr.get_journal(journal_id)
+
+    meta = (journal or {}).get("metadata", {})
+    return JSONResponse({
+        "id": journal_id,
+        "name": meta.get("name", journal_id),
+        "author": meta.get("author", "共同"),
+        "created": meta.get("created", ""),
+        "updated_at": meta.get("updated_at", ""),
+        "event_time": meta.get("event_time") or meta.get("created", ""),
+        "locked": bool(meta.get("locked", False)),
+        "unlock_hint": meta.get("unlock_hint", ""),
+        "content": strip_wikilinks((journal or {}).get("content", "")),
+    })
 
 @mcp.custom_route("/api/darkroom/status", methods=["GET"])
 async def api_darkroom_status(request):

@@ -44,7 +44,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `automation_store.py` | 通用自动化 SQLite 控制面：持久 schedule、run、candidate，兼容旧库重复迁移；候选 revision CAS、批准冻结、执行状态和任务 lease 与普通记忆桶隔离 |
 | `automation_scheduler.py` | 日回顾与 weekly journey 的香港时区分钟级调度规则：固定 04:00 日界线、下次运行计算和可编辑时间校验 |
 | `automation_executor.py` | 人工批准候选的白名单执行器；当前只注册 `weekly_journey`，负责冲突校验、批准稿 hash、派生 operation ID、重复确认回放与两步切换恢复 |
-| `journey_weekly_engine.py` | 每周 journey 只读输入聚合与严格三类候选生成；按香港周一 04:00–下周一 04:00 读取开放阶段、日回顾、新桶/独立 feel/旧桶 feel 年轮，支持手动或持久 schedule 触发 |
+| `journey_weekly_engine.py` | 每周 journey 只读输入聚合与严格三类候选生成；按香港周一 04:00–下周一 04:00 读取开放阶段、日回顾、新桶/独立 feel/旧桶 feel 年轮，排除旧日印象/关系天气 feel，支持手动或持久 schedule 触发 |
 | `bucket_manager.py` | 桶 CRUD、搜索、评分、回收站、命中统计、分词 |
 | `dehydrator.py` | LLM 脱水、合并、打标（含 `_last_merge_usage` 成本追踪） |
 | `decay_engine.py` | 衰减引擎，计算 score |
@@ -86,7 +86,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 
 `automation_schedules`、`automation_runs`、`automation_candidates` 存在独立 `state/automations.sqlite`，不写成普通 bucket。持久调度器每 30 秒检查到期任务，并用任务 lease 防止并发重复领取；设置页可调整日回顾启停/时分与 weekly journey 启停/星期/时分/协作者，时区固定 `Asia/Hong_Kong`，日界线固定 04:00。默认日回顾每日 04:30，weekly journey 周一 05:00，后者错开半小时等待周日日回顾完成。
 
-`weekly_journey` 按周一 04:00–下周一 04:00 的完整 OB 周聚合材料：新桶看 `metadata.created`，独立 feel 排除 whisper，旧桶新增 feel 年轮看 `comments[].created`，最终按 bucket ID 去重。日回顾使用当前 Haven `profile_id` 与明确协作者按日期范围读取。定时触发与手动触发复用同一固定快照、候选白名单和幂等链路；定时任务只生成 `pending` 候选，不确认、不调用 journey 生命周期写入。
+`weekly_journey` 按周一 04:00–下周一 04:00 的完整 OB 周聚合材料：新桶看 `metadata.created`，独立 feel 排除 whisper 以及 `daily_impression` / `weekly_impression` / `relationship_weather`，旧桶新增 feel 年轮看 `comments[].created`，最终按 bucket ID 去重。日回顾使用当前 Haven `profile_id` 与明确协作者按日期范围读取。定时触发与手动触发复用同一固定快照、候选白名单和幂等链路；定时任务只生成 `pending` 候选，不确认、不调用 journey 生命周期写入。
 
 候选只允许 `no_change`、`append_current`、`transition`，证据 ID 必须来自固定输入快照；同一 `cycle_key + input_hash` 重试回放同一 run/candidate。编辑只替换 draft 并增加 revision，原始 preview 保留；确认请求只提交 `expected_revision + approved_payload_hash`，服务端重新规范化并冻结完整 approved payload/hash，浏览器不能临时提交另一份正文。
 
@@ -217,6 +217,7 @@ GET  /api/status                                                 # 状态
 ```
 GET  /api/journal                        # 列表（60s 内存缓存）
 POST /api/journal                        # 新建（自动 invalidate 缓存）
+GET|PATCH|DELETE /api/journal/{journal_id} # 专属详情、完整编辑与删除
 POST /api/bucket/{bucket_id}/to-journal  # 桶转日记（不可逆）
 ```
 
@@ -260,7 +261,7 @@ POST /api/prompts/test                # analyze/merge 局部草稿试跑；不�
 GET  /api/todos / POST /api/todos / POST /api/todos/{id}/writeback   # 待办
 GET  /api/reminders / POST /api/reminders / DELETE /api/reminders/{id}  # 照顾备忘
 GET  /api/persona / GET /api/portrait-state*                        # 画像
-GET  /api/moments / GET /api/edges / GET /api/word-map*              # 记忆图
+GET  /api/moments / GET /api/edges / GET /api/word-map*              # 记忆图；单桶 moments 返回桶内边与带目标桶名称的跨桶边
 POST /api/ingest-raw / POST /api/memories                            # 原文写入；前者兼容历史档案查重/分块归档动作
 GET  /api/daily-chat-memory/pending | /run | /confirm                # 每日聊天记忆
 GET|PATCH /api/daily-reviews                                            # 日回顾列表 / 手动微调
@@ -310,7 +311,7 @@ GET /api/debug/injections             # 注入调试（见 README「Gateway 注�
 `OMBRE_AUTO_MERGE=false` 时 `_merge_or_create()` 跳过合并，始终新建桶。用于手动合并工作流。
 
 ### Journal 缓存
-`_JOURNAL_CACHE` 60s TTL。新建日记时 `_invalidate_cache("JOURNAL")`。
+`_JOURNAL_CACHE` 60s TTL。新建、编辑、删除日记时均 `_invalidate_cache("JOURNAL")`。Journal 使用独立目录和专属 GET/PATCH/DELETE；标题、正文、作者、`event_time`、锁定状态可编辑，`created` 不随编辑改变。
 
 ### LLM 成本追踪
 `utils.estimate_llm_cost()` 支持 18 个模型。导入和合并预览返回 cost/cny/token 用量。

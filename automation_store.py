@@ -25,6 +25,23 @@ def _lease_until_iso(seconds: int) -> str:
     ).isoformat(timespec="seconds")
 
 
+def _parse_iso(value: str, timezone: str = "Asia/Hong_Kong") -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    try:
+        tz = ZoneInfo(str(timezone or "Asia/Hong_Kong"))
+    except Exception:
+        tz = ZoneInfo("Asia/Hong_Kong")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=tz)
+    return parsed.astimezone(tz)
+
+
 class AutomationStore:
     """Small generic automation control plane stored outside memory buckets."""
 
@@ -78,6 +95,7 @@ class AutomationStore:
                     lease_owner TEXT NOT NULL DEFAULT '',
                     lease_until TEXT NOT NULL DEFAULT '',
                     last_run_at TEXT NOT NULL DEFAULT '',
+                    last_error TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -96,6 +114,7 @@ class AutomationStore:
                     "lease_owner": "TEXT NOT NULL DEFAULT ''",
                     "lease_until": "TEXT NOT NULL DEFAULT ''",
                     "last_run_at": "TEXT NOT NULL DEFAULT ''",
+                    "last_error": "TEXT NOT NULL DEFAULT ''",
                     "created_at": "TEXT NOT NULL DEFAULT ''",
                     "updated_at": "TEXT NOT NULL DEFAULT ''",
                 },
@@ -301,6 +320,98 @@ class AutomationStore:
                 (str(task_type),),
             ).fetchone()
             return self._schedule_payload(row)
+        finally:
+            conn.close()
+
+    def update_schedule(
+        self,
+        *,
+        task_type: str,
+        enabled: bool,
+        timezone: str,
+        policy: dict,
+        next_run_at: str,
+    ) -> dict:
+        now = _now_iso()
+        conn = self._connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE automation_schedules
+                    SET enabled = ?, timezone = ?, policy_json = ?, next_run_at = ?,
+                        lease_owner = '', lease_until = '', updated_at = ?
+                    WHERE task_type = ?
+                    """,
+                    (
+                        1 if enabled else 0,
+                        str(timezone or "Asia/Hong_Kong"),
+                        self._json_dump(policy or {}),
+                        str(next_run_at or ""),
+                        now,
+                        str(task_type),
+                    ),
+                )
+            if cursor.rowcount != 1:
+                raise ValueError("automation schedule not found")
+            return self.get_schedule(task_type=task_type)
+        finally:
+            conn.close()
+
+    def claim_due_schedule(
+        self,
+        *,
+        task_type: str,
+        owner: str,
+        now: datetime,
+        lease_seconds: int = 900,
+    ) -> dict:
+        safe_owner = str(owner or "").strip()
+        if not safe_owner:
+            raise ValueError("automation lease owner is required")
+        schedule = self.get_schedule(task_type=task_type)
+        if not schedule or not schedule.get("enabled"):
+            return {}
+        due_at = _parse_iso(schedule.get("next_run_at", ""), schedule.get("timezone", ""))
+        if due_at is None or due_at > now.astimezone(due_at.tzinfo):
+            return {}
+        if not self.acquire_task_lease(
+            task_type=task_type, owner=safe_owner, lease_seconds=lease_seconds,
+        ):
+            return {}
+        claimed = self.get_schedule(task_type=task_type)
+        claimed_due = _parse_iso(claimed.get("next_run_at", ""), claimed.get("timezone", ""))
+        if not claimed.get("enabled") or claimed_due is None or claimed_due > now.astimezone(claimed_due.tzinfo):
+            self.release_task_lease(task_type=task_type, owner=safe_owner)
+            return {}
+        return claimed
+
+    def complete_schedule_run(
+        self,
+        *,
+        task_type: str,
+        owner: str,
+        next_run_at: str,
+        error: str = "",
+    ) -> dict:
+        conn = self._connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE automation_schedules
+                    SET next_run_at = ?, last_run_at = ?, last_error = ?, lease_owner = '', lease_until = '',
+                        updated_at = ?
+                    WHERE task_type = ? AND lease_owner = ?
+                    """,
+                    (
+                        str(next_run_at), _now_iso(), str(error or "")[:1000], _now_iso(),
+                        str(task_type), str(owner),
+                    ),
+                )
+            if cursor.rowcount != 1:
+                raise ValueError("automation schedule lease was lost")
+            return self.get_schedule(task_type=task_type)
         finally:
             conn.close()
 

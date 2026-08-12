@@ -134,6 +134,14 @@ from daily_review_engine import (
     DailyReviewEngine,
 )
 from automation_store import AutomationStore
+from automation_scheduler import (
+    DAILY_REVIEW_TASK_TYPE,
+    FIXED_TIMEZONE as AUTOMATION_TIMEZONE,
+    WEEKLY_JOURNEY_TASK_TYPE as SCHEDULED_WEEKLY_JOURNEY_TASK_TYPE,
+    next_run_at as automation_next_run_at,
+    normalize_policy as normalize_automation_policy,
+    schedule_payload as automation_schedule_payload,
+)
 from automation_executor import AutomationExecutor
 from journey_weekly_engine import (
     TASK_TYPE as WEEKLY_JOURNEY_TASK_TYPE,
@@ -293,6 +301,29 @@ daily_review_engine = DailyReviewEngine(
     prompt_resolver=prompt_store.get_effective,
 )
 automation_store = AutomationStore(config)
+_daily_schedule_cfg = config.get("daily_review", {}) if isinstance(config.get("daily_review"), dict) else {}
+_daily_schedule = automation_store.ensure_schedule(
+    schedule_id=DAILY_REVIEW_TASK_TYPE,
+    task_type=DAILY_REVIEW_TASK_TYPE,
+    handler_key=DAILY_REVIEW_TASK_TYPE,
+    timezone=AUTOMATION_TIMEZONE,
+    enabled=bool(_daily_schedule_cfg.get("enabled", True)),
+    policy={
+        "hour": _daily_schedule_cfg.get("daily_hour", 4),
+        "minute": _daily_schedule_cfg.get("daily_minute", 30),
+        "day_start_hour": 4,
+    },
+)
+if not _daily_schedule.get("next_run_at") and _daily_schedule.get("enabled"):
+    _initial_daily_payload = automation_schedule_payload(
+        DAILY_REVIEW_TASK_TYPE,
+        enabled=True,
+        policy=_daily_schedule.get("policy"),
+    )
+    automation_store.update_schedule(
+        task_type=DAILY_REVIEW_TASK_TYPE,
+        **_initial_daily_payload,
+    )
 weekly_journey_engine = WeeklyJourneyEngine(
     config,
     automation_store,
@@ -11783,17 +11814,49 @@ def _automation_mutation_status(result: dict) -> int:
 
 @mcp.custom_route("/api/automations/status", methods=["GET"])
 async def api_automation_status(request):
-    """Read persisted status for a registered review-only automation."""
+    """Read persisted status for daily review or candidate-only weekly automation."""
     from starlette.responses import JSONResponse
     err = _require_dashboard_auth(request)
     if err:
         return err
     task_type = str(request.query_params.get("task_type") or WEEKLY_JOURNEY_TASK_TYPE).strip()
-    if task_type != WEEKLY_JOURNEY_TASK_TYPE:
+    if task_type not in {WEEKLY_JOURNEY_TASK_TYPE, DAILY_REVIEW_TASK_TYPE}:
         return JSONResponse({"error": "unsupported task_type"}, status_code=400)
     payload = automation_store.task_status(task_type=task_type)
     payload["latest_run"] = _automation_public_run(payload.get("latest_run") or {})
     return JSONResponse(payload)
+
+
+@mcp.custom_route("/api/automations/schedule", methods=["PATCH"])
+async def api_automation_schedule_update(request):
+    """Update the persisted candidate-only weekly schedule."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    task_type = str(body.get("task_type") or "").strip()
+    if task_type != WEEKLY_JOURNEY_TASK_TYPE:
+        return JSONResponse({"error": "only weekly_journey schedule is supported here"}, status_code=400)
+    try:
+        policy = normalize_automation_policy(task_type, body.get("policy"))
+        enabled = _bool_value(body.get("enabled"), False)
+        if enabled and not policy.get("persona_id"):
+            raise ValueError("persona_id is required before enabling weekly journey schedule")
+        payload = automation_schedule_payload(
+            task_type,
+            enabled=enabled,
+            policy=policy,
+        )
+        schedule = automation_store.update_schedule(task_type=task_type, **payload)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse({"task_type": task_type, "schedule": schedule})
 
 
 @mcp.custom_route("/api/automations/weekly-journey/run", methods=["POST"])
@@ -14252,6 +14315,7 @@ async def api_config_get(request):
         "daily_review": {
             "enabled": bool(daily_review_cfg.get("enabled", getattr(daily_review_engine, "enabled", True))),
             "daily_hour": int(daily_review_cfg.get("daily_hour", getattr(daily_review_engine, "daily_hour", 4))),
+            "daily_minute": int(daily_review_cfg.get("daily_minute", getattr(daily_review_engine, "daily_minute", 30))),
             "timezone": str(daily_review_cfg.get("timezone") or "Asia/Hong_Kong"),
             "model": str(daily_review_cfg.get("model") or getattr(daily_review_engine, "model", "")),
             "thinking_mode": str(daily_review_cfg.get("thinking_mode") or getattr(daily_review_engine, "thinking_mode", "") or ""),
@@ -14857,6 +14921,9 @@ async def api_config_update(request):
         if "daily_hour" in r:
             daily_review_cfg["daily_hour"] = _int_between(r.get("daily_hour"), 4, 0, 23)
             updated.append("daily_review.daily_hour")
+        if "daily_minute" in r:
+            daily_review_cfg["daily_minute"] = _int_between(r.get("daily_minute"), 30, 0, 59)
+            updated.append("daily_review.daily_minute")
         if "max_input_chars" in r:
             daily_review_cfg["max_input_chars"] = _int_between(r.get("max_input_chars"), 240000, 20000, 500000)
             updated.append("daily_review.max_input_chars")
@@ -14880,6 +14947,19 @@ async def api_config_update(request):
             config,
             gateway_state_store,
             prompt_resolver=prompt_store.get_effective,
+        )
+        daily_schedule_payload = automation_schedule_payload(
+            DAILY_REVIEW_TASK_TYPE,
+            enabled=daily_review_engine.enabled,
+            policy={
+                "hour": daily_review_engine.daily_hour,
+                "minute": daily_review_engine.daily_minute,
+                "day_start_hour": 4,
+            },
+        )
+        automation_store.update_schedule(
+            task_type=DAILY_REVIEW_TASK_TYPE,
+            **daily_schedule_payload,
         )
 
     # --- Portrait maintainer config ---
@@ -15332,6 +15412,8 @@ async def api_config_update(request):
                     sc_daily_review["enabled"] = bool(body["daily_review"]["enabled"])
                 if "daily_hour" in body["daily_review"]:
                     sc_daily_review["daily_hour"] = _int_between(body["daily_review"].get("daily_hour"), 4, 0, 23)
+                if "daily_minute" in body["daily_review"]:
+                    sc_daily_review["daily_minute"] = _int_between(body["daily_review"].get("daily_minute"), 30, 0, 59)
                 if "max_input_chars" in body["daily_review"]:
                     sc_daily_review["max_input_chars"] = _int_between(
                         body["daily_review"].get("max_input_chars"), 240000, 20000, 500000
@@ -16013,33 +16095,71 @@ if __name__ == "__main__":
             rt.start()
             logger.info("Reflection scheduler enabled / 反思定时器已启用")
 
-        async def _daily_review_loop():
+        async def _automation_schedule_loop():
             await asyncio.sleep(30)
             local_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gateway_state.db"))
+            owner = f"automation-scheduler:{os.getpid()}:{threading.get_ident()}"
             while True:
-                try:
-                    local_engine = DailyReviewEngine(
-                        config,
-                        local_store,
-                        prompt_resolver=prompt_store.get_effective,
-                    )
-                    results = await local_engine.run_due(
-                        profile_id=str(getattr(persona_engine, "profile_id", "") or "default")
-                    )
-                    if results:
-                        logger.info("Daily review run-due results / 日回顾定时结果: %s", results)
-                except Exception as e:
-                    logger.warning("Daily review scheduler failed / 日回顾定时器失败: %s", e)
-                await asyncio.sleep(60 * 60)
+                now = datetime.now(ZoneInfo(AUTOMATION_TIMEZONE))
+                for task_type in (DAILY_REVIEW_TASK_TYPE, SCHEDULED_WEEKLY_JOURNEY_TASK_TYPE):
+                    claimed = {}
+                    try:
+                        claimed = automation_store.claim_due_schedule(
+                            task_type=task_type, owner=owner, now=now,
+                        )
+                        if not claimed:
+                            continue
+                        policy = normalize_automation_policy(task_type, claimed.get("policy"))
+                        due_at = datetime.fromisoformat(str(claimed["next_run_at"]).replace("Z", "+00:00"))
+                        run_error = ""
+                        if task_type == DAILY_REVIEW_TASK_TYPE:
+                            local_engine = DailyReviewEngine(
+                                config, local_store, prompt_resolver=prompt_store.get_effective,
+                            )
+                            review_date = (due_at.astimezone(ZoneInfo(AUTOMATION_TIMEZONE)).date() - timedelta(days=1)).isoformat()
+                            results = [
+                                await local_engine.generate(
+                                    profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
+                                    persona_id=str(persona.get("id") or ""),
+                                    review_date=review_date,
+                                )
+                                for persona in local_store.list_cc_personas()
+                                if str(persona.get("id") or "").strip()
+                            ]
+                            logger.info("Daily review scheduled results / 日回顾定时结果: %s", results)
+                        else:
+                            result = await weekly_journey_engine.run_scheduled(
+                                persona_id=str(policy.get("persona_id") or ""),
+                            )
+                            if result.get("status") == "failed":
+                                run_error = str(result.get("error") or "weekly journey generation failed")
+                            logger.info("Weekly journey scheduled result / 每周轨迹定时结果: %s", result)
+                        next_at = automation_next_run_at(
+                            task_type, policy, after=max(now, due_at),
+                        ).isoformat(timespec="seconds")
+                        automation_store.complete_schedule_run(
+                            task_type=task_type, owner=owner, next_run_at=next_at, error=run_error,
+                        )
+                    except Exception as e:
+                        logger.warning("Automation scheduler failed for %s: %s", task_type, e)
+                        if claimed:
+                            try:
+                                policy = normalize_automation_policy(task_type, claimed.get("policy"))
+                                next_at = automation_next_run_at(task_type, policy, after=now).isoformat(timespec="seconds")
+                                automation_store.complete_schedule_run(
+                                    task_type=task_type, owner=owner, next_run_at=next_at, error=str(e),
+                                )
+                            except Exception:
+                                automation_store.release_task_lease(task_type=task_type, owner=owner)
+                await asyncio.sleep(30)
 
-        def _start_daily_review_scheduler():
+        def _start_automation_scheduler():
             loop = asyncio.new_event_loop()
-            loop.run_until_complete(_daily_review_loop())
+            loop.run_until_complete(_automation_schedule_loop())
 
-        if daily_review_engine.enabled:
-            drt = threading.Thread(target=_start_daily_review_scheduler, daemon=True)
-            drt.start()
-            logger.info("Daily review scheduler enabled / 日回顾定时器已启用")
+        ast = threading.Thread(target=_start_automation_scheduler, daemon=True)
+        ast.start()
+        logger.info("Persistent automation scheduler enabled / 持久自动化定时器已启用")
 
         async def _portrait_loop():
             await asyncio.sleep(25)

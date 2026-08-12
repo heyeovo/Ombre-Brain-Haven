@@ -42,8 +42,9 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `gateway_state.py` | Gateway/cc SQLite 状态：会话原文、窗口闲聊/工作模式、固定日回顾快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、cc 游标与桶排除账本 |
 | `prompt_store.py` | 四类产品 Prompt 覆盖持久化：按 profile 保存 `analyze`、`merge`、`daily_review`、`weekly_journey` 用户版本、revision 与更新时间；代码默认仍是系统真源 |
 | `automation_store.py` | 通用自动化 SQLite 控制面：持久 schedule、run、candidate，兼容旧库重复迁移；候选 revision CAS、批准冻结、执行状态和任务 lease 与普通记忆桶隔离 |
+| `automation_scheduler.py` | 日回顾与 weekly journey 的香港时区分钟级调度规则：固定 04:00 日界线、下次运行计算和可编辑时间校验 |
 | `automation_executor.py` | 人工批准候选的白名单执行器；当前只注册 `weekly_journey`，负责冲突校验、批准稿 hash、派生 operation ID、重复确认回放与两步切换恢复 |
-| `journey_weekly_engine.py` | 每周 journey 只读输入聚合与严格三类候选生成；按香港自然周读取开放阶段、日回顾、新桶/独立 feel/旧桶 feel 年轮，当前只支持手动生成候选 |
+| `journey_weekly_engine.py` | 每周 journey 只读输入聚合与严格三类候选生成；按香港周一 04:00–下周一 04:00 读取开放阶段、日回顾、新桶/独立 feel/旧桶 feel 年轮，支持手动或持久 schedule 触发 |
 | `bucket_manager.py` | 桶 CRUD、搜索、评分、回收站、命中统计、分词 |
 | `dehydrator.py` | LLM 脱水、合并、打标（含 `_last_merge_usage` 成本追踪） |
 | `decay_engine.py` | 衰减引擎，计算 score |
@@ -53,7 +54,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `raw_archive_import.py` | Claude 官方与 Kelivo 导出的流式白名单适配、预览审计、跨来源疑似重复、可见聊天＋推理档案打包及确认式上传 CLI；工具和附件内容不入 Haven |
 | `recall_policy.py` | 召回策略（vague 闸、相对日期、分词整词判断） |
 | `reflection_engine.py` | 反思/日印象引擎 |
-| `daily_review_engine.py` | 每日 4 点通过 Anthropic-compatible `/v1/messages` 按协作者生成第一人称日回顾；写 D 日时以 D-2、D-1 两个精确日历日的现存日回顾作连续性参考，闲聊用完整可见原文，工作用较早脉络摘要 + 最后 10 轮，结果不进记忆桶 |
+| `daily_review_engine.py` | 默认每日 04:30 通过 Anthropic-compatible `/v1/messages` 按协作者生成第一人称日回顾；D 日材料固定为 D 日 04:00–D+1 日 04:00，连续性参考仍为 D-2、D-1 两条日回顾，结果不进记忆桶 |
 | `persona_engine.py` / `portrait_engine.py` | 用户画像（persona 状态 + 画像生成） |
 | `memory_*.py` | 记忆分层：layers/nodes/edges/metadata/moments/diffusion/relevance/write_gate |
 | `todo_store.py` / `reminder_store.py` | 待办 / 照顾备忘持久化 |
@@ -82,11 +83,13 @@ OMBRE_TRANSPORT=streamable-http python server.py
 
 ### 每周 journey 候选与人工批准
 
-`automation_schedules`、`automation_runs`、`automation_candidates` 存在独立 `state/automations.sqlite`，不写成普通 bucket。`weekly_journey` 按 `Asia/Hong_Kong` 的完整自然周聚合材料：新桶看 `metadata.created`，独立 feel 排除 whisper，旧桶新增 feel 年轮看 `comments[].created`，最终按 bucket ID 去重。日回顾使用当前 Haven `profile_id` 与明确协作者按日期范围读取。
+`automation_schedules`、`automation_runs`、`automation_candidates` 存在独立 `state/automations.sqlite`，不写成普通 bucket。持久调度器每 30 秒检查到期任务，并用任务 lease 防止并发重复领取；设置页可调整日回顾启停/时分与 weekly journey 启停/星期/时分/协作者，时区固定 `Asia/Hong_Kong`，日界线固定 04:00。默认日回顾每日 04:30，weekly journey 周一 05:00，后者错开半小时等待周日日回顾完成。
+
+`weekly_journey` 按周一 04:00–下周一 04:00 的完整 OB 周聚合材料：新桶看 `metadata.created`，独立 feel 排除 whisper，旧桶新增 feel 年轮看 `comments[].created`，最终按 bucket ID 去重。日回顾使用当前 Haven `profile_id` 与明确协作者按日期范围读取。定时触发与手动触发复用同一固定快照、候选白名单和幂等链路；定时任务只生成 `pending` 候选，不确认、不调用 journey 生命周期写入。
 
 候选只允许 `no_change`、`append_current`、`transition`，证据 ID 必须来自固定输入快照；同一 `cycle_key + input_hash` 重试回放同一 run/candidate。编辑只替换 draft 并增加 revision，原始 preview 保留；确认请求只提交 `expected_revision + approved_payload_hash`，服务端重新规范化并冻结完整 approved payload/hash，浏览器不能临时提交另一份正文。
 
-`automation_executor.py` 只注册 `weekly_journey`。首次确认前会校验候选仍 pending、开放 journey 完整快照、批准稿 hash 和证据桶存在且非 journey；冲突保存结构化原因，不覆盖当前阶段。同一任务的持久 lease 串行化并发确认。`no_change` 零写入；`append_current` 只调用开放阶段追加；`transition` 以稳定的 `:close` / `:create` 派生 operation ID 两步执行。关闭成功而创建失败时保留部分结果，重试幂等回放 close 后继续 create；已完成候选的重复确认只回放结果。当前仍只有手动候选生成，没有定时线程。模型连接复用 `daily_review` 的 Anthropic-compatible `/v1/messages` 配置。
+`automation_executor.py` 只注册 `weekly_journey`。首次确认前会校验候选仍 pending、开放 journey 完整快照、批准稿 hash 和证据桶存在且非 journey；冲突保存结构化原因，不覆盖当前阶段。同一任务的持久 lease 串行化并发确认。`no_change` 零写入；`append_current` 只调用开放阶段追加；`transition` 以稳定的 `:close` / `:create` 派生 operation ID 两步执行。关闭成功而创建失败时保留部分结果，重试幂等回放 close 后继续 create；已完成候选的重复确认只回放结果。手动与定时触发都止于候选生成，只有人工确认才进入本执行器。模型连接复用 `daily_review` 的 Anthropic-compatible `/v1/messages` 配置。
 
 ## 配置
 
@@ -223,7 +226,8 @@ PATCH /api/journeys/{bucket_id}          # 认证人工纠错；校验唯一 ope
 
 ### 自动化候选
 ```
-GET  /api/automations/status?task_type=weekly_journey
+GET  /api/automations/status?task_type=weekly_journey|daily_review
+PATCH /api/automations/schedule                    # 持久调整 weekly journey 启停/星期/时分/协作者
 POST /api/automations/weekly-journey/run       # 手动生成 pending 候选；不写 journey
 GET  /api/automations/candidates?task_type=weekly_journey&status=pending
 GET  /api/automations/candidates/{candidate_id}

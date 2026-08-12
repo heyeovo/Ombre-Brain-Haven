@@ -709,6 +709,7 @@ reflection:
 daily_review:
   enabled: true
   daily_hour: 4
+  daily_minute: 30
   timezone: "Asia/Hong_Kong"
   model: ""                       # empty = reflection.model
   base_url: ""                    # empty = reflection.base_url
@@ -719,8 +720,8 @@ daily_review:
   # api_key: ""                   # use OMBRE_DAILY_REVIEW_API_KEY; falls back to reflection key
 
 # --- Weekly Journey Candidate / 每周关系轨迹候选 ---
-# Phase 1 only supports authenticated manual candidate generation. It reuses
-# the daily_review model connection and never calls journey lifecycle writes.
+# The persisted schedule defaults to Monday 05:00 and only generates a pending
+# candidate. It reuses the daily_review model connection and never auto-confirms.
 weekly_journey:
   timezone: "Asia/Hong_Kong"
   max_material_chars: 4000         # per bucket / feel ring content boundary

@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from automation_store import AutomationStore  # noqa: E402
+from automation_scheduler import next_run_at, schedule_payload  # noqa: E402
 from journey_weekly_engine import WeeklyJourneyEngine  # noqa: E402
 
 
@@ -134,6 +135,56 @@ class AutomationStoreContractsTest(unittest.TestCase):
         self.assertEqual(restarted["status"], "running")
         self.assertEqual(restarted["error"], "")
         self.assertEqual(restarted["run_id"], run["run_id"])
+
+    def test_persisted_schedule_updates_and_claims_once(self):
+        store = self.make_store()
+        store.ensure_schedule(
+            schedule_id="weekly_journey", task_type="weekly_journey",
+            handler_key="weekly_journey", enabled=False,
+        )
+        payload = schedule_payload(
+            "weekly_journey", enabled=True,
+            policy={"weekday": 0, "hour": 5, "minute": 0, "persona_id": "yan-zhi"},
+            after=datetime.fromisoformat("2026-08-09T12:00:00+08:00"),
+        )
+        schedule = store.update_schedule(task_type="weekly_journey", **payload)
+        self.assertEqual(schedule["next_run_at"], "2026-08-10T05:00:00+08:00")
+        now = datetime.fromisoformat("2026-08-10T05:00:00+08:00")
+        claimed = store.claim_due_schedule(task_type="weekly_journey", owner="worker-1", now=now)
+        duplicate = store.claim_due_schedule(task_type="weekly_journey", owner="worker-2", now=now)
+        self.assertEqual(claimed["policy"]["persona_id"], "yan-zhi")
+        self.assertEqual(duplicate, {})
+        completed = store.complete_schedule_run(
+            task_type="weekly_journey", owner="worker-1",
+            next_run_at="2026-08-17T05:00:00+08:00", error="",
+        )
+        self.assertEqual(completed["next_run_at"], "2026-08-17T05:00:00+08:00")
+        self.assertTrue(completed["last_run_at"])
+
+    def test_default_daily_and_weekly_next_runs_are_separated(self):
+        after = datetime.fromisoformat("2026-08-10T04:00:00+08:00")
+        self.assertEqual(
+            next_run_at("daily_review", {"hour": 4, "minute": 30}, after=after).isoformat(),
+            "2026-08-10T04:30:00+08:00",
+        )
+        self.assertEqual(
+            next_run_at("weekly_journey", {"weekday": 0, "hour": 5, "minute": 0}, after=after).isoformat(),
+            "2026-08-10T05:00:00+08:00",
+        )
+
+    def test_legacy_disabled_weekly_placeholder_migrates_to_five_am(self):
+        store = self.make_store()
+        store.ensure_schedule(
+            schedule_id="weekly_journey", task_type="weekly_journey",
+            handler_key="weekly_journey", enabled=False,
+            policy={"weekday": 0, "hour": 4, "minute": 30, "candidate_only": True},
+        )
+        WeeklyJourneyEngine(
+            {}, store, SimpleNamespace(), SimpleNamespace(), candidate_generator=lambda snapshot: {},
+        )
+        schedule = store.get_schedule(task_type="weekly_journey")
+        self.assertEqual(schedule["policy"]["hour"], 5)
+        self.assertEqual(schedule["policy"]["minute"], 0)
 
 
 class FakeDailyReviewStore:
@@ -261,8 +312,8 @@ class WeeklyJourneyEngineContractsTest(unittest.IsolatedAsyncioTestCase):
         })
         snapshot = await engine.collect_input(cycle_key="2026-W32", persona_id="yan-zhi")
 
-        self.assertEqual(snapshot["window_start"], "2026-08-03T00:00:00+08:00")
-        self.assertEqual(snapshot["window_end"], "2026-08-10T00:00:00+08:00")
+        self.assertEqual(snapshot["window_start"], "2026-08-03T04:00:00+08:00")
+        self.assertEqual(snapshot["window_end"], "2026-08-10T04:00:00+08:00")
         self.assertEqual(snapshot["current_journey"]["id"], "journey-open")
         self.assertEqual(self.daily_store.last_profile_id, "default")
         self.assertEqual(len(snapshot["daily_reviews"]), 2)
@@ -359,6 +410,8 @@ class WeeklyJourneyEngineContractsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(window["cycle_key"], "2026-W32")
         self.assertEqual(window["start"].date().isoformat(), "2026-08-03")
         self.assertEqual(window["end"].date().isoformat(), "2026-08-10")
+        self.assertEqual(window["start"].hour, 4)
+        self.assertEqual(window["end"].hour, 4)
 
 
 class AutomationRoutesContractTest(unittest.IsolatedAsyncioTestCase):
@@ -397,6 +450,35 @@ class AutomationRoutesContractTest(unittest.IsolatedAsyncioTestCase):
             result = await route(SimpleNamespace())
         self.assertIs(result, denied)
         weekly_journey_engine.run_manual.assert_not_awaited()
+
+    async def test_schedule_route_persists_candidate_only_weekly_policy(self):
+        class FakeJSONResponse:
+            def __init__(self, body, status_code=200):
+                self.body = body
+                self.status_code = status_code
+
+        store = SimpleNamespace(update_schedule=lambda **kwargs: kwargs)
+        route = load_server_function("api_automation_schedule_update", {
+            "_require_dashboard_auth": lambda request: None,
+            "WEEKLY_JOURNEY_TASK_TYPE": "weekly_journey",
+            "normalize_automation_policy": __import__("automation_scheduler").normalize_policy,
+            "automation_schedule_payload": __import__("automation_scheduler").schedule_payload,
+            "automation_store": store,
+            "_bool_value": lambda value, default=False: bool(value),
+        })
+        request = SimpleNamespace(json=AsyncMock(return_value={
+            "task_type": "weekly_journey", "enabled": True,
+            "policy": {"weekday": 0, "hour": 5, "minute": 0, "persona_id": "yan-zhi"},
+        }))
+        fake_responses = SimpleNamespace(JSONResponse=FakeJSONResponse)
+        with patch.dict(sys.modules, {
+            "starlette": SimpleNamespace(responses=fake_responses),
+            "starlette.responses": fake_responses,
+        }):
+            response = await route(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.body["schedule"]["enabled"])
+        self.assertEqual(response.body["schedule"]["policy"]["persona_id"], "yan-zhi")
 
     async def test_manual_run_route_only_returns_candidate_preview(self):
         class FakeJSONResponse:

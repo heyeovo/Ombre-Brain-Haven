@@ -68,14 +68,31 @@ class WeeklyJourneyEngine:
         self.max_journey_chars = max(1000, min(40000, int(cfg.get("max_journey_chars", 16000))))
         self.max_input_chars = max(20000, min(500000, int(cfg.get("max_input_chars", 240000))))
         self.max_tokens = max(800, min(6000, int(cfg.get("max_tokens", 2400))))
-        self.automation_store.ensure_schedule(
+        schedule = self.automation_store.ensure_schedule(
             schedule_id=TASK_TYPE,
             task_type=TASK_TYPE,
             handler_key=TASK_TYPE,
             timezone=str(self.tz.key),
             enabled=False,
-            policy={"weekday": 0, "hour": 4, "minute": 30, "candidate_only": True},
+            policy={"weekday": 0, "hour": 5, "minute": 0, "persona_id": "", "candidate_only": True},
         )
+        legacy_policy = schedule.get("policy") if isinstance(schedule.get("policy"), dict) else {}
+        if (
+            not schedule.get("enabled")
+            and not schedule.get("next_run_at")
+            and not schedule.get("last_run_at")
+            and legacy_policy.get("weekday", 0) in (0, "0")
+            and legacy_policy.get("hour", 4) in (4, "4")
+            and legacy_policy.get("minute", 30) in (30, "30")
+            and not str(legacy_policy.get("persona_id") or "").strip()
+        ):
+            self.automation_store.update_schedule(
+                task_type=TASK_TYPE,
+                enabled=False,
+                timezone=str(self.tz.key),
+                policy={"weekday": 0, "hour": 5, "minute": 0, "persona_id": "", "candidate_only": True},
+                next_run_at="",
+            )
 
     def resolve_window(self, cycle_key: str = "", *, now: datetime | None = None) -> dict:
         key = str(cycle_key or "").strip().upper()
@@ -97,8 +114,8 @@ class WeeklyJourneyEngine:
         end_date = start_date + timedelta(days=7)
         return {
             "cycle_key": key,
-            "start": datetime.combine(start_date, time.min, tzinfo=self.tz),
-            "end": datetime.combine(end_date, time.min, tzinfo=self.tz),
+            "start": datetime.combine(start_date, time(4), tzinfo=self.tz),
+            "end": datetime.combine(end_date, time(4), tzinfo=self.tz),
         }
 
     @staticmethod
@@ -458,7 +475,7 @@ class WeeklyJourneyEngine:
             "draft": proposal,
         }
 
-    async def run_manual(self, *, cycle_key: str = "", persona_id: str = "") -> dict:
+    async def _run(self, *, cycle_key: str = "", persona_id: str = "", trigger: str) -> dict:
         snapshot = await self.collect_input(cycle_key=cycle_key, persona_id=persona_id)
         digest = self.input_hash(snapshot)
         run, created = self.automation_store.start_run(
@@ -467,7 +484,7 @@ class WeeklyJourneyEngine:
             window_start=snapshot["window_start"],
             window_end=snapshot["window_end"],
             timezone=snapshot["timezone"],
-            trigger="manual",
+            trigger=trigger,
             input_snapshot=snapshot,
             input_hash=digest,
         )
@@ -496,3 +513,9 @@ class WeeklyJourneyEngine:
         except Exception as exc:
             run = self.automation_store.finish_run(run["run_id"], status="failed", error=str(exc))
             return {"status": "failed", "run": run, "candidate": {}, "error": str(exc)}
+
+    async def run_manual(self, *, cycle_key: str = "", persona_id: str = "") -> dict:
+        return await self._run(cycle_key=cycle_key, persona_id=persona_id, trigger="manual")
+
+    async def run_scheduled(self, *, persona_id: str) -> dict:
+        return await self._run(cycle_key="", persona_id=persona_id, trigger="schedule")

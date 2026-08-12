@@ -117,9 +117,11 @@ Daily Reflection 可根据当天聊天、已有 auto-memory 产物和近期记�
 
 #### 每周关系轨迹候选
 
-Haven 已有通用自动化持久底座，并以 `weekly_journey` 作为第一个任务类型。它按香港时区的完整自然周读取当前开放 journey、日回顾、本周新桶、本周独立 feel 与旧桶本周新增的 feel 年轮，按 bucket ID 去重后只生成 `no_change`、`append_current` 或 `transition` 候选。候选与输入快照保存在独立 SQLite 状态中，不进入普通记忆、召回或关联扩散。
+Haven 的通用自动化底座以 `state/automations.sqlite` 持久保存日回顾与 `weekly_journey` 的启停、时分、下次运行、运行错误和任务 lease。香港时区的“OB 日”固定为 04:00–次日 04:00，默认 04:30 生成并归到开始日；“OB 周”固定为周一 04:00–下周一 04:00，默认周一 05:00 生成上一周 journey 候选，等待周日日回顾先完成。Dashboard「自动化与状态」可调整两类任务的生成时间，weekly journey 还可调整星期和协作者；时区与 04:00 日界线只读固定。
 
-候选只能经认证接口人工编辑、拒绝或确认。Dashboard 自动化设置页显示只读状态、最近运行、待确认数量和手动生成入口；关系轨迹页显示输入完整性、原始 preview、当前 draft/revision/hash、证据桶和预计差异。编辑保存为新 revision 并保留原始 preview；确认只接收页面已展示 revision 的 hash，由服务端冻结 approved payload/hash。白名单执行器当前只注册 `weekly_journey`：`no_change` 零写入，`append_current` 只追加开放阶段，`transition` 使用独立 `:close` / `:create` operation ID。确认前若开放阶段、批准稿或证据桶已变化，会保存可解释冲突而不覆盖当前状态；重复确认与 close 成功、create 失败后的重试保持幂等。当前仍没有定时线程，候选只可手动生成，未确认和已拒绝候选不会改变 journey。
+`weekly_journey` 读取当前开放 journey、该 OB 周日回顾、新桶、独立 feel 与旧桶新增的 feel 年轮，按 bucket ID 去重后只生成 `no_change`、`append_current` 或 `transition` 候选。候选与输入快照保存在独立 SQLite 状态中，不进入普通记忆、召回或关联扩散。
+
+候选只能经认证接口人工编辑、拒绝或确认。关系轨迹页显示输入完整性、原始 preview、当前 draft/revision/hash、证据桶和预计差异。编辑保存为新 revision 并保留原始 preview；确认只接收页面已展示 revision 的 hash，由服务端冻结 approved payload/hash。白名单执行器当前只注册 `weekly_journey`：`no_change` 零写入，`append_current` 只追加开放阶段，`transition` 使用独立 `:close` / `:create` operation ID。确认前若开放阶段、批准稿或证据桶已变化，会保存可解释冲突而不覆盖当前状态；重复确认与 close 成功、create 失败后的重试保持幂等。定时运行也只新增 `pending` 候选，未确认和已拒绝候选不会改变 journey。
 
 即使使用 `auto`，候选仍需经过记忆写入、去重和合并边界。原始聊天继续留在 raw events；自动记忆只保存脱水后仍值得长期带走的部分。
 
@@ -552,7 +554,7 @@ Python 直跑时对应端口为 `8000/8010`。
 - Dream、relationship weather、comment 和 affect anchor 不能单独证明当前话题。
 - `gateway.portrait_memory_*` 为旧兼容字段；旧的每轮 Portrait Memory 已退休。
 - 派生索引损坏时应从 Markdown / raw source 重建，不要把 SQLite 当唯一真源。
-- 每周 journey 当前只手动生成候选并由人确认后执行；没有定时生成、自动确认或定时自动写入路径。
+- 每周 journey 可手动或定时生成候选，但始终没有自动确认或定时自动写入路径。
 
 更细的行为边界见 [`docs/memory-layer-contract.md`](docs/memory-layer-contract.md)，部署补充见 [`docs/deploy-zeabur.md`](docs/deploy-zeabur.md)。
 

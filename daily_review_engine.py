@@ -37,6 +37,8 @@ class DailyReviewEngine:
         fallback = config.get("reflection", {}) if isinstance(config.get("reflection"), dict) else {}
         self.enabled = bool(cfg.get("enabled", True))
         self.daily_hour = max(0, min(23, int(cfg.get("daily_hour", 4))))
+        self.daily_minute = max(0, min(59, int(cfg.get("daily_minute", 30))))
+        self.day_start_hour = 4
         try:
             self.tz = ZoneInfo(str(cfg.get("timezone") or "Asia/Hong_Kong"))
         except Exception:
@@ -258,7 +260,7 @@ class DailyReviewEngine:
         if existing and existing[0].get("edited_by_user") and not override_user_edit:
             return {"status": "protected", "review": existing[0]}
         target = date.fromisoformat(review_date)
-        start = datetime.combine(target, time.min, tzinfo=self.tz)
+        start = datetime.combine(target, time(self.day_start_hour), tzinfo=self.tz)
         turns = self.state_store.list_daily_review_turns(
             profile_id=profile_id, persona_id=persona_id, start_at=start, end_at=start + timedelta(days=1),
         )
@@ -298,11 +300,14 @@ class DailyReviewEngine:
         )
         return {"status": "created", "review": review}
 
-    async def run_due(self, *, profile_id: str = "default") -> list[dict[str, Any]]:
-        now = datetime.now(self.tz)
-        if not self.enabled or now.hour < self.daily_hour:
+    async def run_due(
+        self, *, profile_id: str = "default", now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        local_now = now.astimezone(self.tz) if now and now.tzinfo else (now.replace(tzinfo=self.tz) if now else datetime.now(self.tz))
+        due_time = time(self.daily_hour, self.daily_minute)
+        if not self.enabled or local_now.time() < due_time:
             return []
-        review_date = (now.date() - timedelta(days=1)).isoformat()
+        review_date = (local_now.date() - timedelta(days=1)).isoformat()
         return [
             await self.generate(profile_id=profile_id, persona_id=str(persona.get("id") or ""), review_date=review_date)
             for persona in self.state_store.list_cc_personas()

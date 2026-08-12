@@ -1,6 +1,6 @@
 import sys
 import unittest
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -214,6 +214,44 @@ class DailyReviewEngineTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(created["status"], "created")
         self.assertFalse(store.upsert_args["preserve_user_edit"])
+
+    async def test_review_day_uses_four_am_to_next_four_am(self):
+        class Store:
+            def __init__(self):
+                self.turn_args = None
+
+            def list_daily_reviews(self, **kwargs):
+                return []
+
+            def list_daily_review_turns(self, **kwargs):
+                self.turn_args = kwargs
+                return [{
+                    "session_id": "chat-1", "mode": "chat", "session_title": "跨夜闲聊",
+                    "user_text": "凌晨还在聊", "assistant_text": "我在。",
+                }]
+
+            def get_cc_persona(self, persona_id):
+                return {"id": persona_id, "base_prompt": "你是言之。"}
+
+            def upsert_daily_review(self, **kwargs):
+                return kwargs
+
+        store = Store()
+        engine = DailyReviewEngine({}, store)
+        engine._create_message = AsyncMock(return_value="跨夜回顾")
+        await engine.generate(profile_id="default", persona_id="ombre", review_date="2026-08-12")
+        self.assertEqual(store.turn_args["start_at"].isoformat(), "2026-08-12T04:00:00+08:00")
+        self.assertEqual(store.turn_args["end_at"].isoformat(), "2026-08-13T04:00:00+08:00")
+
+    async def test_run_due_waits_until_configured_minute(self):
+        engine = DailyReviewEngine({"daily_review": {"daily_hour": 4, "daily_minute": 30}}, SimpleNamespace())
+        engine.generate = AsyncMock(return_value={"status": "created"})
+        engine.state_store.list_cc_personas = lambda: [{"id": "ombre"}]
+        early = await engine.run_due(now=datetime.fromisoformat("2026-08-13T04:29:00+08:00"))
+        due = await engine.run_due(now=datetime.fromisoformat("2026-08-13T04:30:00+08:00"))
+        self.assertEqual(early, [])
+        self.assertEqual(due, [{"status": "created"}])
+        self.assertEqual(engine.generate.await_args.kwargs["review_date"], "2026-08-12")
 
 
 if __name__ == "__main__":

@@ -144,9 +144,6 @@ def _normalize_visible_text(value: Any) -> str:
 
 
 def _claude_visible_text(message: dict[str, Any]) -> str:
-    direct = _normalize_visible_text(message.get("text"))
-    if direct:
-        return direct
     parts = []
     for block in message.get("content") or []:
         if not isinstance(block, dict) or str(block.get("type") or "").lower() != "text":
@@ -156,7 +153,18 @@ def _claude_visible_text(message: dict[str, Any]) -> str:
         text = _normalize_visible_text(block.get("text"))
         if text:
             parts.append(text)
-    return "\n".join(parts).strip()
+    visible = "\n".join(parts).strip()
+    return visible or _normalize_visible_text(message.get("text"))
+
+
+def _claude_thinking_text(message: dict[str, Any]) -> str:
+    parts = [
+        _normalize_visible_text(block.get("thinking"))
+        for block in (message.get("content") or [])
+        if isinstance(block, dict)
+        and str(block.get("type") or "").lower() == "thinking"
+    ]
+    return "\n\n".join(part for part in parts if part).strip()
 
 
 def _parse_claude_time(value: Any) -> tuple[str, bool]:
@@ -217,6 +225,7 @@ def iter_selected_claude(
                 for block in (message.get("content") or [])
                 if isinstance(block, dict)
             )
+            thinking = _claude_thinking_text(message)
             events.append(
                 {
                     "source": CLAUDE_SOURCE,
@@ -235,6 +244,8 @@ def iter_selected_claude(
                         "original_created_at": str(message.get("created_at") or ""),
                         "timestamp_missing": missing_time,
                         "parent_message_uuid": str(message.get("parent_message_uuid") or ""),
+                        "thinking": thinking,
+                        "has_reasoning": bool(thinking),
                         "_preview_content_block_types": dict(block_types),
                         "_preview_attachment_count": len(message.get("attachments") or []),
                         "_preview_file_count": len(message.get("files") or []),
@@ -285,6 +296,7 @@ def iter_selected_kelivo(
         role = str(message.get("role") or "").strip().lower()
         conversation_id = str(message.get("conversationId") or "")
         created_at, missing_time = _parse_kelivo_time(message.get("timestamp"))
+        thinking = _normalize_visible_text(message.get("reasoningText"))
         events.append(
             {
                 "source": KELIVO_SOURCE,
@@ -302,7 +314,8 @@ def iter_selected_kelivo(
                     "original_created_at": str(message.get("timestamp") or ""),
                     "source_timezone": "Asia/Hong_Kong",
                     "timestamp_missing": missing_time,
-                    "has_reasoning": bool(message.get("reasoningText")),
+                    "thinking": thinking,
+                    "has_reasoning": bool(thinking),
                     "_preview_reasoning_present": bool(message.get("reasoningText")),
                 },
             }

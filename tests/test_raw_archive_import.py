@@ -8,8 +8,9 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from raw_archive_import import build_preview, write_selected_archive
+from raw_archive_import import build_preview, selected_events, write_selected_archive
 from raw_events import RAW_EVENT_ARCHIVE_SCOPE, RawEventStore
+from repair_raw_archive_thinking import repair_store
 
 
 class RawEventArchiveScopeTest(unittest.TestCase):
@@ -228,7 +229,7 @@ class RawArchiveAdapterTest(unittest.TestCase):
                             {
                                 "uuid": "c-assistant",
                                 "sender": "assistant",
-                                "text": "回答",
+                                "text": "保留Claude推理\n回答",
                                 "content": [
                                     {"type": "thinking", "thinking": "保留Claude推理"},
                                     {"type": "text", "text": "回答"},
@@ -324,6 +325,18 @@ class RawArchiveAdapterTest(unittest.TestCase):
             self.assertEqual(preview["cross_source_suspected_duplicates"]["exact_role_text_time"], 1)
             self.assertFalse(preview["import_authorized"])
 
+            events = selected_events(
+                claude_path=claude,
+                kelivo_path=kelivo,
+                claude_ids={"keep-claude"},
+                kelivo_ids={"keep-kelivo"},
+            )
+            by_id = {event["source_event_id"]: event for event in events}
+            self.assertEqual(by_id["c-assistant"]["text"], "回答")
+            self.assertEqual(by_id["c-assistant"]["metadata"]["thinking"], "保留Claude推理")
+            self.assertEqual(by_id["k-assistant"]["text"], "Kelivo回答")
+            self.assertEqual(by_id["k-assistant"]["metadata"]["thinking"], "隐藏推理")
+
     def test_selected_archive_contains_no_unselected_conversations_or_messages(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -351,6 +364,70 @@ class RawArchiveAdapterTest(unittest.TestCase):
                 self.assertNotIn("秘密工具结果".encode("utf-8"), combined)
                 self.assertNotIn("秘密Kelivo工具".encode("utf-8"), combined)
                 self.assertNotIn("private.txt".encode("utf-8"), combined)
+
+    def test_repair_store_separates_existing_body_and_thinking_idempotently(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            claude, kelivo = self.write_exports(root)
+            archive_path = root / "selected.zip"
+            write_selected_archive(
+                archive_path,
+                claude_path=claude,
+                kelivo_path=kelivo,
+                claude_ids={"keep-claude"},
+                kelivo_ids={"keep-kelivo"},
+            )
+            store = RawEventArchiveScopeTest().make_store(root)
+            store.ingest(
+                [{
+                    "id": "c-assistant",
+                    "role": "assistant",
+                    "text": "保留Claude推理\n回答",
+                    "created_at": "2026-07-01T00:01:00+00:00",
+                    "conversation_id": "keep-claude",
+                    "usage_scope": RAW_EVENT_ARCHIVE_SCOPE,
+                }],
+                source="claude_official_export",
+            )
+            store.ingest(
+                [{
+                    "id": "k-assistant",
+                    "role": "assistant",
+                    "text": "Kelivo回答",
+                    "created_at": "2026-07-01T00:02:00+00:00",
+                    "conversation_id": "keep-kelivo",
+                    "usage_scope": RAW_EVENT_ARCHIVE_SCOPE,
+                }],
+                source="kelivo_export",
+            )
+            conn = store._connect()
+            conn.execute(
+                """
+                INSERT INTO raw_imports
+                (import_id, source, archive_path, status, created_at, updated_at)
+                VALUES ('repair-test', 'historical_exports', ?, 'archived', '2026-07-01', '2026-07-01')
+                """,
+                (str(archive_path),),
+            )
+            conn.commit()
+            conn.close()
+
+            dry_run = repair_store(store, dry_run=True)
+            self.assertEqual(dry_run["counts"]["would_update"], 2)
+            applied = repair_store(store, dry_run=False)
+            self.assertEqual(applied["counts"]["updated"], 2)
+            repeated = repair_store(store, dry_run=False)
+            self.assertEqual(repeated["counts"]["unchanged"], 2)
+
+            claude_item = store.list_archive_conversation_events(
+                conversation_id="keep-claude", source="claude_official_export"
+            )["items"][0]
+            kelivo_item = store.list_archive_conversation_events(
+                conversation_id="keep-kelivo", source="kelivo_export"
+            )["items"][0]
+            self.assertEqual(claude_item["text"], "回答")
+            self.assertEqual(claude_item["metadata"]["thinking"], "保留Claude推理")
+            self.assertEqual(kelivo_item["metadata"]["thinking"], "隐藏推理")
 
 
 if __name__ == "__main__":

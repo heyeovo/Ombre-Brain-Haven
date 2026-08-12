@@ -553,6 +553,78 @@ class RawEventStore:
             "items": items,
         }
 
+    def repair_archive_message(
+        self,
+        *,
+        source: str,
+        source_event_id: str,
+        text: str,
+        thinking: str,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Replace one historical message body/reasoning from its preserved private archive."""
+        safe_source = self._clean_source(source)
+        safe_event_id = str(source_event_id or "").strip()
+        if not safe_event_id:
+            return {"status": "skipped", "reason": "missing_source_event_id"}
+        clean_text = self._coerce_text(text).strip()
+        clean_thinking = self._coerce_text(thinking).strip()
+        if not clean_text and not clean_thinking:
+            return {"status": "skipped", "reason": "empty_message"}
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM raw_events WHERE source = ? AND source_event_id = ? LIMIT 1",
+                (safe_source, safe_event_id),
+            ).fetchone()
+            if not row:
+                return {"status": "missing"}
+            if str(row["usage_scope"] or "") != RAW_EVENT_ARCHIVE_SCOPE:
+                return {"status": "skipped", "reason": "not_historical_archive"}
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except Exception:
+                metadata = {}
+            if clean_thinking:
+                metadata["thinking"] = clean_thinking
+                metadata["has_reasoning"] = True
+            else:
+                metadata.pop("thinking", None)
+                metadata["has_reasoning"] = False
+            metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+            changed = clean_text != str(row["text"] or "") or metadata_json != str(row["metadata_json"] or "")
+            if not changed:
+                return {"status": "unchanged", "id": int(row["id"])}
+            if dry_run:
+                return {"status": "would_update", "id": int(row["id"])}
+            event_hash = self._event_hash(
+                source=str(row["source"] or ""),
+                source_event_id=str(row["source_event_id"] or ""),
+                role=str(row["role"] or ""),
+                text=clean_text,
+                created_at=str(row["created_at"] or ""),
+                conversation_id=str(row["conversation_id"] or ""),
+                session_id=str(row["session_id"] or ""),
+            )
+            canonical_hash = self.canonical_event_hash(
+                role=str(row["role"] or ""),
+                text=clean_text,
+                created_at=str(row["created_at"] or ""),
+            )
+            conn.execute(
+                "UPDATE raw_events SET text = ?, metadata_json = ?, event_hash = ?, canonical_hash = ? WHERE id = ?",
+                (clean_text, metadata_json, event_hash, canonical_hash, int(row["id"])),
+            )
+            if self.fts_enabled:
+                try:
+                    conn.execute("UPDATE raw_events_fts SET text = ? WHERE rowid = ?", (clean_text, int(row["id"])))
+                except sqlite3.OperationalError as exc:
+                    logger.warning("raw_events FTS repair failed: %s", exc)
+            conn.commit()
+            return {"status": "updated", "id": int(row["id"])}
+        finally:
+            conn.close()
+
     def list_archive_conversation_events(
         self,
         *,
@@ -779,9 +851,12 @@ class RawEventStore:
         if role not in ALLOWED_RAW_ROLES:
             return None, "invalid_role"
         text = strip_raw_client_context(self._coerce_text(raw.get("text", raw.get("content", ""))))
-        if not text:
+        usage_scope = self._clean_usage_scope(raw.get("usage_scope"))
+        metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+        thinking = self._coerce_text(metadata.get("thinking")).strip()
+        if not text and not (usage_scope == RAW_EVENT_ARCHIVE_SCOPE and thinking):
             return None, "empty_text"
-        if self._looks_injected(text, raw):
+        if text and self._looks_injected(text, raw):
             return None, "injected_context"
 
         source = self._clean_source(raw.get("source") or default_source)
@@ -789,12 +864,10 @@ class RawEventStore:
         conversation_id = str(raw.get("conversation_id") or raw.get("thread_id") or "").strip()
         session_id = str(raw.get("session_id") or "").strip()
         client = str(raw.get("client") or "").strip()
-        usage_scope = self._clean_usage_scope(raw.get("usage_scope"))
         raw_time = raw.get("created_at") or raw.get("timestamp") or raw.get("time")
         created_at = self._clean_time(
             raw_time if raw_time is not None else ("" if usage_scope == RAW_EVENT_ARCHIVE_SCOPE else ingested_at)
         )
-        metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
         metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
         event_hash = self._event_hash(
             source=source,

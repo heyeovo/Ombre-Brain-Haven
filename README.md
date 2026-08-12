@@ -42,7 +42,9 @@ flowchart LR
 
 `raw_events.sqlite` 保存 user / assistant 原始对话，用于查原句、指定日期和长期记忆没有覆盖的细节。记录分为默认 `runtime` 与显式 `historical_archive` 两种 scope；普通日期召回、回顾、自动记忆和 handoff 默认只能读取 `runtime`，历史档案只有显式 `/api/search-raw`、只读窗口接口或专用后台流程才能读取。`GET /api/raw-conversations` 提供历史窗口目录，`GET /api/raw-conversation-events` 按窗口从最早消息开始分页，两者都硬限定 `historical_archive`。它不是普通语义记忆池，也不会自动整段注入。
 
-Claude 官方与 Kelivo 导出由 `raw_archive_import.py` 流式筛选：未选窗口不会解析为标准化消息，也不会进入 Haven。白名单窗口会生成私密的“可见聊天＋推理”档案并保存到 `state/raw-archives/`，标准化可见正文仍写入同一 `raw_events` 底座；thinking/reasoning 只在私密档案中保留，不进入检索正文。tool use/result、toolEvents、附件、文件和运行统计不进入 Haven；完整官方导出继续只留在用户本地。
+Claude 官方与 Kelivo 导出由 `raw_archive_import.py` 流式筛选：未选窗口不会解析为标准化消息，也不会进入 Haven。白名单窗口会生成私密的“可见聊天＋推理”档案并保存到 `state/raw-archives/`，标准化可见正文仍写入同一 `raw_events` 底座；Claude thinking 与 Kelivo `reasoningText` 以独立 `metadata.thinking` 保存，历史查看接口可以折叠展示，但正文全文检索不索引 thinking。tool use/result、toolEvents、附件、文件和运行统计不进入 Haven；完整官方导出继续只留在用户本地。
+
+旧档案若出现 Claude thinking 混入正文或 Kelivo thinking 不可见，先备份 `raw_events.sqlite`，再运行 `python repair_raw_archive_thinking.py --state-dir <state目录>` 查看 dry-run 统计；确认后追加 `--apply`。工具从已保存的私密归档回填，不要求重新上传完整官方导出，重复执行保持幂等。
 
 询问“那天原话是什么”或给出明确日期时，应优先走原文 / 日期检索；当天没有证据，就不拿附近日期的语义记忆代替。
 

@@ -52,6 +52,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `import_memory.py` | 对话历史导入引擎（含成本追踪） |
 | `raw_events.py` | 隔离的原文 SQLite、显式原文检索、运行时/历史档案 scope、历史窗口目录与按时间分页读取、消息与导入幂等、私密白名单聊天档案分块归档 |
 | `raw_archive_import.py` | Claude 官方与 Kelivo 导出的流式白名单适配、预览审计、跨来源疑似重复、可见聊天＋推理档案打包及确认式上传 CLI；工具和附件内容不入 Haven |
+| `repair_raw_archive_thinking.py` | 历史档案正文/thinking 一次性幂等修复；默认 dry-run，从 Haven 私密归档回填独立 thinking 并重建正文哈希/FTS，`--apply` 才写库 |
 | `recall_policy.py` | 召回策略（vague 闸、相对日期、分词整词判断） |
 | `reflection_engine.py` | 反思/日印象引擎 |
 | `daily_review_engine.py` | 默认每日 04:30 通过 Anthropic-compatible `/v1/messages` 按协作者生成第一人称日回顾；D 日材料固定为 D 日 04:00–D+1 日 04:00，连续性参考仍为 D-2、D-1 两条日回顾，结果不进记忆桶 |
@@ -166,7 +167,7 @@ GET /api/search?q=&simulate=&include_vector=&include_noise=&include_archive=&lim
 # record_stats 由后端控制（simulate 时不记录）
 GET /api/search-raw   # 原文检索（GET / JSON POST）；usage_scope=runtime|historical_archive|all
 GET /api/raw-conversations             # 历史档案窗口目录；只读 historical_archive
-GET /api/raw-conversation-events       # 单窗口按时间正序分页；只读 historical_archive
+GET /api/raw-conversation-events       # 单窗口按时间正序分页；只读 historical_archive，metadata.thinking 独立于正文
 ```
 
 ### 相似 & 合并

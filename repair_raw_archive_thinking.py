@@ -66,28 +66,34 @@ def repair_store(store: RawEventStore, *, dry_run: bool = True) -> dict[str, Any
                 "SELECT archive_path FROM raw_imports WHERE status = 'archived' AND archive_path != ''"
             ).fetchall()
         ]
+        counts: Counter[str] = Counter()
+        processed: set[tuple[str, str]] = set()
+        for archive_path in archive_paths:
+            if not archive_path.is_file():
+                counts["missing_archive"] += 1
+                continue
+            for correction in iter_archive_corrections(archive_path):
+                key = (correction["source"], correction["source_event_id"])
+                if key in processed:
+                    continue
+                processed.add(key)
+                result = store.repair_archive_message(**correction, dry_run=dry_run, _conn=conn)
+                counts[str(result.get("status") or "unknown")] += 1
+        if not dry_run:
+            conn.commit()
+        return {
+            "ok": True,
+            "dry_run": dry_run,
+            "archive_count": len(archive_paths),
+            "message_count": len(processed),
+            "counts": dict(counts),
+        }
+    except Exception:
+        if not dry_run:
+            conn.rollback()
+        raise
     finally:
         conn.close()
-    counts: Counter[str] = Counter()
-    processed: set[tuple[str, str]] = set()
-    for archive_path in archive_paths:
-        if not archive_path.is_file():
-            counts["missing_archive"] += 1
-            continue
-        for correction in iter_archive_corrections(archive_path):
-            key = (correction["source"], correction["source_event_id"])
-            if key in processed:
-                continue
-            processed.add(key)
-            result = store.repair_archive_message(**correction, dry_run=dry_run)
-            counts[str(result.get("status") or "unknown")] += 1
-    return {
-        "ok": True,
-        "dry_run": dry_run,
-        "archive_count": len(archive_paths),
-        "message_count": len(processed),
-        "counts": dict(counts),
-    }
 
 
 def main() -> int:

@@ -561,6 +561,7 @@ class RawEventStore:
         text: str,
         thinking: str,
         dry_run: bool = True,
+        _conn: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
         """Replace one historical message body/reasoning from its preserved private archive."""
         safe_source = self._clean_source(source)
@@ -571,7 +572,8 @@ class RawEventStore:
         clean_thinking = self._coerce_text(thinking).strip()
         if not clean_text and not clean_thinking:
             return {"status": "skipped", "reason": "empty_message"}
-        conn = self._connect()
+        conn = _conn or self._connect()
+        owns_connection = _conn is None
         try:
             row = conn.execute(
                 "SELECT * FROM raw_events WHERE source = ? AND source_event_id = ? LIMIT 1",
@@ -590,7 +592,8 @@ class RawEventStore:
                 metadata["has_reasoning"] = True
             else:
                 metadata.pop("thinking", None)
-                metadata["has_reasoning"] = False
+                if "has_reasoning" in metadata:
+                    metadata["has_reasoning"] = False
             metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
             changed = clean_text != str(row["text"] or "") or metadata_json != str(row["metadata_json"] or "")
             if not changed:
@@ -620,10 +623,12 @@ class RawEventStore:
                     conn.execute("UPDATE raw_events_fts SET text = ? WHERE rowid = ?", (clean_text, int(row["id"])))
                 except sqlite3.OperationalError as exc:
                     logger.warning("raw_events FTS repair failed: %s", exc)
-            conn.commit()
+            if owns_connection:
+                conn.commit()
             return {"status": "updated", "id": int(row["id"])}
         finally:
-            conn.close()
+            if owns_connection:
+                conn.close()
 
     def list_archive_conversation_events(
         self,

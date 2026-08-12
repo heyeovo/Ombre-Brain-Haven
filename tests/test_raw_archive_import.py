@@ -391,6 +391,17 @@ class RawArchiveAdapterTest(unittest.TestCase):
             )
             store.ingest(
                 [{
+                    "id": "c-user",
+                    "role": "user",
+                    "text": "重复原文",
+                    "created_at": "2026-07-01T00:00:00+00:00",
+                    "conversation_id": "keep-claude",
+                    "usage_scope": RAW_EVENT_ARCHIVE_SCOPE,
+                }],
+                source="claude_official_export",
+            )
+            store.ingest(
+                [{
                     "id": "k-assistant",
                     "role": "assistant",
                     "text": "Kelivo回答",
@@ -414,14 +425,17 @@ class RawArchiveAdapterTest(unittest.TestCase):
 
             dry_run = repair_store(store, dry_run=True)
             self.assertEqual(dry_run["counts"]["would_update"], 2)
+            self.assertEqual(dry_run["counts"]["unchanged"], 1)
             applied = repair_store(store, dry_run=False)
             self.assertEqual(applied["counts"]["updated"], 2)
+            self.assertEqual(applied["counts"]["unchanged"], 1)
             repeated = repair_store(store, dry_run=False)
-            self.assertEqual(repeated["counts"]["unchanged"], 2)
+            self.assertEqual(repeated["counts"]["unchanged"], 3)
 
-            claude_item = store.list_archive_conversation_events(
+            claude_items = store.list_archive_conversation_events(
                 conversation_id="keep-claude", source="claude_official_export"
-            )["items"][0]
+            )["items"]
+            claude_item = next(item for item in claude_items if item["source_event_id"] == "c-assistant")
             kelivo_item = store.list_archive_conversation_events(
                 conversation_id="keep-kelivo", source="kelivo_export"
             )["items"][0]

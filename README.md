@@ -40,7 +40,7 @@ flowchart LR
 
 ### 1. 原文层
 
-`raw_events.sqlite` 保存 user / assistant 原始对话，用于查原句、指定日期和长期记忆没有覆盖的细节。记录分为默认 `runtime` 与显式 `historical_archive` 两种 scope；普通日期召回、回顾、自动记忆和 handoff 默认只能读取 `runtime`，历史档案只有显式 `/api/search-raw` 或专用后台流程才能读取。它不是普通语义记忆池，也不会自动整段注入。
+`raw_events.sqlite` 保存 user / assistant 原始对话，用于查原句、指定日期和长期记忆没有覆盖的细节。记录分为默认 `runtime` 与显式 `historical_archive` 两种 scope；普通日期召回、回顾、自动记忆和 handoff 默认只能读取 `runtime`，历史档案只有显式 `/api/search-raw`、只读窗口接口或专用后台流程才能读取。`GET /api/raw-conversations` 提供历史窗口目录，`GET /api/raw-conversation-events` 按窗口从最早消息开始分页，两者都硬限定 `historical_archive`。它不是普通语义记忆池，也不会自动整段注入。
 
 Claude 官方与 Kelivo 导出由 `raw_archive_import.py` 流式筛选：未选窗口不会解析为标准化消息，也不会进入 Haven。白名单窗口会生成私密的“可见聊天＋推理”档案并保存到 `state/raw-archives/`，标准化可见正文仍写入同一 `raw_events` 底座；thinking/reasoning 只在私密档案中保留，不进入检索正文。tool use/result、toolEvents、附件、文件和运行统计不进入 Haven；完整官方导出继续只留在用户本地。
 

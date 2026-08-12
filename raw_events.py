@@ -189,6 +189,10 @@ class RawEventStore:
             "ON raw_events(usage_scope, created_at DESC, id DESC)"
         )
         conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_raw_events_scope_conversation "
+            "ON raw_events(usage_scope, source, conversation_id, created_at, id)"
+        )
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_raw_events_canonical "
             "ON raw_events(canonical_hash) WHERE canonical_hash != ''"
         )
@@ -473,6 +477,130 @@ class RawEventStore:
             "query": cleaned_query,
             "count": len(rows),
             "items": [self._row_to_event(row) for row in rows],
+        }
+
+    def list_archive_conversations(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        source: str = "",
+    ) -> dict[str, Any]:
+        """List imported historical windows without exposing runtime raw events."""
+        safe_limit = max(1, min(500, int(limit or 100)))
+        safe_offset = max(0, int(offset or 0))
+        clauses = ["usage_scope = ?", "conversation_id != ''"]
+        params: list[Any] = [RAW_EVENT_ARCHIVE_SCOPE]
+        if source:
+            clauses.append("source = ?")
+            params.append(self._clean_source(source))
+        where = " AND ".join(clauses)
+        conn = self._connect()
+        try:
+            total = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM (SELECT 1 FROM raw_events WHERE {where} GROUP BY source, conversation_id)",
+                    params,
+                ).fetchone()[0]
+            )
+            rows = conn.execute(
+                f"""
+                SELECT source, conversation_id, MAX(client) AS client,
+                       COUNT(*) AS message_count,
+                       MIN(created_at) AS first_at, MAX(created_at) AS last_at
+                FROM raw_events
+                WHERE {where}
+                GROUP BY source, conversation_id
+                ORDER BY last_at DESC, conversation_id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*params, safe_limit, safe_offset],
+            ).fetchall()
+            items = []
+            for row in rows:
+                metadata_row = conn.execute(
+                    """
+                    SELECT metadata_json FROM raw_events
+                    WHERE usage_scope = ? AND source = ? AND conversation_id = ?
+                    ORDER BY created_at ASC, id ASC LIMIT 1
+                    """,
+                    [RAW_EVENT_ARCHIVE_SCOPE, row["source"], row["conversation_id"]],
+                ).fetchone()
+                metadata = {}
+                try:
+                    metadata = json.loads((metadata_row["metadata_json"] if metadata_row else "") or "{}")
+                except Exception:
+                    metadata = {}
+                items.append(
+                    {
+                        "source": row["source"],
+                        "client": row["client"],
+                        "conversation_id": row["conversation_id"],
+                        "title": str(metadata.get("conversation_title") or ""),
+                        "message_count": int(row["message_count"] or 0),
+                        "first_at": row["first_at"],
+                        "last_at": row["last_at"],
+                    }
+                )
+        finally:
+            conn.close()
+        return {
+            "ok": True,
+            "count": len(items),
+            "total": total,
+            "offset": safe_offset,
+            "has_more": safe_offset + len(items) < total,
+            "items": items,
+        }
+
+    def list_archive_conversation_events(
+        self,
+        *,
+        conversation_id: str,
+        source: str = "",
+        limit: int = 50,
+        offset: int = 0,
+        query: str = "",
+    ) -> dict[str, Any]:
+        """Read one imported window from oldest to newest with stable, bounded pages."""
+        safe_conversation_id = str(conversation_id or "").strip()
+        if not safe_conversation_id:
+            raise ValueError("missing conversation_id")
+        safe_limit = max(1, min(100, int(limit or 50)))
+        safe_offset = max(0, int(offset or 0))
+        cleaned_query = str(query or "").strip()
+        clauses = ["usage_scope = ?", "conversation_id = ?"]
+        params: list[Any] = [RAW_EVENT_ARCHIVE_SCOPE, safe_conversation_id]
+        if source:
+            clauses.append("source = ?")
+            params.append(self._clean_source(source))
+        if cleaned_query:
+            clauses.append("text LIKE ?")
+            params.append(f"%{cleaned_query}%")
+        where = " AND ".join(clauses)
+        conn = self._connect()
+        try:
+            total = int(conn.execute(f"SELECT COUNT(*) FROM raw_events WHERE {where}", params).fetchone()[0])
+            rows = conn.execute(
+                f"""
+                SELECT * FROM raw_events
+                WHERE {where}
+                ORDER BY created_at ASC, id ASC
+                LIMIT ? OFFSET ?
+                """,
+                [*params, safe_limit, safe_offset],
+            ).fetchall()
+        finally:
+            conn.close()
+        items = [self._row_to_event(row) for row in rows]
+        return {
+            "ok": True,
+            "query": cleaned_query,
+            "count": len(items),
+            "total": total,
+            "offset": safe_offset,
+            "has_more": safe_offset + len(items) < total,
+            "items": items,
         }
 
     def list_events_between(

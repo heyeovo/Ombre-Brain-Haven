@@ -119,6 +119,62 @@ class RawEventArchiveScopeTest(unittest.TestCase):
             matches = store.find_canonical_matches([canonical])
             self.assertEqual({item["source"] for item in matches[canonical]}, {"claude_official_export", "kelivo_export"})
 
+    def test_archive_conversation_directory_and_pages_are_isolated_and_chronological(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = self.make_store(Path(temp))
+            store.ingest(
+                [{
+                    "id": "runtime",
+                    "role": "user",
+                    "text": "不能出现在历史窗口",
+                    "created_at": "2026-07-01T00:00:00+00:00",
+                    "conversation_id": "runtime-window",
+                }],
+                source="runtime",
+            )
+            events = [
+                {
+                    "id": "later",
+                    "role": "assistant",
+                    "text": "第二条",
+                    "created_at": "2026-07-02T00:02:00+00:00",
+                    "conversation_id": "history-window",
+                    "usage_scope": RAW_EVENT_ARCHIVE_SCOPE,
+                    "metadata": {"conversation_title": "历史窗口"},
+                },
+                {
+                    "id": "earlier",
+                    "role": "user",
+                    "text": "第一条",
+                    "created_at": "2026-07-02T00:01:00+00:00",
+                    "conversation_id": "history-window",
+                    "usage_scope": RAW_EVENT_ARCHIVE_SCOPE,
+                    "metadata": {"conversation_title": "历史窗口"},
+                },
+            ]
+            store.ingest(events, source="claude_official_export")
+
+            directory = store.list_archive_conversations()
+            self.assertEqual(directory["total"], 1)
+            self.assertEqual(directory["items"][0]["title"], "历史窗口")
+            self.assertEqual(directory["items"][0]["message_count"], 2)
+
+            first_page = store.list_archive_conversation_events(
+                conversation_id="history-window",
+                source="claude_official_export",
+                limit=1,
+            )
+            second_page = store.list_archive_conversation_events(
+                conversation_id="history-window",
+                source="claude_official_export",
+                limit=1,
+                offset=1,
+            )
+            self.assertEqual([item["text"] for item in first_page["items"]], ["第一条"])
+            self.assertTrue(first_page["has_more"])
+            self.assertEqual([item["text"] for item in second_page["items"]], ["第二条"])
+            self.assertFalse(second_page["has_more"])
+
     def test_archive_chunks_are_idempotent_and_commit_only_after_hash_verification(self):
         with tempfile.TemporaryDirectory() as temp:
             store = self.make_store(Path(temp))

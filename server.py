@@ -13020,6 +13020,55 @@ async def api_search_raw(request):
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@mcp.custom_route("/api/raw-conversations", methods=["GET"])
+async def api_raw_conversations(request):
+    """List private imported chat windows; runtime raw events are never included."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    params = request.query_params
+    try:
+        return JSONResponse(
+            raw_event_store.list_archive_conversations(
+                source=str(params.get("source") or ""),
+                limit=_int_between(params.get("limit"), 100, 1, 500),
+                offset=_int_between(params.get("offset"), 0, 0, 1000000),
+            )
+        )
+    except Exception as exc:
+        logger.warning("raw conversation list failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/raw-conversation-events", methods=["GET"])
+async def api_raw_conversation_events(request):
+    """Read one private imported chat window from oldest to newest."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    params = request.query_params
+    conversation_id = str(params.get("conversation_id") or "").strip()
+    if not conversation_id:
+        return JSONResponse({"error": "missing conversation_id"}, status_code=400)
+    try:
+        return JSONResponse(
+            raw_event_store.list_archive_conversation_events(
+                conversation_id=conversation_id,
+                source=str(params.get("source") or ""),
+                query=str(params.get("q") or ""),
+                limit=_int_between(params.get("limit"), 50, 1, 100),
+                offset=_int_between(params.get("offset"), 0, 0, 1000000),
+            )
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.warning("raw conversation events failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @mcp.custom_route("/api/network", methods=["GET"])
 async def api_network(request):
     """Get embedding similarity network for visualization."""

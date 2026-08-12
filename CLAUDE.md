@@ -50,7 +50,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `decay_engine.py` | 衰减引擎，计算 score |
 | `embedding_engine.py` | 向量嵌入 + 相似度搜索 |
 | `import_memory.py` | 对话历史导入引擎（含成本追踪） |
-| `raw_events.py` | 隔离的原文 SQLite、显式原文检索、运行时/历史档案 scope、消息与导入幂等、私密白名单聊天档案分块归档 |
+| `raw_events.py` | 隔离的原文 SQLite、显式原文检索、运行时/历史档案 scope、历史窗口目录与按时间分页读取、消息与导入幂等、私密白名单聊天档案分块归档 |
 | `raw_archive_import.py` | Claude 官方与 Kelivo 导出的流式白名单适配、预览审计、跨来源疑似重复、可见聊天＋推理档案打包及确认式上传 CLI；工具和附件内容不入 Haven |
 | `recall_policy.py` | 召回策略（vague 闸、相对日期、分词整词判断） |
 | `reflection_engine.py` | 反思/日印象引擎 |
@@ -165,6 +165,8 @@ GET /api/search?q=&simulate=&include_vector=&include_noise=&include_archive=&lim
 # include_noise=true → 包含噪声桶
 # record_stats 由后端控制（simulate 时不记录）
 GET /api/search-raw   # 原文检索（GET / JSON POST）；usage_scope=runtime|historical_archive|all
+GET /api/raw-conversations             # 历史档案窗口目录；只读 historical_archive
+GET /api/raw-conversation-events       # 单窗口按时间正序分页；只读 historical_archive
 ```
 
 ### 相似 & 合并

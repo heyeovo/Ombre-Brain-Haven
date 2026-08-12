@@ -287,7 +287,7 @@ GET /api/debug/injections             # 注入调试（见 README「Gateway 注�
 ### 产品 Prompt 持久化与硬约束
 `state/prompt_overrides.sqlite` 只保存用户自定义产品层，不复制代码默认；不存在覆盖时始终读取当前版本的系统默认。表按 `profile_id + name` 隔离，初始化和旧表补列可重复执行，保存使用 revision 检查跨窗口冲突。四个白名单名称为 `analyze`、`merge`、`daily_review`、`weekly_journey`。
 
-生成时按“协作者基础提示词/默认模块 + 可配置产品层 + 服务端硬约束 + 固定材料”组装。自动打标的 JSON/字段/domain/保留标签、记忆合并的 section/身份/正文约束、日回顾的材料与独立表边界、weekly journey 的 JSON/三类候选/固定证据/零自动写入/revision-hash 均不可由自定义正文替换。`analyze` 和 `merge` 的测试通过局部参数试跑，不再临时改写全局 `Dehydrator` 属性；日回顾与 weekly journey 不提供会污染正式表或候选的测试入口。
+生成时按“协作者基础提示词/默认模块 + 可配置产品层 + 服务端硬约束 + 固定材料”组装。自动打标的 JSON/字段/domain/保留标签、记忆合并的 section/身份/正文约束、日回顾的材料与独立表边界、weekly journey 的 JSON/三类候选/固定证据/实质变化/不得编造/零自动写入/revision-hash 均不可由自定义正文替换。`GET /api/prompts` 同时返回运行时叠加说明、实际模型硬约束全文和模型返回后的服务端校验摘要，供 dashboard 只读展示完整分层。`analyze` 和 `merge` 的测试通过局部参数试跑，不再临时改写全局 `Dehydrator` 属性；日回顾与 weekly journey 不提供会污染正式表或候选的测试入口。
 
 ### 中文分词
 `jieba` 分词（`_split_query_tokens()`），自动切长句。内置 stopword 过滤。`precise_match_mode` 开启时从 `partial_ratio` 切换到精确子串匹配。

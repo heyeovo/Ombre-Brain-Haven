@@ -313,6 +313,14 @@ class Dehydrator:
                 return resolved
         return default
 
+    def product_prompt_hard_constraints(self, name: str) -> str:
+        """Return the exact non-editable model layer used for dashboard explanation."""
+        if name == "analyze":
+            return ANALYZE_PROMPT_TEMPLATE.replace("{domain_options_text}", domain_prompt_options_text())
+        if name == "merge":
+            return render_identity_template(MERGE_PROMPT_TEMPLATE, self.identity)
+        raise ValueError(f"unknown dehydrator product prompt: {name}")
+
     # ---------------------------------------------------------
     # Dehydrate: compress raw content into concise summary
     # 脱水：将原始内容压缩为精简摘要
@@ -443,7 +451,7 @@ class Dehydrator:
         """
         user_msg = f"旧记忆：\n{old_content[:2000]}\n\n新内容：\n{new_content[:2000]}"
         product_prompt = self._product_prompt("merge", MERGE_PRODUCT_PROMPT, product_prompt_override)
-        hard_prompt = render_identity_template(MERGE_PROMPT_TEMPLATE, self.identity)
+        hard_prompt = self.product_prompt_hard_constraints("merge")
         system_prompt = (
             f"【可配置的整理偏好】\n{product_prompt}\n\n"
             f"【不可覆盖的合并与结构约束】\n{hard_prompt}"
@@ -561,7 +569,7 @@ class Dehydrator:
         调用 LLM API 执行内容分析打标。
         """
         product_prompt = self._product_prompt("analyze", ANALYZE_PRODUCT_PROMPT, product_prompt_override)
-        hard_prompt = ANALYZE_PROMPT_TEMPLATE.replace("{domain_options_text}", domain_prompt_options_text())
+        hard_prompt = self.product_prompt_hard_constraints("analyze")
         system_prompt = (
             f"【可配置的分析偏好】\n{product_prompt}\n\n"
             f"【不可覆盖的字段、白名单与输出协议】\n{hard_prompt}"

@@ -21,6 +21,7 @@ sys.modules.setdefault("yaml", SimpleNamespace(safe_load=lambda value: {}, safe_
 from dehydrator import Dehydrator  # noqa: E402
 from journey_weekly_engine import (  # noqa: E402
     WEEKLY_JOURNEY_HARD_CONSTRAINTS,
+    WEEKLY_JOURNEY_PRODUCT_PROMPT,
     WeeklyJourneyEngine,
 )
 
@@ -40,6 +41,12 @@ class FakeCompletions:
 
 
 class PromptLayeringTest(unittest.IsolatedAsyncioTestCase):
+    def test_weekly_transition_and_evidence_truth_are_not_editable_defaults(self):
+        self.assertNotIn("才允许选择 transition", WEEKLY_JOURNEY_PRODUCT_PROMPT)
+        self.assertNotIn("不得编造", WEEKLY_JOURNEY_PRODUCT_PROMPT)
+        self.assertIn("才允许选择 transition", WEEKLY_JOURNEY_HARD_CONSTRAINTS)
+        self.assertIn("不得编造", WEEKLY_JOURNEY_HARD_CONSTRAINTS)
+
     async def test_analyze_override_does_not_replace_hard_json_contract(self):
         completions = FakeCompletions(json.dumps({
             "domain": ["情感"], "valence": 0.6, "arousal": 0.4,

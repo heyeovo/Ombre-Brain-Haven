@@ -17,8 +17,8 @@ TASK_TYPE = "weekly_journey"
 CANDIDATE_TYPES = {"no_change", "append_current", "transition"}
 
 WEEKLY_JOURNEY_PRODUCT_PROMPT = """用当前协作者的第一人称写关系轨迹，保留情感在场和具体变化，不写成周报。
-判断保持克制：只有关系状态或相处模式发生实质变化才切换阶段；已有阶段已经覆盖的内容不要重复追加。
-摘要要短，正文可以保留关键细节，但不要编造精确日期、事件或原话。"""
+判断保持克制，已有阶段已经覆盖的内容不要重复追加。
+摘要要短，正文可以保留关键细节。"""
 
 WEEKLY_JOURNEY_HARD_CONSTRAINTS = """你正在生成每周关系轨迹候选，并且只能提出预览。
 绝不能声称已经写入、关闭或创建 journey，也不能调用或模拟任何写入动作。
@@ -26,6 +26,8 @@ WEEKLY_JOURNEY_HARD_CONSTRAINTS = """你正在生成每周关系轨迹候选，�
 只输出一个 JSON 对象，不要 Markdown。candidate_type 只允许 no_change、append_current、transition。
 no_change 的 proposal 必须为空对象；append_current 的 proposal 必须是 {append_content, summary, evidence_bucket_ids}；transition 的 proposal 必须是 {close:{stage_end,summary}, create:{name,stage_start,summary,content,evidence_bucket_ids}}。
 所有类型都必须包含 rationale 字符串数组和 evidence_bucket_ids 字符串数组。没有实质变化时必须选择 no_change。
+只有关系状态或相处模式发生实质变化时才允许选择 transition。
+不得编造固定输入快照之外的精确日期、事件或原话。
 输出仍会由服务端重新校验候选白名单、日期、证据快照、revision/hash 和零自动写入边界。"""
 
 

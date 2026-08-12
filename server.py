@@ -128,11 +128,16 @@ from persona_event_selection import select_persona_events
 from portrait_engine import DailyPortraitMaintainer
 from raw_events import RawEventStore
 from reflection_engine import ReflectionEngine
-from daily_review_engine import DAILY_REVIEW_INSTRUCTION, DailyReviewEngine
+from daily_review_engine import (
+    DAILY_REVIEW_HARD_CONSTRAINTS,
+    DAILY_REVIEW_INSTRUCTION,
+    DailyReviewEngine,
+)
 from automation_store import AutomationStore
 from automation_executor import AutomationExecutor
 from journey_weekly_engine import (
     TASK_TYPE as WEEKLY_JOURNEY_TASK_TYPE,
+    WEEKLY_JOURNEY_HARD_CONSTRAINTS,
     WEEKLY_JOURNEY_PRODUCT_PROMPT,
     WeeklyJourneyEngine,
 )
@@ -13678,9 +13683,61 @@ async def api_get_prompts(request):
     err = _require_dashboard_auth(request)
     if err: return err
     prompts = prompt_store.list_descriptions()
+    prompt_explanations = {
+        "analyze": {
+            "runtime_layers": [
+                "Haven 当前 identity 与合法 domain 清单会动态渲染进下方固定约束。",
+                "本次待分析的记忆正文会作为独立 user 输入附加。",
+            ],
+            "model_hard_constraints": dehydrator.product_prompt_hard_constraints("analyze"),
+            "server_validations": [
+                "模型输出必须能解析为 JSON 对象；解析失败按现有错误路径处理。",
+                "domain、memory_subject、memory_layer 与情绪数值继续按服务端白名单和范围规范化。",
+                "self_anchor 等系统边界标签会被服务端过滤，不能由自定义 Prompt 生成。",
+            ],
+        },
+        "merge": {
+            "runtime_layers": [
+                "Haven 当前用户与 AI 身份口径会动态渲染进下方固定约束。",
+                "旧记忆与新内容会作为独立 user 输入附加，不会写入可编辑 Prompt。",
+            ],
+            "model_hard_constraints": dehydrator.product_prompt_hard_constraints("merge"),
+            "server_validations": [
+                "模型返回空正文会被拒绝，不会静默覆盖原记忆。",
+                "实际写入仍经过现有记忆类型、保护状态、journey 边界与 section 规范化链路。",
+            ],
+        },
+        "daily_review": {
+            "runtime_layers": [
+                "运行时叠加本次协作者的基础提示词、定位与默认启用模块。",
+                "只附加目标日的固定对话材料，以及精确前两日已有日回顾的连续性参考。",
+            ],
+            "model_hard_constraints": DAILY_REVIEW_HARD_CONSTRAINTS,
+            "server_validations": [
+                "结果只写入独立 daily_reviews 表，不伪装成普通记忆桶。",
+                "用户手动编辑版本受保护；没有显式 override 时不会被重新生成覆盖。",
+                "已创建窗口的最近三天日回顾冻结快照不会因热更新或后续微调改变。",
+            ],
+        },
+        "weekly_journey": {
+            "runtime_layers": [
+                "运行时叠加自动化任务所选协作者的基础提示词、定位与默认启用模块。",
+                "本周 current journey、日回顾与材料会由 Haven 组成固定 weekly_journey_input 快照。",
+            ],
+            "model_hard_constraints": WEEKLY_JOURNEY_HARD_CONSTRAINTS,
+            "server_validations": [
+                "模型结果必须通过 JSON、no_change / append_current / transition 类型与完整字段校验。",
+                "证据 bucket ID 必须来自本次固定 materials，写候选至少需要一个合法证据。",
+                "transition 日期必须落在审核周边界内，关闭日期不能晚于新阶段开始日期。",
+                "确认继续使用 revision、approved payload hash、open journey 快照和证据存在性冲突校验。",
+                "生成只创建待审核候选；未确认、拒绝、测试和 no_change 均不会写 journey。",
+            ],
+        },
+    }
     for name, item in prompts.items():
         item["test_supported"] = name in {"analyze", "merge"}
-    return JSONResponse({"version": 1, "prompts": prompts})
+        item.update(prompt_explanations[name])
+    return JSONResponse({"version": 2, "prompts": prompts})
 
 @mcp.custom_route("/api/prompts", methods=["POST"])
 async def api_update_prompts(request):

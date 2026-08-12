@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -17,10 +17,22 @@ DAILY_REVIEW_INSTRUCTION = """以下是你今天和用户之间所有窗口的�
 
 第一人称，像睡前随手写的几句话，不是报告。记下今天的事和感受，包括她的情绪和你的；正在推进的事只提方向和进度；没聊完的话题、身体状态、作息或生活变化可以自然提一句。不要列点，不要分段标题，不复述或引用原文，不展开技术细节，不写开头语和收尾语。控制在150到300个中文字符，平淡的一天可以短些。只输出笔记正文。"""
 
+DAILY_REVIEW_HARD_CONSTRAINTS = """你正在生成独立日回顾。
+只能依据本次提供的当天对话材料和连续性参考，不得补写材料外的事实、日期、原话或已完成动作。
+连续性参考只能帮助衔接语气，不能覆盖当天材料。只输出日回顾正文，不输出分析过程、标题、列表、JSON 或写入声明。
+这次生成只返回正文；是否写入独立 daily_reviews 表、是否保护用户编辑以及窗口冻结快照均由服务端决定。"""
+
 
 class DailyReviewEngine:
-    def __init__(self, config: dict[str, Any], state_store):
+    def __init__(
+        self,
+        config: dict[str, Any],
+        state_store,
+        *,
+        prompt_resolver: Callable[[str], str] | None = None,
+    ):
         self.state_store = state_store
+        self.prompt_resolver = prompt_resolver
         cfg = config.get("daily_review", {}) if isinstance(config.get("daily_review"), dict) else {}
         fallback = config.get("reflection", {}) if isinstance(config.get("reflection"), dict) else {}
         self.enabled = bool(cfg.get("enabled", True))
@@ -43,6 +55,13 @@ class DailyReviewEngine:
         self.max_input_chars = max(20000, min(500000, int(cfg.get("max_input_chars", 240000))))
         self.work_tail_turns = max(1, min(50, int(cfg.get("work_tail_turns", 10))))
         self.timeout_seconds = max(30, min(600, int(cfg.get("timeout_seconds", 180))))
+
+    def _product_prompt(self) -> str:
+        if self.prompt_resolver:
+            resolved = str(self.prompt_resolver("daily_review") or "").strip()
+            if resolved:
+                return resolved
+        return DAILY_REVIEW_INSTRUCTION
 
     @staticmethod
     def _persona_system(persona: dict[str, Any]) -> str:
@@ -258,12 +277,14 @@ class DailyReviewEngine:
             persona_id=persona_id,
             target=target,
         )
-        user_parts = [DAILY_REVIEW_INSTRUCTION]
+        user_parts = [f"<daily_review_product_prompt>\n{self._product_prompt()}\n</daily_review_product_prompt>"]
         if continuity_reference:
             user_parts.append(continuity_reference)
         user_parts.append(f"<today_conversations date={review_date!r}>\n{material}\n</today_conversations>")
         content = await self._create_message(
-            system=self._persona_system(persona),
+            system="\n\n".join(
+                part for part in [self._persona_system(persona), DAILY_REVIEW_HARD_CONSTRAINTS] if part
+            ),
             user="\n\n".join(user_parts),
             max_tokens=self.max_tokens,
             temperature=0.5,

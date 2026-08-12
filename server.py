@@ -71,7 +71,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mcp.server.fastmcp import Context, FastMCP
 
 from bucket_manager import BucketManager
-from dehydrator import Dehydrator
+from dehydrator import ANALYZE_PRODUCT_PROMPT, MERGE_PRODUCT_PROMPT, Dehydrator
 from decay_engine import DecayEngine
 from darkroom import DarkroomStore
 from dream_engine import DreamEngine
@@ -128,10 +128,21 @@ from persona_event_selection import select_persona_events
 from portrait_engine import DailyPortraitMaintainer
 from raw_events import RawEventStore
 from reflection_engine import ReflectionEngine
-from daily_review_engine import DailyReviewEngine
+from daily_review_engine import DAILY_REVIEW_INSTRUCTION, DailyReviewEngine
 from automation_store import AutomationStore
 from automation_executor import AutomationExecutor
-from journey_weekly_engine import TASK_TYPE as WEEKLY_JOURNEY_TASK_TYPE, WeeklyJourneyEngine
+from journey_weekly_engine import (
+    TASK_TYPE as WEEKLY_JOURNEY_TASK_TYPE,
+    WEEKLY_JOURNEY_PRODUCT_PROMPT,
+    WeeklyJourneyEngine,
+)
+from prompt_store import (
+    EmptyPromptError,
+    PromptConflictError,
+    PromptStore,
+    PromptStoreError,
+    UnknownPromptError,
+)
 from recall_diagnostics import RecallDiagnosticsLogger
 from reminder_store import ReminderStore
 from todo_store import TODO_DOMAINS, TodoStore
@@ -237,7 +248,21 @@ if os.path.exists(_runtime_path):
     except Exception:
         pass
 
-dehydrator = Dehydrator(config)                      # Dehydrator / 脱水器
+_prompt_profile_id = str(
+    (config.get("persona", {}) if isinstance(config.get("persona"), dict) else {}).get("profile_id")
+    or "default"
+).strip() or "default"
+prompt_store = PromptStore(
+    config,
+    {
+        "analyze": ANALYZE_PRODUCT_PROMPT,
+        "merge": MERGE_PRODUCT_PROMPT,
+        "daily_review": DAILY_REVIEW_INSTRUCTION,
+        "weekly_journey": WEEKLY_JOURNEY_PRODUCT_PROMPT,
+    },
+    profile_id=_prompt_profile_id,
+)
+dehydrator = Dehydrator(config, prompt_resolver=prompt_store.get_effective)  # Dehydrator / 脱水器
 decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引擎
 embedding_engine = EmbeddingEngine(config)            # Embedding engine / 向量化引擎
 reranker_engine = RerankerEngine(config)              # Reranker / 召回重排序
@@ -257,7 +282,11 @@ identity_semantic_store = IdentitySemanticStore(config) # Private relationship a
 word_map_store = WordMapStore(config)                   # Derived generic word co-occurrence index / 派生通用词图
 darkroom_store = DarkroomStore(config)                  # Private reflection room / 不回显正文的暗房
 gateway_state_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gateway_state.db"))
-daily_review_engine = DailyReviewEngine(config, gateway_state_store)
+daily_review_engine = DailyReviewEngine(
+    config,
+    gateway_state_store,
+    prompt_resolver=prompt_store.get_effective,
+)
 automation_store = AutomationStore(config)
 weekly_journey_engine = WeeklyJourneyEngine(
     config,
@@ -266,6 +295,7 @@ weekly_journey_engine = WeeklyJourneyEngine(
     gateway_state_store,
     profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
     message_client=daily_review_engine,
+    prompt_resolver=prompt_store.get_effective,
 )
 automation_executor = AutomationExecutor(automation_store, bucket_mgr, weekly_journey_engine)
 raw_event_store = RawEventStore(config)                  # Raw dialogue archive / 原文保险箱
@@ -13647,10 +13677,10 @@ async def api_get_prompts(request):
     from starlette.responses import JSONResponse
     err = _require_dashboard_auth(request)
     if err: return err
-    return JSONResponse({
-        "dehydrate": dehydrator.dehydrate_prompt,
-        "analyze": dehydrator.analyze_prompt,
-    })
+    prompts = prompt_store.list_descriptions()
+    for name, item in prompts.items():
+        item["test_supported"] = name in {"analyze", "merge"}
+    return JSONResponse({"version": 1, "prompts": prompts})
 
 @mcp.custom_route("/api/prompts", methods=["POST"])
 async def api_update_prompts(request):
@@ -13659,20 +13689,53 @@ async def api_update_prompts(request):
     if err: return err
     try:
         body = await request.json()
-        name = body.get("name")
-        content = body.get("content", "").strip()
-        if not name or not content:
-            return JSONResponse({"error": "missing fields"}, status_code=400)
-        if name == "dehydrate":
-            dehydrator.dehydrate_prompt = content
-        elif name == "analyze":
-            dehydrator.analyze_prompt = content
-        else:
-            return JSONResponse({"error": "unknown prompt"}, status_code=400)
-        return JSONResponse({"ok": True})
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
+        expected = body.get("expected_revision")
+        if expected is not None and (isinstance(expected, bool) or not isinstance(expected, int)):
+            return JSONResponse({"error": "expected_revision must be an integer"}, status_code=400)
+        item = prompt_store.save(
+            body.get("name"),
+            body.get("content"),
+            expected_revision=expected,
+        )
+        item["test_supported"] = item["name"] in {"analyze", "merge"}
+        return JSONResponse({"ok": True, "effective_immediately": True, "prompt": item})
+    except UnknownPromptError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except EmptyPromptError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    except PromptConflictError as exc:
+        return JSONResponse({"error": str(exc), "code": "revision_conflict"}, status_code=409)
+    except PromptStoreError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
-    
+
+@mcp.custom_route("/api/prompts/reset", methods=["POST"])
+async def api_reset_prompt(request):
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err: return err
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
+        expected = body.get("expected_revision")
+        if expected is not None and (isinstance(expected, bool) or not isinstance(expected, int)):
+            return JSONResponse({"error": "expected_revision must be an integer"}, status_code=400)
+        item = prompt_store.reset(body.get("name"), expected_revision=expected)
+        item["test_supported"] = item["name"] in {"analyze", "merge"}
+        return JSONResponse({"ok": True, "effective_immediately": True, "prompt": item})
+    except UnknownPromptError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except PromptConflictError as exc:
+        return JSONResponse({"error": str(exc), "code": "revision_conflict"}, status_code=409)
+    except PromptStoreError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
 @mcp.custom_route("/api/prompts/test", methods=["POST"])
 async def api_test_prompt(request):
     from starlette.responses import JSONResponse
@@ -13680,30 +13743,36 @@ async def api_test_prompt(request):
     if err: return err
     try:
         body = await request.json()
-        name = body.get("name")
-        content = body.get("content", "")
-        prompt_override = body.get("prompt_override", "").strip()
-
-        if name == "dehydrate":
-            original = dehydrator.dehydrate_prompt
-            if prompt_override:
-                dehydrator.dehydrate_prompt = prompt_override
-            try:
-                result = await dehydrator._api_dehydrate(content)
-            finally:
-                dehydrator.dehydrate_prompt = original
-        elif name == "analyze":
-            original = dehydrator.analyze_prompt
-            if prompt_override:
-                dehydrator.analyze_prompt = prompt_override
-            try:
-                result = await dehydrator._api_analyze(content)
-            finally:
-                dehydrator.analyze_prompt = original
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
+        name = str(body.get("name") or "").strip()
+        prompt_override = str(body.get("content") or "").strip()
+        prompt_store.describe(name)
+        if not prompt_override:
+            return JSONResponse({"error": "prompt content must not be empty"}, status_code=422)
+        if name == "analyze":
+            sample = str(body.get("sample_input") or "").strip()
+            if not sample:
+                return JSONResponse({"error": "sample_input must not be empty"}, status_code=422)
+            result = await dehydrator._api_analyze(
+                sample,
+                product_prompt_override=prompt_override,
+            )
+        elif name == "merge":
+            old_content = str(body.get("old_content") or "").strip()
+            new_content = str(body.get("new_content") or "").strip()
+            if not old_content or not new_content:
+                return JSONResponse({"error": "old_content and new_content are required"}, status_code=422)
+            result = await dehydrator._api_merge(
+                old_content,
+                new_content,
+                product_prompt_override=prompt_override,
+            )
         else:
-            return JSONResponse({"error": "unknown"}, status_code=400)
-
+            return JSONResponse({"error": "prompt testing is not supported for this prompt"}, status_code=400)
         return JSONResponse({"ok": True, "result": result})
+    except UnknownPromptError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -14750,7 +14819,11 @@ async def api_config_update(request):
             os.environ["OMBRE_DAILY_REVIEW_API_KEY"] = daily_review_cfg["api_key"]
             env_updates["OMBRE_DAILY_REVIEW_API_KEY"] = daily_review_cfg["api_key"]
             updated.append("daily_review.api_key")
-        daily_review_engine = DailyReviewEngine(config, gateway_state_store)
+        daily_review_engine = DailyReviewEngine(
+            config,
+            gateway_state_store,
+            prompt_resolver=prompt_store.get_effective,
+        )
 
     # --- Portrait maintainer config ---
     if "portrait" in body:
@@ -15318,6 +15391,7 @@ async def api_config_update(request):
         gateway_state_store,
         profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
         message_client=daily_review_engine,
+        prompt_resolver=prompt_store.get_effective,
     )
     automation_executor = AutomationExecutor(automation_store, bucket_mgr, weekly_journey_engine)
     return JSONResponse({"updated": updated, "ok": True})
@@ -15887,7 +15961,11 @@ if __name__ == "__main__":
             local_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gateway_state.db"))
             while True:
                 try:
-                    local_engine = DailyReviewEngine(config, local_store)
+                    local_engine = DailyReviewEngine(
+                        config,
+                        local_store,
+                        prompt_resolver=prompt_store.get_effective,
+                    )
                     results = await local_engine.run_due(
                         profile_id=str(getattr(persona_engine, "profile_id", "") or "default")
                     )

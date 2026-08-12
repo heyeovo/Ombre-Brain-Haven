@@ -22,10 +22,40 @@ sys.modules.setdefault(
     SimpleNamespace(AsyncClient=ImportOnlyAsyncClient, HTTPError=Exception),
 )
 
-from daily_review_engine import DailyReviewEngine  # noqa: E402
+from daily_review_engine import DAILY_REVIEW_HARD_CONSTRAINTS, DailyReviewEngine  # noqa: E402
 
 
 class DailyReviewEngineTest(unittest.IsolatedAsyncioTestCase):
+    async def test_product_prompt_is_layered_inside_hard_constraints(self):
+        class Store:
+            def list_daily_reviews(self, **kwargs):
+                return []
+
+            def list_daily_review_turns(self, **kwargs):
+                return [{
+                    "session_id": "chat-1", "mode": "chat", "session_title": "闲聊",
+                    "user_text": "今天散步了", "assistant_text": "风很舒服",
+                }]
+
+            def get_cc_persona(self, persona_id):
+                return {"id": persona_id, "base_prompt": "协作者基础提示", "prompt_modules": []}
+
+            def upsert_daily_review(self, **kwargs):
+                return kwargs
+
+        engine = DailyReviewEngine(
+            {"daily_review": {"model": "m", "base_url": "https://relay", "api_key": "k"}},
+            Store(),
+            prompt_resolver=lambda name: "用户日回顾偏好" if name == "daily_review" else "",
+        )
+        engine._create_message = AsyncMock(return_value="今天一起散了步。")
+        await engine.generate(profile_id="default", persona_id="ombre", review_date="2026-08-08")
+        call = engine._create_message.await_args.kwargs
+        self.assertIn("协作者基础提示", call["system"])
+        self.assertIn(DAILY_REVIEW_HARD_CONSTRAINTS, call["system"])
+        self.assertIn("用户日回顾偏好", call["user"])
+        self.assertNotIn("用户日回顾偏好", call["system"])
+
     def test_anthropic_content_reads_text_blocks(self):
         self.assertEqual(
             DailyReviewEngine._anthropic_content({

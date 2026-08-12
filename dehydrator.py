@@ -27,7 +27,7 @@ import os
 import re
 import json
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from openai import AsyncOpenAI
 
@@ -210,6 +210,10 @@ MERGE_PROMPT_TEMPLATE = """你是一个信息合并专家。请将旧记忆与�
 
 MERGE_PROMPT = render_identity_template(MERGE_PROMPT_TEMPLATE, generic_identity_names())
 
+MERGE_PRODUCT_PROMPT = """把新旧记忆整理成一份自然、紧凑但仍保留情绪温度的记录。
+优先保留具体事实、关键称呼、短原话、承诺与关系变化；删除真正重复的表达。
+正文不要写成报告，reflection 保持当前协作者的第一人称。"""
+
 
 # --- Auto-tagging prompt: analyze content for domain and emotion coords ---
 # --- 自动打标提示词：分析内容的主题域和情感坐标 ---
@@ -250,6 +254,9 @@ ANALYZE_PROMPT_TEMPLATE = """你是一个内容分析器。请分析以下文本
 
 ANALYZE_PROMPT = ANALYZE_PROMPT_TEMPLATE.replace("{domain_options_text}", domain_prompt_options_text())
 
+ANALYZE_PRODUCT_PROMPT = """标签和标题应具体、便于以后用自然语言找回，不要堆泛词。
+优先识别真正的主题、关系含义、稳定偏好、当前状态与事件进展；情绪坐标按原文实际强度判断。"""
+
 
 class Dehydrator:
     """
@@ -268,8 +275,9 @@ class Dehydrator:
     # 类级别：最近一次合并 LLM 用量（供前端显示）
     _last_merge_usage = None
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, *, prompt_resolver: Callable[[str], str] | None = None):
         self.identity = identity_names(config)
+        self.prompt_resolver = prompt_resolver
         # --- Read dehydration API config / 读取脱水 API 配置 ---
         dehy_cfg = config.get("dehydration", {})
         self.api_key = dehy_cfg.get("api_key", "")
@@ -295,6 +303,15 @@ class Dehydrator:
 
         self.dehydrate_prompt = DEHYDRATE_PROMPT
         self.analyze_prompt = ANALYZE_PROMPT
+
+    def _product_prompt(self, name: str, default: str, override: str | None = None) -> str:
+        if override is not None:
+            return str(override).strip() or default
+        if self.prompt_resolver:
+            resolved = str(self.prompt_resolver(name) or "").strip()
+            if resolved:
+                return resolved
+        return default
 
     # ---------------------------------------------------------
     # Dehydrate: compress raw content into concise summary
@@ -413,16 +430,28 @@ class Dehydrator:
     # API call: merge
     # API 调用：合并
     # ---------------------------------------------------------
-    async def _api_merge(self, old_content: str, new_content: str) -> str:
+    async def _api_merge(
+        self,
+        old_content: str,
+        new_content: str,
+        *,
+        product_prompt_override: str | None = None,
+    ) -> str:
         """
         Call LLM API for intelligent merge (via OpenAI-compatible client).
         调用 LLM API 执行智能合并。
         """
         user_msg = f"旧记忆：\n{old_content[:2000]}\n\n新内容：\n{new_content[:2000]}"
+        product_prompt = self._product_prompt("merge", MERGE_PRODUCT_PROMPT, product_prompt_override)
+        hard_prompt = render_identity_template(MERGE_PROMPT_TEMPLATE, self.identity)
+        system_prompt = (
+            f"【可配置的整理偏好】\n{product_prompt}\n\n"
+            f"【不可覆盖的合并与结构约束】\n{hard_prompt}"
+        )
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": render_identity_template(MERGE_PROMPT_TEMPLATE, self.identity)},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_msg},
             ],
             **self._completion_options(
@@ -521,15 +550,26 @@ class Dehydrator:
     # API call: auto-tagging
     # API 调用：自动打标
     # ---------------------------------------------------------
-    async def _api_analyze(self, content: str) -> dict:
+    async def _api_analyze(
+        self,
+        content: str,
+        *,
+        product_prompt_override: str | None = None,
+    ) -> dict:
         """
         Call LLM API for content analysis / tagging.
         调用 LLM API 执行内容分析打标。
         """
+        product_prompt = self._product_prompt("analyze", ANALYZE_PRODUCT_PROMPT, product_prompt_override)
+        hard_prompt = ANALYZE_PROMPT_TEMPLATE.replace("{domain_options_text}", domain_prompt_options_text())
+        system_prompt = (
+            f"【可配置的分析偏好】\n{product_prompt}\n\n"
+            f"【不可覆盖的字段、白名单与输出协议】\n{hard_prompt}"
+        )
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": self.analyze_prompt},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": content[:2000]},
             ],
             **self._completion_options(

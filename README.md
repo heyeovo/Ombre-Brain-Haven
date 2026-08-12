@@ -242,6 +242,8 @@ Dashboard 保存模型、upstream、缓存策略、Operit 拆包和召回参数�
 
 API key 不写进 YAML，而是按环境变量路径单独保存。保存响应会区分 `gateway_hot_reloaded`、写入主 YAML、写入 runtime fallback 或热更新失败，避免旧版“保存失败但部分运行态已经改变”的不确定状态。
 
+Prompt 页面管理四类实际产品 Prompt：自动打标、记忆合并、独立日回顾和每周关系轨迹。用户覆盖保存在 Haven 的 `state/prompt_overrides.sqlite`，保存后下一次生成立即读取，重启和重新部署后仍保留；恢复系统默认会删除覆盖并重新跟随代码默认。页面只开放文风、关注重点、判断尺度和篇幅，JSON 协议、字段白名单、固定输入证据、独立表、审批 hash 与零自动写入等边界仍由服务端追加并校验。旧“脱水压缩”已不再作为产品 Prompt：当前普通 `dehydrate()` 直接保留原文，不走旧 LLM 压缩链路。
+
 ### Persona State：语气护栏，不是另一套记忆
 
 Persona 会在成功回复后读取本轮 user / assistant 对话，缓慢更新人格、关系和当前 session 的情绪状态。Dashboard 里看到的 mood、residue、inner thought 等“碎碎念”主要是可观察面：让人知道后台怎样理解这一轮，也方便发现主语误判或状态漂移。

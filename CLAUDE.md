@@ -40,6 +40,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `server.py` | **Brain** 入口（~640KB）。MCP 工具注册（`@mcp.custom_route`）+ REST API + 记忆核心 |
 | `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线 + cc 持久化路由（`Route()` 注册） |
 | `gateway_state.py` | Gateway/cc SQLite 状态：会话原文、窗口闲聊/工作模式、固定日回顾快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、cc 游标与桶排除账本 |
+| `prompt_store.py` | 四类产品 Prompt 覆盖持久化：按 profile 保存 `analyze`、`merge`、`daily_review`、`weekly_journey` 用户版本、revision 与更新时间；代码默认仍是系统真源 |
 | `automation_store.py` | 通用自动化 SQLite 控制面：持久 schedule、run、candidate，兼容旧库重复迁移；候选 revision CAS、批准冻结、执行状态和任务 lease 与普通记忆桶隔离 |
 | `automation_executor.py` | 人工批准候选的白名单执行器；当前只注册 `weekly_journey`，负责冲突校验、批准稿 hash、派生 operation ID、重复确认回放与两步切换恢复 |
 | `journey_weekly_engine.py` | 每周 journey 只读输入聚合与严格三类候选生成；按香港自然周读取开放阶段、日回顾、新桶/独立 feel/旧桶 feel 年轮，当前只支持手动生成候选 |
@@ -246,8 +247,9 @@ GET  /api/import/patterns                                # 模式检测
 GET  /api/config                      # { fuzzy_threshold, max_results }
 POST /api/config { fuzzy_threshold }  # 更新（重启恢复）
 GET  /api/prompts                     # 读 prompt
-POST /api/prompts                     # 写 prompt
-POST /api/prompts/test                # 测试 prompt
+POST /api/prompts                     # 按 revision 持久保存产品 Prompt，下一次调用立即生效
+POST /api/prompts/reset               # 删除用户覆盖并恢复当前代码默认
+POST /api/prompts/test                # analyze/merge 局部草稿试跑；不改共享实例、不持久化
 GET  /api/todos / POST /api/todos / POST /api/todos/{id}/writeback   # 待办
 GET  /api/reminders / POST /api/reminders / DELETE /api/reminders/{id}  # 照顾备忘
 GET  /api/persona / GET /api/portrait-state*                        # 画像
@@ -281,6 +283,11 @@ GET /api/debug/injections             # 注入调试（见 README「Gateway 注�
 
 ### 检索评分旋钮
 `runtime_config.json["scoring"]` 持久化，启动时加载。全部默认值 = 跟上游行为一致。通过 `apply_runtime_scoring_overrides()` 即时生效。
+
+### 产品 Prompt 持久化与硬约束
+`state/prompt_overrides.sqlite` 只保存用户自定义产品层，不复制代码默认；不存在覆盖时始终读取当前版本的系统默认。表按 `profile_id + name` 隔离，初始化和旧表补列可重复执行，保存使用 revision 检查跨窗口冲突。四个白名单名称为 `analyze`、`merge`、`daily_review`、`weekly_journey`。
+
+生成时按“协作者基础提示词/默认模块 + 可配置产品层 + 服务端硬约束 + 固定材料”组装。自动打标的 JSON/字段/domain/保留标签、记忆合并的 section/身份/正文约束、日回顾的材料与独立表边界、weekly journey 的 JSON/三类候选/固定证据/零自动写入/revision-hash 均不可由自定义正文替换。`analyze` 和 `merge` 的测试通过局部参数试跑，不再临时改写全局 `Dehydrator` 属性；日回顾与 weekly journey 不提供会污染正式表或候选的测试入口。
 
 ### 中文分词
 `jieba` 分词（`_split_query_tokens()`），自动切长句。内置 stopword 过滤。`precise_match_mode` 开启时从 `partial_ratio` 切换到精确子串匹配。

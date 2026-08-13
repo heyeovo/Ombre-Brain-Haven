@@ -2,8 +2,8 @@
 # Module: Memory Decay Engine (decay_engine.py)
 # 模块：记忆衰减引擎
 #
-# Simulates human forgetting curve; auto-decays inactive memories and archives them.
-# 模拟人类遗忘曲线，自动衰减不活跃记忆并归档。
+# Calculates a fading score for inactive memories without changing lifecycle state.
+# 计算不活跃记忆的衰减得分，但不自动改变生命周期状态。
 #
 # Core formula (improved Ebbinghaus + emotion coordinates):
 # 核心公式（改进版艾宾浩斯遗忘曲线 + 情感坐标）：
@@ -29,11 +29,10 @@ logger = logging.getLogger("ombre_brain.decay")
 
 class DecayEngine:
     """
-    Memory decay engine — periodically scans all dynamic buckets,
-    calculates decay scores, auto-archives low-activity buckets
-    to simulate natural forgetting.
+    Memory decay engine — periodically scans all dynamic buckets and
+    calculates decay scores used for ranking. It never resolves or archives.
     记忆衰减引擎 —— 定期扫描所有动态桶，
-    计算衰减得分，将低活跃桶自动归档，模拟自然遗忘。
+    计算用于排序的衰减得分，不自动结案或归档。
     """
 
     def __init__(self, config: dict, bucket_mgr):
@@ -65,8 +64,8 @@ class DecayEngine:
     # Core: calculate decay score for a single bucket
     # 核心：计算单个桶的衰减得分
     #
-    # Higher score = more vivid memory; below threshold → archive
-    # 得分越高 = 记忆越鲜活，低于阈值则归档
+    # Higher score = more vivid memory; threshold is diagnostic only
+    # 得分越高 = 记忆越鲜活，阈值仅作诊断参考
     # Permanent buckets never decay / 固化桶永远不衰减
     # ---------------------------------------------------------
     # ---------------------------------------------------------
@@ -181,14 +180,13 @@ class DecayEngine:
     # ---------------------------------------------------------
     # Execute one decay cycle
     # 执行一轮衰减周期
-    # Scan all dynamic buckets → score → archive those below threshold
-    # 扫描所有动态桶 → 算分 → 低于阈值的归档
+    # Scan all dynamic buckets → score only
+    # 扫描所有动态桶 → 只计算得分
     # ---------------------------------------------------------
     async def run_decay_cycle(self) -> dict:
         """
-        Execute one decay cycle: iterate dynamic buckets, archive those
-        scoring below threshold.
-        执行一轮衰减：遍历动态桶，归档得分低于阈值的桶。
+        Execute one decay cycle: iterate dynamic buckets and calculate scores.
+        执行一轮衰减：遍历动态桶并计算得分。
 
         Returns stats: {"checked": N, "archived": N, "lowest_score": X}
         """
@@ -213,29 +211,6 @@ class DecayEngine:
 
             checked += 1
 
-            # --- Auto-resolve: imp≤4 + >30 days old + not resolved → auto resolve ---
-            # --- 自动结案：重要度≤4 + 超过30天 + 未解决 → 自动 resolve ---
-            if not meta.get("resolved", False):
-                imp = int(meta.get("importance", 5))
-                last_active_str = meta.get("last_active", meta.get("created", ""))
-                try:
-                    last_active = self._parse_datetime(last_active_str)
-                    days_since = (self._now_naive_utc() - last_active).total_seconds() / 86400
-                except (ValueError, TypeError):
-                    days_since = 999
-                if imp <= 4 and days_since > 30:
-                    try:
-                        await self.bucket_mgr.update(bucket["id"], resolved=True)
-                        meta["resolved"] = True  # refresh local meta so resolved_factor applies this cycle
-                        auto_resolved += 1
-                        logger.info(
-                            f"Auto-resolved / 自动结案: "
-                            f"{meta.get('name', bucket['id'])} "
-                            f"(imp={imp}, days={days_since:.0f})"
-                        )
-                    except Exception as e:
-                        logger.warning(f"Auto-resolve failed / 自动结案失败: {e}")
-
             try:
                 score = self.calculate_score(meta)
             except Exception as e:
@@ -246,24 +221,6 @@ class DecayEngine:
                 continue
 
             lowest_score = min(lowest_score, score)
-
-            # --- Below threshold → archive (simulate forgetting) ---
-            # --- 低于阈值 → 归档（模拟遗忘）---
-            if score < self.threshold:
-                try:
-                    success = await self.bucket_mgr.archive(bucket["id"])
-                    if success:
-                        archived += 1
-                        logger.info(
-                            f"Decay archived / 衰减归档: "
-                            f"{meta.get('name', bucket['id'])} "
-                            f"(score={score:.4f}, threshold={self.threshold})"
-                        )
-                except Exception as e:
-                    logger.warning(
-                        f"Archive failed for {bucket.get('id', '?')} / "
-                        f"归档失败: {e}"
-                    )
 
         result = {
             "checked": checked,

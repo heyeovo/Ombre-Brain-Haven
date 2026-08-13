@@ -568,12 +568,12 @@ type: dynamic
 - **影响**: 名字完全匹配 > 标签匹配 > 内容匹配的得分层级现在正确
 - **测试**: `tests/regression/test_issue_B07.py`，`tests/unit/test_topic_score.py`
 
-### B-08 — `run_decay_cycle()` 同轮 auto_resolve 后 score 未降权 🟡 低
+### B-08 — 历史 auto_resolve stale meta（已失效）
 
 - **文件**: `decay_engine.py` → `run_decay_cycle()`
-- **问题**: `auto_resolve` 标记后立即用旧 `meta`（stale）计算 score，`resolved_factor=0.05` 未生效
-- **修复**: 在 `bucket_mgr.update(resolved=True)` 后立即执行 `meta["resolved"] = True`，确保同轮降权
-- **测试**: `tests/regression/test_issue_B08.py`，`tests/integration/test_scenario_08_decay.py`
+- **历史问题**: `auto_resolve` 标记后立即用旧 `meta`（stale）计算 score。
+- **当前决策**: auto_resolve 与衰减自动归档均已取消。`run_decay_cycle()` 只计算排序 score，不修改 `resolved`、`digested` 或 archive。
+- **测试**: `tests/test_memory_maintenance_contracts.py`
 
 ### B-09 — `hold()` 用 analyze() 覆盖用户传入的 valence/arousal 🟡 低
 
@@ -603,6 +603,6 @@ type: dynamic
 | B-05 | 🟠 中 | `bucket_manager.py` | `_calc_time_score()` | 时间衰减系数 0.02（原 0.1） |
 | B-06 | 🟠 中 | `bucket_manager.py` | 评分权重配置 | w_time 默认 1.5（原 2.5） |
 | B-07 | 🟠 中 | `bucket_manager.py` | `_calc_topic_score()` | content_weight 默认 1.0（原 3.0） |
-| B-08 | 🟡 低 | `decay_engine.py` | `run_decay_cycle()` | auto_resolve 同轮应用 ×0.05 |
+| B-08 | 已失效 | `decay_engine.py` | `run_decay_cycle()` | auto_resolve 已取消，衰减不改生命周期 |
 | B-09 | 🟡 低 | `server.py` | `hold()` | 用户 valence/arousal 优先 |
 | B-10 | 🟡 低 | `bucket_manager.py` | `create()` | feel 桶 domain=[] 不被填充 |

@@ -47,7 +47,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `journey_weekly_engine.py` | 每周 journey 只读输入聚合与严格三类候选生成；按香港周一 04:00–下周一 04:00 读取开放阶段、日回顾、新桶/独立 feel/旧桶 feel 年轮，排除旧日印象/关系天气 feel，支持手动或持久 schedule 触发 |
 | `bucket_manager.py` | 桶 CRUD、搜索、评分、回收站、命中统计、分词 |
 | `dehydrator.py` | LLM 脱水、合并、打标（含 `_last_merge_usage` 成本追踪） |
-| `decay_engine.py` | 衰减引擎，计算 score |
+| `decay_engine.py` | 衰减引擎，只计算排序 score；不自动 resolved、digested 或 archive |
 | `embedding_engine.py` | 向量嵌入 + 相似度搜索 |
 | `import_memory.py` | 对话历史导入引擎（含成本追踪） |
 | `raw_events.py` | 隔离的原文 SQLite、显式原文检索、运行时/历史档案 scope、历史窗口目录与按时间分页读取、消息与导入幂等、私密白名单聊天档案分块归档 |

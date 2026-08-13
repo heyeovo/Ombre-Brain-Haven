@@ -101,6 +101,8 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 
 `grow` 用于保存值得长期保留的记忆。`hold` 适合短暂抓住当前片段，`comment_bucket` 用于给已有记忆增加年轮。`hold` 成功时统一返回 `{status, action, bucket_id, bucket_name}`：`action` 为 `created` 或 `merged`。会话客户端只把 `status=success, action=created` 的 bucket 写入本窗口召回排除账本；合并不会被误记为新桶。年轮由 `comment_bucket` 单独写入。钉选会保存钉选前的 importance/type；取消钉选时恢复，旧无备份钉选桶回退为 importance 5 的普通 dynamic 桶，不再残留 999 权重。
 
+衰减引擎只计算用于排序的活跃得分。它不再自动把低重要度旧桶标为 `resolved`，也不再将低于阈值的桶归档；`resolved`、`digested` 和归档都只能由用户或 LLM 主动操作。
+
 Journal 是独立目录，不进入普通搜索、浮现或注入。`hold(journal=True)` 会实际保存模型提供的标题与 `event_time`；Dashboard 的 journal 专属接口支持读取和修改标题、正文、作者、事件时间与锁定状态，`created` 始终保留为写入时间。
 
 自动来源调用 `grow(auto=true)` 时会经过写入门卫：低价值候选可以静默，中等候选留待重复验证，高价值或多次出现的候选才进入正常写入。门卫只控制是否值得写，不替代最终的 bucket 合并和结构化。
@@ -598,7 +600,7 @@ pytest tests/ -v                       # 详细输出
 | `test_issue_B05.py` | 时间衰减系数 0.02（原 0.1）| 30天 ≈ 0.549，非旧值 0.049 |
 | `test_issue_B06.py` | w_time 默认 1.5（原 2.5）| `BucketManager.w_time == 1.5` |
 | `test_issue_B07.py` | content_weight 默认 1.0（原 3.0）| 名字完全匹配得分 > 内容模糊匹配 |
-| `test_issue_B08.py` | auto_resolve 同轮应用降权因子 | stale meta 修复后 score ×0.05 立即生效 |
+| `test_memory_maintenance_contracts.py` | 衰减不改生命周期 | `run_decay_cycle()` 不调用 bucket update/archive，兼容统计字段仍保留 |
 | `test_issue_B09.py` | hold() 保留用户传入的 valence/arousal | 用户值优先于 analyze() 结果 |
 | `test_issue_B10.py` | feel 桶 domain=[] 不被填充 | feel 桶保持 `[]`；dynamic 桶正确填 `["未分类"]` |
 

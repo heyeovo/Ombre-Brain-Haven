@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BUCKET_MANAGER_SOURCE = (ROOT / "bucket_manager.py").read_text(encoding="utf-8")
 SERVER_SOURCE = (ROOT / "server.py").read_text(encoding="utf-8")
+DECAY_ENGINE_SOURCE = (ROOT / "decay_engine.py").read_text(encoding="utf-8")
 
 
 class MemoryMaintenanceContractsTest(unittest.TestCase):
@@ -29,6 +30,15 @@ class MemoryMaintenanceContractsTest(unittest.TestCase):
 
     def test_moment_diagnostics_include_cross_bucket_edges(self):
         self.assertIn('"cross_bucket_edges": cross_bucket_edges[:limit]', SERVER_SOURCE)
+
+    def test_decay_cycle_never_changes_bucket_lifecycle(self):
+        cycle_source = DECAY_ENGINE_SOURCE.split("async def run_decay_cycle", 1)[1].split(
+            "async def ensure_started", 1
+        )[0]
+        self.assertNotIn("bucket_mgr.update", cycle_source)
+        self.assertNotIn("bucket_mgr.archive", cycle_source)
+        self.assertIn('"archived": archived', cycle_source)
+        self.assertIn('"auto_resolved": auto_resolved', cycle_source)
         self.assertIn('"related_bucket_name": str(other_meta.get("name") or other_id)', SERVER_SOURCE)
 
 

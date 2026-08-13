@@ -310,7 +310,7 @@ trace(bucket_id="abc123", delete=True)
    - `pinned/protected/permanent` → 返回 999.0（永不衰减）
    - `type=="feel"` → 返回 50.0（固定）
 
-5. `score < threshold`（默认 0.3）→ `bucket_mgr.archive(bucket_id)` → `_move_bucket()` 将文件从 `dynamic/` 移动到 `archive/` 目录，更新 frontmatter `type="archived"`
+5. `score < threshold`（默认 0.3）只作诊断和排序信号，不写入 `resolved`、`digested` 或 archive 状态。生命周期状态只能由用户或 LLM 主动操作。
 
 **返回 stats**：`{"checked": N, "archived": N, "auto_resolved": N, "lowest_score": X}`
 
@@ -539,17 +539,8 @@ Claude 决策: hold / grow / 自动
                   × combined_weight
                   × resolved_factor
                   × urgency_boost
-              → score < threshold (0.3)?
-                               │
-                         ┌─────┴──────┐
-                         │            │
-                        YES           NO
-                         │            │
-                         ▼            ▼
-              bucket_mgr.archive(id)  继续存活
-                → _move_bucket()
-                → 文件移动到 archive/
-                → frontmatter type="archived"
+              → 记录本轮 lowest_score
+              → 不改 resolved / digested / archive
                          │
                          ▼
              记忆桶归档（不再参与浮现/搜索）
@@ -592,7 +583,7 @@ feel 桶自身:
 | 编号 | 原描述 | 状态 | 结论 |
 |------|--------|------|------|
 | ⚠️-1 | `dehydrate()` 无本地降级 fallback | **已确认为设计决策** | API 不可用时直接向 MCP 调用端报错（RuntimeError），不降级，见三、降级行为表 |
-| ⚠️-2 | `run_decay_cycle()` auto_resolved 实现存疑 | ✅ 已确认实现 | `decay_engine.py` 完整实现 imp≤4 + >30天 + 未解决 → `bucket_mgr.update(resolved=True)` |
+| ⚠️-2 | `run_decay_cycle()` auto_resolved 实现存疑 | ✅ 已取消 | 衰减周期只计算 score，不再自动写入 `resolved` 或 archive |
 | ⚠️-3 | `list_all()` 是否遍历 `feel/` 子目录 | ✅ 已确认实现 | `list_all()` dirs 明确包含 `self.feel_dir`，递归遍历 |
 | ⚠️-4 | `_time_ripple()` 浮点增量被 `int()` 截断 | ❌ 已确认 Bug | 见 B-03，决策见下 |
 | ⚠️-5 | Dashboard `/api/*` 路由认证覆盖 | ✅ 已确认覆盖 | 所有 `/api/buckets`、`/api/search`、`/api/network`、`/api/bucket/{id}`、`/api/breath-debug` 均调用 `_require_auth(request)` |
@@ -603,13 +594,13 @@ feel 桶自身:
 
 | 编号 | 场景 | 严重度 | 问题描述 | 决策 & 修复方案 |
 |------|------|--------|----------|----------------|
-| **B-01** | 场景7a | 高 | `bucket_mgr.update(resolved=True)` 当前会将桶立即移入 `archive/`（type="archived"），规格预期"降权留存、关键词可激活"。resolved 桶实质上立即从所有搜索路径消失。 | **修复**：移除 `bucket_manager.py` `update()` 中 `resolved → _move_bucket(archive_dir)` 的自动归档逻辑，仅更新 frontmatter `resolved=True`，由 decay 引擎自然衰减至 archive。 |
+| **B-01** | 场景7a | 高 | `bucket_mgr.update(resolved=True)` 当前会将桶立即移入 `archive/`（type="archived"），规格预期"降权留存、关键词可激活"。resolved 桶实质上立即从所有搜索路径消失。 | **修复**：移除 `bucket_manager.py` `update()` 中 `resolved → _move_bucket(archive_dir)` 的自动归档逻辑。当前衰减引擎也不再自动归档；归档只由用户或 LLM 主动操作。 |
 | **B-03** | 全局 | 高 | `_time_ripple()` 对 `activation_count` 做浮点增量（+0.3），但 `calculate_score()` 中 `max(1, int(...))` 截断小数，增量丢失，时间涟漪对衰减分无实际效果。 | **修复**：`decay_engine.py` `calculate_score()` 中改为 `activation_count = max(1.0, float(metadata.get("activation_count", 1)))` |
 | **B-04** | 场景1 | 中 | `bucket_manager.create()` 初始化 `activation_count=1`，冷启动检测条件 `activation_count==0` 对所有正常创建的桶永不满足，高重要度新桶不被优先浮现。 | **决策：初始化改为 `activation_count=0`**。语义上"创建"≠"被召回"，`touch()` 首次命中后变为 1，冷启动检测自然生效。规格已更新（见场景1步骤6 & 场景3 create 详情）。 |
 | **B-05** | 场景5 | 中 | `bucket_manager.py` `_calc_time_score()` 实现 `e^(-0.1×days)`，规格为 `e^(-0.02×days)`，衰减速度快 5 倍，30天后时间分 ≈ 0.05（规格预期 ≈ 0.55），旧记忆时间维度近乎失效。 | **决策：保留规格值 `0.02`**。记忆系统中旧记忆应通过关键词仍可被唤醒，时间维度是辅助信号不是淘汰信号。修复：`_calc_time_score()` 改为 `return math.exp(-0.02 * days)` |
 | **B-06** | 场景5 | 中 | `bucket_manager.py` `w_time` 默认值为 `2.5`，规格为 `1.5`，叠加 B-05 会导致时间维度严重偏重近期记忆。 | **决策：保留规格值 `1.5`**。修复：`w_time = scoring.get("time_proximity", 1.5)` |
 | **B-07** | 场景5 | 中 | `bucket_manager.py` `content_weight` 默认值为 `3.0`，规格为 `1.0`（body×1）。正文权重过高导致合并检测（`search(content, limit=1)`）误判——内容相似但主题不同的桶被错误合并。 | **决策：保留规格值 `1.0`**。正文是辅助信号，主要靠 name/tags/domain 识别同话题桶。修复：`content_weight = scoring.get("content_weight", 1.0)` |
-| **B-08** | 场景8 | 低 | `run_decay_cycle()` 内 auto_resolve 后继续使用旧 `meta` 变量计算 score，`resolved_factor=0.05` 需等下一 cycle 才生效。 | **修复**：auto_resolve 成功后执行 `meta["resolved"] = True` 刷新本地 meta 变量。 |
+| **B-08** | 场景8 | 低 | 历史 auto_resolve 实现曾在同轮使用 stale meta。 | **已失效**：auto_resolve 机制已取消，`run_decay_cycle()` 只计算 score，不修改桶生命周期。 |
 | **B-09** | 场景3 | 低 | `hold()` 非 feel 路径中，用户显式传入的 `valence`/`arousal` 被 `analyze()` 返回值完全覆盖。 | **修复**：若用户显式传入（`0 <= valence <= 1`），优先使用用户值，`analyze()` 结果作为 fallback。 |
 | **B-10** | 场景10 | 低 | feel 桶以 `domain=[]` 创建，但 `bucket_manager.create()` 中 `domain or ["未分类"]` 兜底写入 `["未分类"]`，数据不干净。 | **修复**：`create()` 中对 `bucket_type=="feel"` 单独处理，允许空 domain 直接写入。 |
 

@@ -326,6 +326,22 @@ docker compose -f compose.hk.yml up -d --build
 
 仓库根目录的 `docker-compose.yml` 与 `docker-compose.user.yml` 保留历史兼容用途，不是此 fork 的完整生产入口。
 
+### Coolify 内网测试栈
+
+[`compose.coolify.test.yml`](compose.coolify.test.yml) 用于迁移前的隔离测试，不是正式流量入口。它固定创建 `haven-brain` 与 `haven-gateway` 两个服务，让 Brain 通过内部服务名 `http://haven-gateway:8010` 访问 Gateway，并且不发布宿主机端口或配置公网域名。
+
+测试栈使用以下持久化约定：
+
+```text
+/srv/ob-data/haven-test/buckets → /data
+/srv/ob-data/haven-test/state   → /state
+/srv/ob-data/haven-test/config  → /config
+```
+
+Gateway 首次启动时会把镜像内的基础配置初始化为 `/config/config.yaml`；Brain 只读该测试配置。运行时配置仍写入 `/state/config.runtime.yaml`。部署文件中的构建源固定到明确 commit，避免测试期间随 `main` 漂移。
+
+该栈只用于启动、挂载、内部 DNS 与 health 验证。最终停写和最终导入完成前，不得把 Dashboard、MCP 或正式写流量切到该栈；Zeabur 仍须保持运行。
+
 ### Python 直跑
 
 ```bash

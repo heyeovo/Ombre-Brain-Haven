@@ -97,6 +97,15 @@
 | `OMBRE_TRANSPORT` | MCP 传输模式：`stdio` / `sse` / `streamable-http`（默认 `stdio`） |
 | `OMBRE_PORT` | HTTP/SSE 模式监听端口（默认 `8000`） |
 
+### Coolify 内网测试栈固定值
+
+`compose.coolify.test.yml` 为隔离测试显式设置以下运行时值：
+
+- Brain：`OMBRE_TRANSPORT=streamable-http`、`OMBRE_PORT=8000`、`OMBRE_BUCKETS_DIR=/data`、`OMBRE_STATE_DIR=/state`、`OMBRE_RUNTIME_CONFIG_PATH=/state/config.runtime.yaml`。
+- Gateway：`OMBRE_GATEWAY_HOST=0.0.0.0`、`OMBRE_GATEWAY_PORT=8010`，并与 Brain 共用 `/data` 和 `/state`。
+- Brain 通过 `OMBRE_GATEWAY_ADMIN_URL=http://haven-gateway:8010/api/config` 使用内部服务名连接 Gateway。
+- 密钥变量只从 Coolify 环境注入；Compose 文件不包含真实值。测试栈不发布宿主机端口。
+
 ## ChatGPT OAuth（Headless 模式）
 
 仅在 claude.ai 等平台通过 OAuth 连接时需要：

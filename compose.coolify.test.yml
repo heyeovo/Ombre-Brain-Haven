@@ -1,0 +1,91 @@
+services:
+  haven-gateway:
+    build:
+      context: https://github.com/heyeovo/Ombre-Brain-Haven.git#57d70e52e4e17dc66b55db1302056128edb96a87
+      dockerfile: Dockerfile
+    container_name: haven-gateway
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - >-
+        set -eu;
+        if [ ! -s /config/config.yaml ]; then cp /app/config.yaml /config/config.yaml; fi;
+        cp /config/config.yaml /app/config.yaml;
+        exec python gateway.py
+    environment:
+      OMBRE_BUCKETS_DIR: /data
+      OMBRE_STATE_DIR: /state
+      OMBRE_RUNTIME_CONFIG_PATH: /state/config.runtime.yaml
+      OMBRE_GATEWAY_HOST: 0.0.0.0
+      OMBRE_GATEWAY_PORT: "8010"
+      OMBRE_API_KEY: ${OMBRE_API_KEY:-}
+      OMBRE_EMBEDDING_API_KEY: ${OMBRE_EMBEDDING_API_KEY:-}
+      OMBRE_GATEWAY_TOKEN: ${OMBRE_GATEWAY_TOKEN:-}
+      OMBRE_GATEWAY_UPSTREAM_API_KEY: ${OMBRE_GATEWAY_UPSTREAM_API_KEY:-}
+    volumes:
+      - /srv/ob-data/haven-test/buckets:/data
+      - /srv/ob-data/haven-test/state:/state
+      - /srv/ob-data/haven-test/config:/config
+    networks:
+      - haven-test-internal
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=5).read()
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  haven-brain:
+    build:
+      context: https://github.com/heyeovo/Ombre-Brain-Haven.git#57d70e52e4e17dc66b55db1302056128edb96a87
+      dockerfile: Dockerfile
+    container_name: haven-brain
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - >-
+        set -eu;
+        cp /config/config.yaml /app/config.yaml;
+        exec python server.py
+    depends_on:
+      haven-gateway:
+        condition: service_healthy
+    environment:
+      OMBRE_TRANSPORT: streamable-http
+      OMBRE_PORT: "8000"
+      OMBRE_BUCKETS_DIR: /data
+      OMBRE_STATE_DIR: /state
+      OMBRE_RUNTIME_CONFIG_PATH: /state/config.runtime.yaml
+      OMBRE_GATEWAY_ADMIN_URL: http://haven-gateway:8010/api/config
+      OMBRE_API_KEY: ${OMBRE_API_KEY:-}
+      OMBRE_EMBEDDING_API_KEY: ${OMBRE_EMBEDDING_API_KEY:-}
+      OMBRE_DASHBOARD_PASSWORD: ${OMBRE_DASHBOARD_PASSWORD:-}
+      OMBRE_GATEWAY_TOKEN: ${OMBRE_GATEWAY_TOKEN:-}
+      OMBRE_GATEWAY_UPSTREAM_API_KEY: ${OMBRE_GATEWAY_UPSTREAM_API_KEY:-}
+    volumes:
+      - /srv/ob-data/haven-test/buckets:/data
+      - /srv/ob-data/haven-test/state:/state
+      - /srv/ob-data/haven-test/config:/config:ro
+    networks:
+      - haven-test-internal
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+networks:
+  haven-test-internal:
+    name: haven-test-internal
+    driver: bridge

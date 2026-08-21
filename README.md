@@ -340,6 +340,8 @@ docker compose -f compose.hk.yml up -d --build
 
 Gateway 首次启动时会把镜像内的基础配置初始化为 `/config/config.yaml`；Brain 只读该测试配置。运行时配置仍写入 `/state/config.runtime.yaml`。部署文件中的构建源固定到明确 commit，避免测试期间随 `main` 漂移。
 
+上游模型密钥只注入 Gateway 服务；Brain 与 Dashboard 不得接收 `OMBRE_GATEWAY_UPSTREAM_API_KEY` 或各 provider 的真实 key。多 upstream 应通过各自的 `api_key_env` 引用 Gateway 私密环境项。
+
 该栈只用于启动、挂载、内部 DNS 与 health 验证。最终停写和最终导入完成前，不得把 Dashboard、MCP 或正式写流量切到该栈；Zeabur 仍须保持运行。
 
 ### Python 直跑
@@ -401,7 +403,7 @@ OMBRE_DASHBOARD_PASSWORD=...
 http(s)://your-host/ombre/mcp
 ```
 
-具体路径取决于反向代理。ChatGPT / Claude Connector OAuth 需要额外配置 `OMBRE_CHATGPT_OAUTH_*`。客户端工具说明与推荐调用方式见 [`docs/Tool Guide.md`](docs/Tool%20Guide.md)。
+具体路径取决于反向代理。ChatGPT / Claude Connector OAuth 需要额外配置 `OMBRE_CHATGPT_OAUTH_*`。公网 OAuth 地址用于远程 Connector；与 Brain 同处 Coolify 网络的 Dashboard 应直接使用 Brain 内部服务地址，不应拿公网 OAuth URL 作为内部 MCP 地址。客户端工具说明与推荐调用方式见 [`docs/Tool Guide.md`](docs/Tool%20Guide.md)。
 
 ### OpenAI-compatible 客户端
 
@@ -556,6 +558,8 @@ Python 直跑时对应端口为 `8000/8010`。
 - `doctor.sh`：检查配置、目录和服务。
 - `one_click.sh` / `./ob`：交互式备份、迁移和向量库维护。
 - `build_word_map.py`：重建可选 Word Map。
+
+VPS 的 Backblaze B2 加密备份范围、计划、恢复步骤和验收记录见 [`docs/operations/vps-backup.md`](docs/operations/vps-backup.md)；对应宿主机脚本与 systemd 单元的非秘密源文件位于 [`ops/vps-backup/`](ops/vps-backup/)。
 
 修改召回逻辑后，至少分别验证：
 

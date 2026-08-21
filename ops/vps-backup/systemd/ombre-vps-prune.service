@@ -1,0 +1,12 @@
+[Unit]
+Description=Verify and prune old Ombre VPS Backblaze B2 snapshots
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/sbin/ombre-vps-prune
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

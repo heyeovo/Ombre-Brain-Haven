@@ -56,6 +56,7 @@
 | `OMBRE_GATEWAY_UPSTREAM_BASE_URL` | `gateway.upstream_base_url` | 上游 API 地址 |
 | `OMBRE_GATEWAY_UPSTREAM_MODEL` | `gateway.upstream_default_model` | 默认上游模型 |
 | `OMBRE_GATEWAY_UPSTREAM_MODELS` | `gateway.upstream_models` | 可用模型列表（逗号分隔） |
+| `OMBRE_GATEWAY_UPSTREAM_API_KEY` | — | 旧版单 upstream 的兜底 API Key；仅注入 Gateway，不得注入 Brain / Dashboard。多 upstream 优先使用各自的 `api_key_env` |
 | `OMBRE_GATEWAY_ADMIN_URL` | — | Gateway 管理 API 地址 |
 | `OMBRE_GATEWAY_DEBUG_TIMEOUT_SECONDS` | — | Gateway debug 请求超时（默认 30s） |
 | `OMBRE_DOMAIN_SENTINEL_MODEL` | `gateway.domain_sentinel_model` | 领域哨兵模型 |
@@ -104,7 +105,7 @@
 - Brain：`OMBRE_TRANSPORT=streamable-http`、`OMBRE_PORT=8000`、`OMBRE_BUCKETS_DIR=/data`、`OMBRE_STATE_DIR=/state`、`OMBRE_RUNTIME_CONFIG_PATH=/state/config.runtime.yaml`。
 - Gateway：`OMBRE_GATEWAY_HOST=0.0.0.0`、`OMBRE_GATEWAY_PORT=8010`，并与 Brain 共用 `/data` 和 `/state`。
 - Brain 通过 `OMBRE_GATEWAY_ADMIN_URL=http://haven-gateway:8010/api/config` 使用内部服务名连接 Gateway。
-- 密钥变量只从 Coolify 环境注入；Compose 文件不包含真实值。测试栈不发布宿主机端口。
+- 密钥变量只从 Coolify 环境注入；Compose 文件不包含真实值。上游模型密钥只允许注入 Gateway，Brain / Dashboard 不得接收。测试栈不发布宿主机端口。
 
 ## ChatGPT OAuth（Headless 模式）
 
@@ -118,6 +119,8 @@
 | `OMBRE_CHATGPT_OAUTH_REFRESH_TOKEN` | 预置 Refresh Token |
 | `OMBRE_CHATGPT_OAUTH_PUBLIC_BASE_URL` | OAuth 公开地址 |
 | `OMBRE_CHATGPT_OAUTH_PROTECTED_HOSTS` | 受保护主机列表 |
+
+Coolify 仅在需要向 Claude App 等公网 Remote MCP 客户端开放 Brain 时，为 Brain 注入这组变量；真实 Client Secret、Access Token 与 Refresh Token 只保存在部署平台 secret 中。Dashboard 与 Brain 位于同一 Coolify 网络时，应使用 Brain 的内部服务地址，不通过公网 OAuth 地址回连。
 
 ## Webhook
 

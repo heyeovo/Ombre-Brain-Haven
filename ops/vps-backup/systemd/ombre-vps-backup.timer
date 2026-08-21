@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Ombre VPS backup daily at 03:00 Asia/Hong_Kong
+
+[Timer]
+OnCalendar=*-*-* 19:00:00 UTC
+Persistent=true
+RandomizedDelaySec=5m
+AccuracySec=1m
+Unit=ombre-vps-backup.service
+
+[Install]
+WantedBy=timers.target

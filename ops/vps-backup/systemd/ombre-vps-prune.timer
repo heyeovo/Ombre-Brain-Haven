@@ -1,0 +1,12 @@
+[Unit]
+Description=Verify and prune Ombre VPS backups weekly on Sunday at 04:00 Asia/Hong_Kong
+
+[Timer]
+OnCalendar=Sat *-*-* 20:00:00 UTC
+Persistent=true
+RandomizedDelaySec=5m
+AccuracySec=1m
+Unit=ombre-vps-prune.service
+
+[Install]
+WantedBy=timers.target

@@ -326,11 +326,11 @@ docker compose -f compose.hk.yml up -d --build
 
 仓库根目录的 `docker-compose.yml` 与 `docker-compose.user.yml` 保留历史兼容用途，不是此 fork 的完整生产入口。
 
-### Coolify 内网测试栈
+### Coolify VPS Compose 栈
 
-[`compose.coolify.test.yml`](compose.coolify.test.yml) 用于迁移前的隔离测试，不是正式流量入口。它固定创建 `haven-brain` 与 `haven-gateway` 两个服务，让 Brain 通过内部服务名 `http://haven-gateway:8010` 访问 Gateway，并且不发布宿主机端口或配置公网域名。
+[`compose.coolify.test.yml`](compose.coolify.test.yml) 最初用于迁移隔离测试，现归档 VPS 正式 `haven-test-stack` 的非秘密 Compose 配置；资源名和历史 `haven-test` 路径为避免迁移后改名风险而保留。它固定创建 `haven-brain` 与 `haven-gateway` 两个服务，让 Brain 通过内部服务名 `http://haven-gateway:8010` 访问 Gateway，并且不发布宿主机端口；公网域名由 Coolify 单独配置。
 
-测试栈使用以下持久化约定：
+该栈保留以下持久化约定：
 
 ```text
 /srv/ob-data/haven-test/buckets → /data
@@ -338,11 +338,11 @@ docker compose -f compose.hk.yml up -d --build
 /srv/ob-data/haven-test/config  → /config
 ```
 
-Gateway 首次启动时会把镜像内的基础配置初始化为 `/config/config.yaml`；Brain 只读该测试配置。运行时配置仍写入 `/state/config.runtime.yaml`。部署文件中的构建源固定到明确 commit，避免测试期间随 `main` 漂移。
+Gateway 首次启动时会把镜像内的基础配置初始化为 `/config/config.yaml`；Brain 只读该持久配置。运行时配置仍写入 `/state/config.runtime.yaml`。部署文件要求在 Coolify 中设置非秘密的 `HAVEN_RELEASE_SHA`，Brain 与 Gateway 的构建源共同引用这个完整 Git commit SHA；变量为空时 Compose 校验会直接失败，不会退回 `main`。Coolify Service 不绑定 Git push，普通 push 不会更新 VPS；正式发布时只需更新一次 `HAVEN_RELEASE_SHA` 后手动 Restart/Redeploy，回滚时改回上一完整 SHA。
 
 上游模型密钥只注入 Gateway 服务；Brain 与 Dashboard 不得接收 `OMBRE_GATEWAY_UPSTREAM_API_KEY` 或各 provider 的真实 key。多 upstream 应通过各自的 `api_key_env` 引用 Gateway 私密环境项。
 
-该栈只用于启动、挂载、内部 DNS 与 health 验证。最终停写和最终导入完成前，不得把 Dashboard、MCP 或正式写流量切到该栈；Zeabur 仍须保持运行。
+该栈现承接 VPS Haven 正式流量；Dashboard 通过 Coolify 内网访问 Brain，公网 Remote MCP 入口由 Brain 的 Coolify 域名与 OAuth 配置保护。Zeabur 数据已落后于 VPS，不能把旧 Zeabur 地址作为直接回切目标。
 
 ### Python 直跑
 

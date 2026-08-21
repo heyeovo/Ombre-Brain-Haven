@@ -98,14 +98,19 @@
 | `OMBRE_TRANSPORT` | MCP 传输模式：`stdio` / `sse` / `streamable-http`（默认 `stdio`） |
 | `OMBRE_PORT` | HTTP/SSE 模式监听端口（默认 `8000`） |
 
-### Coolify 内网测试栈固定值
+### Coolify VPS Compose 栈固定值
 
-`compose.coolify.test.yml` 为隔离测试显式设置以下运行时值：
+`compose.coolify.test.yml` 为当前 VPS `haven-test-stack` 显式设置以下运行时值；文件名、资源名和历史挂载路径中的 `test` 为迁移兼容名称，不代表它仍是非正式数据栈：
+
+| 变量名 | 默认 | 说明 |
+|--------|------|------|
+| `HAVEN_RELEASE_SHA` | — | Coolify Compose 专用的发布版本；必须填写完整 Git commit SHA。Brain 与 Gateway 共用此值，变量为空时 `${HAVEN_RELEASE_SHA:?}` 会阻止部署。该值只用于选择构建源，不注入运行中的容器 |
 
 - Brain：`OMBRE_TRANSPORT=streamable-http`、`OMBRE_PORT=8000`、`OMBRE_BUCKETS_DIR=/data`、`OMBRE_STATE_DIR=/state`、`OMBRE_RUNTIME_CONFIG_PATH=/state/config.runtime.yaml`。
 - Gateway：`OMBRE_GATEWAY_HOST=0.0.0.0`、`OMBRE_GATEWAY_PORT=8010`，并与 Brain 共用 `/data` 和 `/state`。
 - Brain 通过 `OMBRE_GATEWAY_ADMIN_URL=http://haven-gateway:8010/api/config` 使用内部服务名连接 Gateway。
-- 密钥变量只从 Coolify 环境注入；Compose 文件不包含真实值。上游模型密钥只允许注入 Gateway，Brain / Dashboard 不得接收。测试栈不发布宿主机端口。
+- 密钥变量只从 Coolify 环境注入；Compose 文件不包含真实值。上游模型密钥只允许注入 Gateway，Brain / Dashboard 不得接收。该栈不发布宿主机端口。
+- Coolify Service 不绑定 Git push；发布时先把 `HAVEN_RELEASE_SHA` 改为已验收 commit，再手动 Restart/Redeploy。回滚时把它改回上一完整 SHA 后重新部署。
 
 ## ChatGPT OAuth（Headless 模式）
 

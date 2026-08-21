@@ -1,7 +1,7 @@
 services:
   haven-gateway:
     build:
-      context: https://github.com/heyeovo/Ombre-Brain-Haven.git#57d70e52e4e17dc66b55db1302056128edb96a87
+      context: https://github.com/heyeovo/Ombre-Brain-Haven.git#${HAVEN_RELEASE_SHA:?}
       dockerfile: Dockerfile
     container_name: haven-gateway
     restart: unless-stopped
@@ -42,7 +42,7 @@ services:
 
   haven-brain:
     build:
-      context: https://github.com/heyeovo/Ombre-Brain-Haven.git#57d70e52e4e17dc66b55db1302056128edb96a87
+      context: https://github.com/heyeovo/Ombre-Brain-Haven.git#${HAVEN_RELEASE_SHA:?}
       dockerfile: Dockerfile
     container_name: haven-brain
     restart: unless-stopped

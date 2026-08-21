@@ -1,5 +1,6 @@
 import sqlite3
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -46,6 +47,7 @@ class GatewayStateContractsTest(unittest.TestCase):
         recalled_bucket_ids: list[str] | None = None,
         created_bucket_ids: list[str] | None = None,
         attachment_ids: list[str] | None = None,
+        raw_json: str = "",
     ):
         return store.commit_conversation_turn(
             profile_id="default",
@@ -59,6 +61,7 @@ class GatewayStateContractsTest(unittest.TestCase):
             client=f"ob2-chat/{persona_id}",
             route="selfhost" if source == "selfhost" else "cc",
             source=source,
+            raw_json=raw_json,
             recalled_bucket_ids=recalled_bucket_ids,
             created_bucket_ids=created_bucket_ids,
             attachment_ids=attachment_ids,
@@ -393,6 +396,68 @@ class GatewayStateContractsTest(unittest.TestCase):
                 profile_id="default", session_id="session-1"
             )["cc_seen_round_id"],
             2,
+        )
+
+    def test_cc_lanes_keep_independent_resume_points_and_cursors(self):
+        store = self.make_store()
+        api_raw = json.dumps(
+            {
+                "cred_mode": "api",
+                "provider_id": "provider-a",
+                "model": "api-model",
+                "cc_session_id": "api-native-session",
+                "settings": {"effort": "high", "thinking_on": True},
+            }
+        )
+        self.commit(
+            store, request_id="api-1", expected=0, source="cc", raw_json=api_raw
+        )
+        self.commit(store, request_id="selfhost-1", expected=1, source="selfhost")
+        state = store.get_conversation_session_state(
+            profile_id="default", session_id="session-1"
+        )
+        self.assertEqual(state["cc_lanes"]["api:provider-a"]["seen_round_id"], 1)
+        self.assertEqual(
+            state["cc_lanes"]["api:provider-a"]["cc_session_id"],
+            "api-native-session",
+        )
+
+        pro_raw = json.dumps(
+            {
+                "cred_mode": "subscription",
+                "model": "claude-sonnet-5",
+                "cc_session_id": "pro-native-session",
+                "thinking": "must not become lane state",
+                "attachments": [{"filename": "must-not-sync.png"}],
+                "settings": {"effort": "high", "thinking_on": True},
+            }
+        )
+        self.commit(
+            store, request_id="pro-1", expected=2, source="cc", raw_json=pro_raw
+        )
+        state = store.get_conversation_session_state(
+            profile_id="default", session_id="session-1"
+        )
+        self.assertEqual(state["cc_lanes"]["api:provider-a"]["seen_round_id"], 1)
+        self.assertEqual(state["cc_lanes"]["subscription"]["seen_round_id"], 3)
+        self.assertEqual(
+            state["cc_lanes"]["subscription"]["cc_session_id"],
+            "pro-native-session",
+        )
+        self.assertNotIn("thinking", state["cc_lanes"]["subscription"])
+        self.assertNotIn("attachments", state["cc_lanes"]["subscription"])
+        self.assertEqual(state["cc_overrides"]["active_cred"], "subscription")
+
+        restarted = GatewayStateStore(str(self.root / "gateway_state.db"))
+        restarted_state = restarted.get_conversation_session_state(
+            profile_id="default", session_id="session-1"
+        )
+        self.assertEqual(restarted_state["cc_lanes"], state["cc_lanes"])
+        self.assertEqual(
+            restarted.get_conversation_session_state(
+                profile_id="another-profile", session_id="session-1"
+            ),
+            {},
         )
 
     def test_daily_review_snapshot_is_recent_fixed_and_optional(self):

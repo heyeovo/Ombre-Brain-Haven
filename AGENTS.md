@@ -18,6 +18,7 @@
 
 ## 验证与 Coolify 发布
 
+- 涉及 VPS、Coolify、发布、回滚或 Dashboard/Haven 跨仓库联动时，开始前必须同时读取本文件与相邻 `ob-dashboard2/AGENTS.md`；不能只读当前仓库规则。
 - 修改 Haven 代码后运行与改动对应的测试；涉及持久化契约时至少覆盖迁移、幂等、冲突和隔离边界。
 - VPS 正式 Haven 是 Coolify 中保存 Compose 的手动 Service，不绑定 Git push；用户 commit + push 只更新 GitHub，不会上线，也不再以 Zeabur deployment 作为验收目标。
 - Brain 与 Gateway 的构建源共同读取必填的 `HAVEN_RELEASE_SHA`。需要正式发布时，必须先提醒用户复制已验收 commit 的完整 SHA，在 Coolify `Ombre Brain → production → haven-test-stack → Environment Variables` 更新该值，再执行普通 Restart/Deploy；不得选择 `Restart (pull latest)`。

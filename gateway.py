@@ -3396,6 +3396,7 @@ class GatewayService:
         state_keys = {
             "local_engine_preference",
             "selfhost_overrides",
+            "cc_overrides",
             "prompt_module_overrides",
             "mode",
             "daily_review_enabled",

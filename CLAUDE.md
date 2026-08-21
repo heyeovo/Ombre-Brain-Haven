@@ -39,7 +39,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 |------|------|
 | `server.py` | **Brain** 入口（~640KB）。MCP 工具注册（`@mcp.custom_route`）+ REST API + 记忆核心 |
 | `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线 + cc 持久化路由（`Route()` 注册） |
-| `gateway_state.py` | Gateway/cc SQLite 状态：会话原文、窗口闲聊/工作模式、固定日回顾快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、cc 游标与桶排除账本 |
+| `gateway_state.py` | Gateway/cc SQLite 状态：会话原文、窗口闲聊/工作模式、固定日回顾快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与游标、桶排除账本 |
 | `prompt_store.py` | 四类产品 Prompt 覆盖持久化：按 profile 保存 `analyze`、`merge`、`daily_review`、`weekly_journey` 用户版本、revision 与更新时间；代码默认仍是系统真源 |
 | `automation_store.py` | 通用自动化 SQLite 控制面：持久 schedule、run、candidate，兼容旧库重复迁移；候选 revision CAS、批准冻结、执行状态和任务 lease 与普通记忆桶隔离 |
 | `automation_scheduler.py` | 日回顾与 weekly journey 的香港时区分钟级调度规则：固定 04:00 日界线、下次运行计算和可编辑时间校验 |
@@ -190,11 +190,11 @@ GET|POST|DELETE /gateway/api/conversation/attachment
 GET    /gateway/api/conversation/turn?request_id=
        # 按 profile + request_id 读回已提交轮次及 raw_json/persona_id，供调用端持久幂等重放
 GET    /gateway/api/conversation/turns?session_id=&after_round_id=&source=
-       # 读取窗口历史；after_round_id + source=selfhost 供 cc 跨引擎补齐
+       # 读取窗口历史；after_round_id 供各 CC 线路补齐未见的跨线路文字轮次
 GET    /gateway/api/conversation/sessions?source=&persona_id=&deleted=1
        # 默认只列活动窗口；deleted=1 只列软删除窗口，供前端永久删除区使用
 GET    /gateway/api/conversation/session?session_id=&include_bucket_exclusions=1
-       # 窗口归属、闲聊/工作模式、固定日回顾快照、引擎/提示词覆盖、cc 游标与可选桶排除集合
+       # 窗口归属、闲聊/工作模式、固定日回顾快照、引擎/提示词覆盖、CC 分线路 session/游标与可选桶排除集合
 PATCH  /gateway/api/conversation/session
        # 修改持久窗口覆盖；initialize_daily_review_snapshot 只在首次复制最近三天日回顾
 DELETE /gateway/api/conversation/session
@@ -337,7 +337,7 @@ dashboards 的 `/api/gateway/[...path]` 代理到这些路由，Bearer 网关鉴
 - 严格写入用 `request_id` 防重复，用 `expected_last_round_id` 拒绝基于旧历史的跨设备追加；SQLite `BEGIN IMMEDIATE` 内统一分配下一轮。
 - 附件先按窗口暂存，严格写入把有序 ID + SHA-256 纳入幂等指纹并在同一事务绑定轮次；图片接受 JPEG/PNG/WebP（压缩后单张不超过 2MB），文件接受 PDF/DOCX/MD/TXT/CSV（单个不超过 4MB，并保存浏览器提取的受限正文），每轮两类合计不超过 4 个。私有读取必须经 Bearer 网关，未绑定附件 24 小时后在后续上传时清理；按 `kind=image/file` 分类清除互不影响，文件清除同时擦除解析正文。
 - `/api/conversation/turn?request_id=` 可在进程重启或换设备后读回严格写入结果；调用端校验 session/persona/user 原文后重放已保存过程，不再请求上游。
-- `cc_seen_round_id` 是 Claude Code 已读到的 Haven 轮次书签，只在 cc 轮次成功写库后推进。
+- `cc_overrides_json` 保存当前 CC Pro/API 路由及各自模型、力度、thinking 和 API provider 选择；`cc_lanes_json` 按 `subscription` / `api:<provider_id>` 分别保存 Claude 原生 `cc_session_id` 与 `seen_round_id`。只有该线路的 CC 轮次严格写入成功才推进自身游标；旧 `cc_seen_round_id` 仅保留兼容。
 - 已召回桶继续落 `injected_buckets`；本窗口新建桶落 `session_created_buckets`，二者并集为该 session 的排除集合。召回冷却读取 `injected_at` 时把旧无时区值与新 UTC-aware 值统一按 UTC 计算，避免混合时间格式导致 hook recall 500。
 - 永久删除会先删除该窗口附件文件，再清理带 `profile_id` 的窗口数据，不删除长期记忆桶；旧的无 profile 诊断/冷却表暂不清理。
 

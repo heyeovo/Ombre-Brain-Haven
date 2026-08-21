@@ -212,6 +212,8 @@ class GatewayStateStore:
                 title TEXT NOT NULL DEFAULT '',
                 local_engine_preference TEXT NOT NULL DEFAULT 'cc',
                 selfhost_overrides_json TEXT NOT NULL DEFAULT '{}',
+                cc_overrides_json TEXT NOT NULL DEFAULT '{}',
+                cc_lanes_json TEXT NOT NULL DEFAULT '{}',
                 prompt_module_overrides_json TEXT NOT NULL DEFAULT '{}',
                 mode TEXT NOT NULL DEFAULT 'chat',
                 daily_review_enabled INTEGER NOT NULL DEFAULT 1,
@@ -297,6 +299,8 @@ class GatewayStateStore:
                 "persona_id": "TEXT NOT NULL DEFAULT 'ombre'",
                 "local_engine_preference": "TEXT NOT NULL DEFAULT 'cc'",
                 "selfhost_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
+                "cc_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
+                "cc_lanes_json": "TEXT NOT NULL DEFAULT '{}'",
                 "prompt_module_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
                 "mode": "TEXT NOT NULL DEFAULT 'chat'",
                 "daily_review_enabled": "INTEGER NOT NULL DEFAULT 1",
@@ -341,6 +345,63 @@ class GatewayStateStore:
                 ), 0)
                 """
             )
+        if "cc_lanes_json" in session_columns_added or "cc_overrides_json" in session_columns_added:
+            # 旧窗口最后一轮已经保存了实际 credential/provider/model/Claude session。
+            # 升级时只回填这一条已知 CC 线路；其他线路在首次成功使用后各自建档。
+            sessions = conn.execute(
+                "SELECT profile_id, session_id, cc_seen_round_id FROM conversation_sessions"
+            ).fetchall()
+            for session in sessions:
+                turn = conn.execute(
+                    """
+                    SELECT model, raw_json
+                    FROM conversation_turns
+                    WHERE profile_id = ? AND session_id = ? AND source = 'cc'
+                    ORDER BY round_id DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (session["profile_id"], session["session_id"]),
+                ).fetchone()
+                if turn is None:
+                    continue
+                raw_payload = self._json_object(turn["raw_json"])
+                cred_mode = "subscription" if str(raw_payload.get("cred_mode") or "").strip() == "subscription" else "api"
+                provider_id = str(raw_payload.get("provider_id") or "").strip()[:200]
+                lane_id = "subscription" if cred_mode == "subscription" else f"api:{provider_id or 'default'}"
+                model_name = str(raw_payload.get("model") or turn["model"] or "").strip()[:200]
+                settings = self._json_object(raw_payload.get("settings"))
+                lane = {
+                    "cred": cred_mode,
+                    "provider_id": provider_id,
+                    "model": model_name,
+                    "seen_round_id": int(session["cc_seen_round_id"] or 0),
+                }
+                cc_session_id = str(raw_payload.get("cc_session_id") or "").strip()[:500]
+                if cc_session_id:
+                    lane["cc_session_id"] = cc_session_id
+                route = {
+                    "model": model_name,
+                    "effort": str(settings.get("effort") or "").strip()[:40],
+                    "thinking": settings.get("thinking_on") is not False,
+                }
+                overrides = {
+                    "active_cred": cred_mode,
+                    "subscription": route if cred_mode == "subscription" else {},
+                    "api": {**route, "provider_id": provider_id} if cred_mode == "api" else {},
+                }
+                conn.execute(
+                    """
+                    UPDATE conversation_sessions
+                    SET cc_overrides_json = ?, cc_lanes_json = ?
+                    WHERE profile_id = ? AND session_id = ?
+                    """,
+                    (
+                        json.dumps(overrides, ensure_ascii=False),
+                        json.dumps({lane_id: lane}, ensure_ascii=False),
+                        session["profile_id"],
+                        session["session_id"],
+                    ),
+                )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS conversation_import_archives (
@@ -1660,7 +1721,7 @@ class GatewayStateStore:
 
             session = conn.execute(
                 """
-                SELECT persona_id, cc_seen_round_id, state_version
+                SELECT persona_id, cc_seen_round_id, cc_overrides_json, cc_lanes_json, state_version
                 FROM conversation_sessions
                 WHERE profile_id = ? AND session_id = ?
                 """,
@@ -1683,6 +1744,44 @@ class GatewayStateStore:
             if actual_round != expected_round:
                 raise ConversationConflictError(expected_round, actual_round)
             next_round = actual_round + 1
+            source_name = str(source or "gateway").strip() or "gateway"
+            next_cc_overrides = self._json_object(session["cc_overrides_json"]) if session is not None else {}
+            next_cc_lanes = self._json_object(session["cc_lanes_json"]) if session is not None else {}
+            if source_name == "cc":
+                raw_payload = self._json_object(raw_json)
+                cred_mode = "subscription" if str(raw_payload.get("cred_mode") or "").strip() == "subscription" else "api"
+                provider_id = str(raw_payload.get("provider_id") or "").strip()[:200]
+                lane_id = "subscription" if cred_mode == "subscription" else f"api:{provider_id or 'default'}"
+                model_name = str(raw_payload.get("model") or model or "").strip()[:200]
+                cc_session_id = str(raw_payload.get("cc_session_id") or "").strip()[:500]
+                settings = self._json_object(raw_payload.get("settings"))
+                effort = str(settings.get("effort") or "").strip()[:40]
+                thinking = settings.get("thinking_on") is not False
+                lane_state = self._json_object(next_cc_lanes.get(lane_id))
+                lane_state.update(
+                    {
+                        "cred": cred_mode,
+                        "provider_id": provider_id,
+                        "model": model_name,
+                        "seen_round_id": next_round,
+                    }
+                )
+                if cc_session_id:
+                    lane_state["cc_session_id"] = cc_session_id
+                next_cc_lanes[lane_id] = lane_state
+                subscription = self._json_object(next_cc_overrides.get("subscription"))
+                api = self._json_object(next_cc_overrides.get("api"))
+                if cred_mode == "subscription":
+                    subscription.update({"model": model_name, "effort": effort, "thinking": thinking})
+                else:
+                    api.update(
+                        {"provider_id": provider_id, "model": model_name, "effort": effort, "thinking": thinking}
+                    )
+                next_cc_overrides = {
+                    "active_cred": cred_mode,
+                    "subscription": subscription,
+                    "api": api,
+                }
 
             cursor = conn.execute(
                 """
@@ -1701,7 +1800,7 @@ class GatewayStateStore:
                     str(model or ""),
                     str(client or ""),
                     str(route or ""),
-                    str(source or "gateway").strip() or "gateway",
+                    source_name,
                     str(raw_json or ""),
                     safe_request_id,
                     fingerprint,
@@ -1714,14 +1813,17 @@ class GatewayStateStore:
                     """
                     INSERT INTO conversation_sessions
                     (profile_id, session_id, persona_id, title, local_engine_preference,
-                     selfhost_overrides_json, cc_seen_round_id, state_version,
+                     selfhost_overrides_json, cc_overrides_json, cc_lanes_json,
+                     cc_seen_round_id, state_version,
                      deleted_at, updated_at)
-                    VALUES (?, ?, ?, '', 'cc', '{}', ?, ?, NULL, ?)
+                    VALUES (?, ?, ?, '', 'cc', '{}', ?, ?, ?, ?, NULL, ?)
                     """,
                     (
                         safe_profile_id,
                         safe_session_id,
                         safe_persona_id,
+                        json.dumps(next_cc_overrides, ensure_ascii=False),
+                        json.dumps(next_cc_lanes, ensure_ascii=False),
                         cc_seen_round_id,
                         1 if cc_seen_round_id else 0,
                         created_iso,
@@ -1736,6 +1838,8 @@ class GatewayStateStore:
                             WHEN ? = 1 THEN MAX(cc_seen_round_id, ?)
                             ELSE cc_seen_round_id
                         END,
+                        cc_overrides_json = CASE WHEN ? = 1 THEN ? ELSE cc_overrides_json END,
+                        cc_lanes_json = CASE WHEN ? = 1 THEN ? ELSE cc_lanes_json END,
                         state_version = state_version + CASE WHEN ? = 1 THEN 1 ELSE 0 END,
                         deleted_at = NULL,
                         updated_at = ?
@@ -1744,6 +1848,10 @@ class GatewayStateStore:
                     (
                         1 if advances_cc_cursor else 0,
                         next_round,
+                        1 if advances_cc_cursor else 0,
+                        json.dumps(next_cc_overrides, ensure_ascii=False),
+                        1 if advances_cc_cursor else 0,
+                        json.dumps(next_cc_lanes, ensure_ascii=False),
                         1 if advances_cc_cursor else 0,
                         created_iso,
                         safe_profile_id,
@@ -2462,7 +2570,8 @@ class GatewayStateStore:
         row = conn.execute(
             """
             SELECT profile_id, session_id, persona_id, title,
-                   local_engine_preference, selfhost_overrides_json, prompt_module_overrides_json,
+                   local_engine_preference, selfhost_overrides_json, cc_overrides_json,
+                   cc_lanes_json, prompt_module_overrides_json,
                    mode, daily_review_enabled, daily_review_snapshot_json,
                    daily_review_snapshot_initialized,
                    cc_seen_round_id, state_version, deleted_at, updated_at
@@ -2487,6 +2596,8 @@ class GatewayStateStore:
             "title": str(row["title"] or ""),
             "local_engine_preference": preference,
             "selfhost_overrides": self._json_object(row["selfhost_overrides_json"]),
+            "cc_overrides": self._json_object(row["cc_overrides_json"]),
+            "cc_lanes": self._json_object(row["cc_lanes_json"]),
             "prompt_module_overrides": {
                 str(key): bool(value)
                 for key, value in self._json_object(row["prompt_module_overrides_json"]).items()
@@ -2526,7 +2637,7 @@ class GatewayStateStore:
         if "effective_engine" in updates:
             raise ValueError("effective_engine is runtime-only and cannot be persisted")
         allowed = {
-            "local_engine_preference", "selfhost_overrides", "prompt_module_overrides",
+            "local_engine_preference", "selfhost_overrides", "cc_overrides", "prompt_module_overrides",
             "mode", "daily_review_enabled", "initialize_daily_review_snapshot",
         }
         unknown = sorted(set(updates) - allowed)
@@ -2544,6 +2655,30 @@ class GatewayStateStore:
             if not isinstance(raw_overrides, dict):
                 raise ValueError("selfhost_overrides must be an object")
             overrides = dict(raw_overrides)
+        cc_overrides: dict[str, Any] | None = None
+        if "cc_overrides" in updates:
+            raw_cc_overrides = updates.get("cc_overrides")
+            if not isinstance(raw_cc_overrides, dict):
+                raise ValueError("cc_overrides must be an object")
+            active_cred = str(raw_cc_overrides.get("active_cred") or "").strip()
+            if active_cred not in {"subscription", "api"}:
+                raise ValueError("cc_overrides.active_cred must be subscription or api")
+            subscription = self._json_object(raw_cc_overrides.get("subscription"))
+            api = self._json_object(raw_cc_overrides.get("api"))
+            cc_overrides = {
+                "active_cred": active_cred,
+                "subscription": {
+                    "model": str(subscription.get("model") or "").strip()[:200],
+                    "effort": str(subscription.get("effort") or "").strip()[:40],
+                    "thinking": subscription.get("thinking") is not False,
+                },
+                "api": {
+                    "provider_id": str(api.get("provider_id") or "").strip()[:200],
+                    "model": str(api.get("model") or "").strip()[:200],
+                    "effort": str(api.get("effort") or "").strip()[:40],
+                    "thinking": api.get("thinking") is not False,
+                },
+            }
         prompt_module_overrides: dict[str, bool] | None = None
         if "prompt_module_overrides" in updates:
             raw_prompt_overrides = updates.get("prompt_module_overrides")
@@ -2568,7 +2703,7 @@ class GatewayStateStore:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
-                SELECT persona_id, local_engine_preference, selfhost_overrides_json,
+                SELECT persona_id, local_engine_preference, selfhost_overrides_json, cc_overrides_json,
                        prompt_module_overrides_json, mode, daily_review_enabled,
                        daily_review_snapshot_json, daily_review_snapshot_initialized,
                        state_version
@@ -2589,6 +2724,7 @@ class GatewayStateStore:
                     raise SessionStateConflictError(int(expected_state_version), current_version)
                 current_preference = str(row["local_engine_preference"] or "cc")
                 current_overrides = self._json_object(row["selfhost_overrides_json"])
+                current_cc_overrides = self._json_object(row["cc_overrides_json"])
                 current_prompt_module_overrides = self._json_object(row["prompt_module_overrides_json"])
                 current_mode = str(row["mode"] or "chat")
                 current_daily_review_enabled = bool(row["daily_review_enabled"])
@@ -2600,6 +2736,7 @@ class GatewayStateStore:
                     raise SessionStateConflictError(int(expected_state_version), 0)
                 current_preference = "cc"
                 current_overrides = {}
+                current_cc_overrides = {}
                 current_prompt_module_overrides = {}
                 current_mode = "chat"
                 current_daily_review_enabled = True
@@ -2608,6 +2745,7 @@ class GatewayStateStore:
 
             next_preference = preference or current_preference
             next_overrides = overrides if overrides is not None else current_overrides
+            next_cc_overrides = cc_overrides if cc_overrides is not None else current_cc_overrides
             next_prompt_module_overrides = (
                 prompt_module_overrides
                 if prompt_module_overrides is not None
@@ -2627,14 +2765,15 @@ class GatewayStateStore:
                 """
                 INSERT INTO conversation_sessions
                 (profile_id, session_id, persona_id, title, local_engine_preference,
-                 selfhost_overrides_json, prompt_module_overrides_json, mode,
+                 selfhost_overrides_json, cc_overrides_json, prompt_module_overrides_json, mode,
                  daily_review_enabled, daily_review_snapshot_json, daily_review_snapshot_initialized,
                  cc_seen_round_id, state_version,
                  deleted_at, updated_at)
-                VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?)
+                VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?)
                 ON CONFLICT(profile_id, session_id) DO UPDATE SET
                     local_engine_preference = excluded.local_engine_preference,
                     selfhost_overrides_json = excluded.selfhost_overrides_json,
+                    cc_overrides_json = excluded.cc_overrides_json,
                     prompt_module_overrides_json = excluded.prompt_module_overrides_json,
                     mode = excluded.mode,
                     daily_review_enabled = excluded.daily_review_enabled,
@@ -2649,6 +2788,7 @@ class GatewayStateStore:
                     safe_persona_id,
                     next_preference,
                     json.dumps(next_overrides, ensure_ascii=False),
+                    json.dumps(next_cc_overrides, ensure_ascii=False),
                     json.dumps(next_prompt_module_overrides, ensure_ascii=False),
                     next_mode,
                     1 if next_daily_review_enabled else 0,

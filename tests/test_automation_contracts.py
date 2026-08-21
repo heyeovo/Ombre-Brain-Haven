@@ -355,7 +355,7 @@ class WeeklyJourneyEngineContractsTest(unittest.IsolatedAsyncioTestCase):
         self.temp_dir.cleanup()
 
     def make_engine(self, generator):
-        return WeeklyJourneyEngine(
+        engine = WeeklyJourneyEngine(
             {"state_dir": str(self.root)},
             self.store,
             self.bucket_mgr,
@@ -363,13 +363,26 @@ class WeeklyJourneyEngineContractsTest(unittest.IsolatedAsyncioTestCase):
             profile_id="default",
             candidate_generator=generator,
         )
+        schedule = self.store.get_schedule(task_type="weekly_journey")
+        policy = dict(schedule.get("policy") or {})
+        policy["reviewed_through_date"] = "2026-08-02"
+        policy["persona_id"] = "yan-zhi"
+        self.store.update_schedule(
+            task_type="weekly_journey", enabled=bool(schedule.get("enabled")),
+            timezone="Asia/Hong_Kong", policy=policy,
+            next_run_at=str(schedule.get("next_run_at") or ""),
+        )
+        return engine
 
-    async def test_collects_closed_week_inputs_by_write_time_and_bucket_id(self):
+    async def test_collects_continuous_inputs_by_write_time_and_bucket_id(self):
         engine = self.make_engine(lambda snapshot: {
             "candidate_type": "no_change", "rationale": ["没有实质变化"],
             "evidence_bucket_ids": [], "proposal": {},
         })
-        snapshot = await engine.collect_input(cycle_key="2026-W32", persona_id="yan-zhi")
+        snapshot = await engine.collect_input(
+            persona_id="yan-zhi",
+            now=datetime(2026, 8, 10, 12, 0, tzinfo=ZoneInfo("Asia/Hong_Kong")),
+        )
 
         self.assertEqual(snapshot["window_start"], "2026-08-03T04:00:00+08:00")
         self.assertEqual(snapshot["window_end"], "2026-08-10T04:00:00+08:00")
@@ -401,16 +414,17 @@ class WeeklyJourneyEngineContractsTest(unittest.IsolatedAsyncioTestCase):
             }
 
         engine = self.make_engine(generator)
-        first = await engine.run_manual(cycle_key="2026-W32", persona_id="yan-zhi")
-        second = await engine.run_manual(cycle_key="2026-W32", persona_id="yan-zhi")
+        now = datetime(2026, 8, 10, 12, 0, tzinfo=ZoneInfo("Asia/Hong_Kong"))
+        first = await engine.run_manual(persona_id="yan-zhi", now=now)
+        second = await engine.run_manual(persona_id="yan-zhi", now=now)
 
         self.assertEqual(first["status"], "candidate_created")
         self.assertEqual(first["candidate"]["status"], "pending")
         self.assertEqual(first["candidate"]["candidate_type"], "append_current")
         self.assertEqual(first["candidate"]["preview"]["write_count"], 1)
-        self.assertEqual(second["status"], "exists")
+        self.assertEqual(second["status"], "pending_exists")
         self.assertEqual(second["candidate"]["candidate_id"], first["candidate"]["candidate_id"])
-        self.assertEqual(calls, ["2026-W32"])
+        self.assertEqual(calls, ["2026-08-03_2026-08-09"])
 
     async def test_rejects_candidate_evidence_outside_snapshot_without_writing_journey(self):
         engine = self.make_engine(lambda snapshot: {
@@ -423,14 +437,20 @@ class WeeklyJourneyEngineContractsTest(unittest.IsolatedAsyncioTestCase):
                 "evidence_bucket_ids": ["not-in-input"],
             },
         })
-        result = await engine.run_manual(cycle_key="2026-W32", persona_id="yan-zhi")
+        result = await engine.run_manual(
+            persona_id="yan-zhi",
+            now=datetime(2026, 8, 10, 12, 0, tzinfo=ZoneInfo("Asia/Hong_Kong")),
+        )
         self.assertEqual(result["status"], "failed")
         self.assertIn("outside input snapshot", result["error"])
         self.assertEqual(self.store.list_candidates(task_type="weekly_journey"), [])
 
     async def test_validates_no_change_and_complete_transition_as_the_only_other_types(self):
         engine = self.make_engine(lambda snapshot: {})
-        snapshot = await engine.collect_input(cycle_key="2026-W32", persona_id="yan-zhi")
+        snapshot = await engine.collect_input(
+            persona_id="yan-zhi",
+            now=datetime(2026, 8, 10, 12, 0, tzinfo=ZoneInfo("Asia/Hong_Kong")),
+        )
         no_change = engine.validate_candidate({
             "candidate_type": "no_change",
             "rationale": ["本周没有需要写入的实质变化"],
@@ -461,16 +481,42 @@ class WeeklyJourneyEngineContractsTest(unittest.IsolatedAsyncioTestCase):
                 "rationale": ["不允许"],
             }, snapshot)
 
-    async def test_default_cycle_is_previous_completed_hong_kong_week(self):
+    async def test_window_continues_from_cursor_through_latest_completed_day(self):
         engine = self.make_engine(lambda snapshot: {})
         window = engine.resolve_window(
             now=datetime(2026, 8, 12, 12, 0, tzinfo=ZoneInfo("Asia/Hong_Kong"))
         )
-        self.assertEqual(window["cycle_key"], "2026-W32")
+        self.assertEqual(window["cycle_key"], "2026-08-03_2026-08-11")
         self.assertEqual(window["start"].date().isoformat(), "2026-08-03")
-        self.assertEqual(window["end"].date().isoformat(), "2026-08-10")
+        self.assertEqual(window["end"].date().isoformat(), "2026-08-12")
+        self.assertEqual(window["reviewed_through_date"], "2026-08-02")
+        self.assertEqual(window["review_end_date"], "2026-08-11")
         self.assertEqual(window["start"].hour, 4)
         self.assertEqual(window["end"].hour, 4)
+
+    async def test_window_caps_backlog_at_oldest_31_days_without_skipping(self):
+        engine = self.make_engine(lambda snapshot: {})
+        schedule = self.store.get_schedule(task_type="weekly_journey")
+        policy = dict(schedule["policy"])
+        policy["reviewed_through_date"] = "2026-06-01"
+        self.store.update_schedule(
+            task_type="weekly_journey", enabled=False, timezone="Asia/Hong_Kong",
+            policy=policy, next_run_at="",
+        )
+        window = engine.resolve_window(
+            now=datetime(2026, 8, 22, 12, 0, tzinfo=ZoneInfo("Asia/Hong_Kong"))
+        )
+        self.assertEqual(window["review_start_date"], "2026-06-02")
+        self.assertEqual(window["review_end_date"], "2026-07-02")
+        self.assertEqual(window["available_through_date"], "2026-08-21")
+        self.assertTrue(window["range_truncated"])
+
+    async def test_before_four_uses_previous_completed_boundary(self):
+        engine = self.make_engine(lambda snapshot: {})
+        window = engine.resolve_window(
+            now=datetime(2026, 8, 12, 3, 30, tzinfo=ZoneInfo("Asia/Hong_Kong"))
+        )
+        self.assertEqual(window["review_end_date"], "2026-08-10")
 
 
 class AutomationRoutesContractTest(unittest.IsolatedAsyncioTestCase):
@@ -516,7 +562,11 @@ class AutomationRoutesContractTest(unittest.IsolatedAsyncioTestCase):
                 self.body = body
                 self.status_code = status_code
 
-        store = SimpleNamespace(update_schedule=lambda **kwargs: kwargs)
+        store = SimpleNamespace(
+            get_schedule=lambda **kwargs: {"policy": {"reviewed_through_date": "2026-08-02"}},
+            unresolved_candidate_for_persona=lambda **kwargs: {},
+            update_schedule=lambda **kwargs: kwargs,
+        )
         route = load_server_function("api_automation_schedule_update", {
             "_require_dashboard_auth": lambda request: None,
             "WEEKLY_JOURNEY_TASK_TYPE": "weekly_journey",
@@ -527,7 +577,10 @@ class AutomationRoutesContractTest(unittest.IsolatedAsyncioTestCase):
         })
         request = SimpleNamespace(json=AsyncMock(return_value={
             "task_type": "weekly_journey", "enabled": True,
-            "policy": {"weekday": 0, "hour": 5, "minute": 0, "persona_id": "yan-zhi"},
+            "policy": {
+                "weekday": 0, "hour": 5, "minute": 0, "persona_id": "yan-zhi",
+                "reviewed_through_date": "2026-08-11",
+            },
         }))
         fake_responses = SimpleNamespace(JSONResponse=FakeJSONResponse)
         with patch.dict(sys.modules, {
@@ -568,7 +621,7 @@ class AutomationRoutesContractTest(unittest.IsolatedAsyncioTestCase):
             "_automation_public_run": lambda run: {"run_id": run.get("run_id")},
         })
         request = SimpleNamespace(json=AsyncMock(return_value={
-            "cycle_key": "2026-W32", "persona_id": "yan-zhi",
+            "persona_id": "yan-zhi",
         }))
         fake_responses = SimpleNamespace(JSONResponse=FakeJSONResponse)
         with patch.dict(sys.modules, {
@@ -578,9 +631,7 @@ class AutomationRoutesContractTest(unittest.IsolatedAsyncioTestCase):
             response = await route(request)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.body["candidate"]["status"], "pending")
-        weekly_journey_engine.run_manual.assert_awaited_once_with(
-            cycle_key="2026-W32", persona_id="yan-zhi"
-        )
+        weekly_journey_engine.run_manual.assert_awaited_once_with(persona_id="yan-zhi")
 
 
 if __name__ == "__main__":

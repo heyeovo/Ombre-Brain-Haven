@@ -11860,6 +11860,8 @@ async def api_automation_status(request):
         return JSONResponse({"error": "unsupported task_type"}, status_code=400)
     payload = automation_store.task_status(task_type=task_type)
     payload["latest_run"] = _automation_public_run(payload.get("latest_run") or {})
+    if task_type == WEEKLY_JOURNEY_TASK_TYPE:
+        payload["review_window"] = weekly_journey_engine.window_status()
     return JSONResponse(payload)
 
 
@@ -11911,6 +11913,20 @@ async def api_automation_schedule_update(request):
         enabled = _bool_value(body.get("enabled"), False)
         if enabled and not policy.get("persona_id"):
             raise ValueError("persona_id is required before enabling weekly journey schedule")
+        current = automation_store.get_schedule(task_type=task_type)
+        current_policy = current.get("policy") if isinstance(current.get("policy"), dict) else {}
+        cursor_changed = str(current_policy.get("reviewed_through_date") or "") != str(policy.get("reviewed_through_date") or "")
+        persona_changed = str(current_policy.get("persona_id") or "") != str(policy.get("persona_id") or "")
+        if cursor_changed or persona_changed:
+            unresolved = automation_store.unresolved_candidate_for_persona(
+                task_type=task_type,
+                persona_id=str(current_policy.get("persona_id") or policy.get("persona_id") or ""),
+            )
+            if unresolved:
+                return JSONResponse(
+                    {"error": "请先处理当前待确认或待重试的轨迹候选，再修改已梳理截止日。"},
+                    status_code=409,
+                )
         payload = automation_schedule_payload(
             task_type,
             enabled=enabled,
@@ -11944,7 +11960,6 @@ async def api_weekly_journey_run(request):
     )
     try:
         result = await weekly_journey_engine.run_manual(
-            cycle_key=str(body.get("cycle_key") or ""),
             persona_id=str(body.get("persona_id") or ""),
         )
     except ValueError as exc:
@@ -11954,7 +11969,7 @@ async def api_weekly_journey_run(request):
         return JSONResponse({"error": str(exc)}, status_code=400)
     execution = automation_store.finish_execution(
         execution["execution_id"],
-        status="failed" if result.get("status") == "failed" else "completed",
+        status="failed" if result.get("status") == "failed" else "skipped" if result.get("status") in {"exists", "running", "pending_exists"} else "completed",
         error_code=str(result.get("error_code") or ""),
         error=str(result.get("error") or ""),
     )
@@ -13980,15 +13995,15 @@ async def api_get_prompts(request):
         "weekly_journey": {
             "runtime_layers": [
                 "运行时叠加自动化任务所选协作者的基础提示词、定位与默认启用模块。",
-                "本周 current journey、日回顾与材料会由 Haven 组成固定 weekly_journey_input 快照。",
+                "从已确认截止游标到最近完整 OB 日的 current journey、日回顾与材料会由 Haven 组成固定 weekly_journey_input 快照。",
             ],
             "model_hard_constraints": WEEKLY_JOURNEY_HARD_CONSTRAINTS,
             "server_validations": [
                 "模型结果必须通过 JSON、no_change / append_current / transition 类型与完整字段校验。",
                 "证据 bucket ID 必须来自本次固定 materials，写候选至少需要一个合法证据。",
-                "transition 日期必须落在审核周边界内，关闭日期不能晚于新阶段开始日期。",
-                "确认继续使用 revision、approved payload hash、open journey 快照和证据存在性冲突校验。",
-                "生成只创建待审核候选；未确认、拒绝、测试和 no_change 均不会写 journey。",
+                "transition 日期必须落在本次连续审核范围内，关闭日期不能晚于新阶段开始日期。",
+                "确认继续使用 revision、approved payload hash、连续截止游标、open journey 快照和证据存在性冲突校验。",
+                "生成只创建待审核候选；失败、拒绝和未确认不推进游标，人工确认 no_change 零 journey 写入但会推进游标。",
             ],
         },
     }
@@ -16375,7 +16390,7 @@ if __name__ == "__main__":
                             logger.info("Weekly journey scheduled result / 每周轨迹定时结果: %s", result)
                         automation_store.finish_execution(
                             execution["execution_id"],
-                            status="failed" if run_error else "completed",
+                            status="failed" if run_error else "skipped" if task_type != DAILY_REVIEW_TASK_TYPE and result.get("status") in {"exists", "running", "pending_exists"} else "completed",
                             error_code=str(result.get("error_code") or "") if task_type != DAILY_REVIEW_TASK_TYPE else "",
                             error=run_error,
                         )

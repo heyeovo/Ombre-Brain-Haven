@@ -123,13 +123,13 @@ Daily Reflection 可根据当天聊天、已有 auto-memory 产物和近期记�
 
 #### 每周关系轨迹候选
 
-Haven 的通用自动化底座以 `state/automations.sqlite` 持久保存日回顾与 `weekly_journey` 的启停、时分、下次运行、运行错误、任务 lease，以及两项任务各自的 API/Claude Pro 选择和实际 execution 记录。香港时区的“OB 日”固定为 04:00–次日 04:00，默认 04:30 生成并归到开始日；“OB 周”固定为周一 04:00–下周一 04:00，默认周一 05:00 生成上一周 journey 候选，等待周日日回顾先完成。Dashboard「自动化与状态」可调整两类任务的生成时间与执行方式，weekly journey 还可调整星期和协作者；时区与 04:00 日界线只读固定。
+Haven 的通用自动化底座以 `state/automations.sqlite` 持久保存日回顾与 `weekly_journey` 的启停、时分、下次运行、运行错误、任务 lease，以及两项任务各自的 API/Claude Pro 选择和实际 execution 记录。香港时区的“OB 日”固定为 04:00–次日 04:00，默认 04:30 生成并归到开始日；weekly journey 默认周一 05:00 触发，但星期只决定频率，不切断内容范围。Dashboard「自动化与状态」可调整两类任务的生成时间与执行方式，weekly journey 还可调整星期、协作者和首次“已梳理至”日期。
 
 API 路线继续使用 Haven 已有的日回顾模型连接。Claude Pro 路线由 Haven 调度后调用 Dashboard 的受限内部 runner：只接受 `daily_review` / `weekly_journey`、固定 Sonnet/Opus ID、无工具、单并发、一次性 Agent SDK session，OAuth 凭据仍只存在 Dashboard `/home/cc/.claude`。Haven 只保存引擎/模型选择与非秘密运行结果；任何 Pro 额度、OAuth、网络或输出校验失败都会停止并显示，必须由用户人工换线后重试，不做自动 fallback。启用前按 [`ENV_VARS.md`](ENV_VARS.md) 在两端配置 runner URL/共享 token。
 
-`weekly_journey` 读取当前开放 journey、该 OB 周日回顾、新桶、独立 feel 与旧桶新增的 feel 年轮，按 bucket ID 去重后只生成 `no_change`、`append_current` 或 `transition` 候选。旧 `daily_impression`、`weekly_impression`、`relationship_weather` feel 明确排除，不作为轨迹材料。候选与输入快照保存在独立 SQLite 状态中，不进入普通记忆、召回或关联扩散。
+`weekly_journey` 从上次人工确认的截止日下一天连续读取到最近完整 OB 日；失败两天后手动补跑会自然形成 7+2 天区间，下次周任务只处理剩余天数。积压单次最多处理最早 31 天，确认后再继续下一段。输入包括当前开放 journey、区间日回顾、新桶、独立 feel 与旧桶新增的 feel 年轮；旧 `daily_impression`、`weekly_impression`、`relationship_weather` feel 明确排除。同一协作者已有待确认/执行中/待重试候选时不重复调用模型。
 
-候选只能经认证接口人工编辑、拒绝或确认。关系轨迹页显示输入完整性、原始 preview、当前 draft/revision/hash、证据桶和预计差异。编辑保存为新 revision 并保留原始 preview；确认只接收页面已展示 revision 的 hash，由服务端冻结 approved payload/hash。白名单执行器当前只注册 `weekly_journey`：`no_change` 零写入，`append_current` 只追加开放阶段，`transition` 使用独立 `:close` / `:create` operation ID。确认前若开放阶段、批准稿或证据桶已变化，会保存可解释冲突而不覆盖当前状态；重复确认与 close 成功、create 失败后的重试保持幂等。定时运行也只新增 `pending` 候选，未确认和已拒绝候选不会改变 journey。
+候选只能经认证接口人工编辑、拒绝或确认。关系轨迹页显示输入完整性、原始 preview、当前 draft/revision/hash、证据桶和预计差异。编辑保存为新 revision 并保留原始 preview；确认只接收页面已展示 revision 的 hash，由服务端冻结 approved payload/hash。白名单执行器当前只注册 `weekly_journey`：`no_change` 不写 journey，但人工确认后与正常写入候选一样推进“已梳理至”；`append_current` 只追加开放阶段，`transition` 使用独立 `:close` / `:create` operation ID。候选完成与游标推进为同一 SQLite 事务；失败、拒绝、冲突和仅生成均不推进。
 
 即使使用 `auto`，候选仍需经过记忆写入、去重和合并边界。原始聊天继续留在 raw events；自动记忆只保存脱水后仍值得长期带走的部分。
 

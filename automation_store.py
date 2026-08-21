@@ -669,7 +669,7 @@ class AutomationStore:
         self, execution_id: str, *, status: str, error_code: str = "", error: str = "",
     ) -> dict:
         normalized = str(status or "").strip().lower()
-        if normalized not in {"completed", "failed"}:
+        if normalized not in {"completed", "failed", "skipped"}:
             raise ValueError("invalid automation execution status")
         conn = self._connect()
         try:
@@ -952,6 +952,101 @@ class AutomationStore:
                 (str(candidate_id),),
             ).fetchone()
             return self._candidate_payload(row)
+        finally:
+            conn.close()
+
+    def complete_candidate_and_advance_review_cursor(
+        self,
+        candidate_id: str,
+        *,
+        result: dict,
+        expected_reviewed_through_date: str,
+        reviewed_through_date: str,
+    ) -> dict:
+        """Complete one approved weekly candidate and advance its cursor atomically."""
+        expected = str(expected_reviewed_through_date or "").strip()
+        target = str(reviewed_through_date or "").strip()
+        try:
+            expected_date = datetime.fromisoformat(expected).date()
+            target_date = datetime.fromisoformat(target).date()
+        except ValueError as exc:
+            raise ValueError("invalid weekly journey review cursor") from exc
+        if target_date < expected_date:
+            raise ValueError("weekly journey review cursor cannot move backward")
+
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            candidate_row = conn.execute(
+                "SELECT * FROM automation_candidates WHERE candidate_id = ?",
+                (str(candidate_id),),
+            ).fetchone()
+            if candidate_row is None or str(candidate_row["status"] or "") != "applying":
+                raise ValueError("weekly journey candidate is not applying")
+            schedule_row = conn.execute(
+                "SELECT * FROM automation_schedules WHERE task_type = ? ORDER BY created_at LIMIT 1",
+                (str(candidate_row["task_type"] or ""),),
+            ).fetchone()
+            if schedule_row is None:
+                raise ValueError("weekly journey schedule not found")
+            policy = self._json_load(schedule_row["policy_json"], {})
+            current = str(policy.get("reviewed_through_date") or "").strip()
+            if current != expected:
+                raise ValueError("weekly journey review cursor changed")
+            policy["reviewed_through_date"] = target
+            now = _now_iso()
+            conn.execute(
+                """
+                UPDATE automation_candidates
+                SET status = 'completed', result_json = ?, error = '',
+                    updated_at = ?, applied_at = ?
+                WHERE candidate_id = ? AND status = 'applying'
+                """,
+                (self._json_dump(result or {}), now, now, str(candidate_id)),
+            )
+            conn.execute(
+                """
+                UPDATE automation_schedules
+                SET policy_json = ?, updated_at = ?
+                WHERE schedule_id = ?
+                """,
+                (self._json_dump(policy), now, str(schedule_row["schedule_id"])),
+            )
+            saved = conn.execute(
+                "SELECT * FROM automation_candidates WHERE candidate_id = ?",
+                (str(candidate_id),),
+            ).fetchone()
+            conn.commit()
+            return self._candidate_payload(saved)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def unresolved_candidate_for_persona(self, *, task_type: str, persona_id: str) -> dict:
+        """Return one still-actionable candidate for the same persona, if any."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT c.*, r.input_snapshot_json
+                FROM automation_candidates c
+                JOIN automation_runs r ON r.run_id = c.run_id
+                WHERE c.task_type = ? AND c.status IN ('pending', 'applying', 'failed')
+                ORDER BY c.created_at DESC, c.candidate_id DESC
+                """,
+                (str(task_type),),
+            ).fetchall()
+            wanted = str(persona_id or "").strip()
+            for row in rows:
+                snapshot = self._json_load(row["input_snapshot_json"], {})
+                persona = snapshot.get("persona") if isinstance(snapshot.get("persona"), dict) else {}
+                if str(persona.get("id") or "").strip() == wanted:
+                    candidate = self._candidate_payload(row)
+                    candidate.pop("input_snapshot_json", None)
+                    return candidate
+            return {}
         finally:
             conn.close()
 

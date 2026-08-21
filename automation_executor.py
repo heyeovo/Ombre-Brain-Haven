@@ -157,6 +157,19 @@ class AutomationExecutor:
                 },
             )
 
+    def _validate_review_cursor(self, run: dict) -> None:
+        snapshot = run.get("input_snapshot") if isinstance(run.get("input_snapshot"), dict) else {}
+        expected = str(snapshot.get("reviewed_through_date") or "").strip()
+        schedule = self.store.get_schedule(task_type=WEEKLY_JOURNEY_TASK_TYPE)
+        policy = schedule.get("policy") if isinstance(schedule.get("policy"), dict) else {}
+        actual = str(policy.get("reviewed_through_date") or "").strip()
+        if not expected or actual != expected:
+            raise ExecutionConflict(
+                "review_cursor_changed",
+                "轨迹已梳理截止日已变化，请重新生成候选。",
+                {"expected": expected, "actual": actual},
+            )
+
     def _conflict_result(self, conflict: ExecutionConflict, result: dict | None = None) -> dict:
         payload = dict(result or {})
         payload["conflict"] = {
@@ -167,10 +180,12 @@ class AutomationExecutor:
         return payload
 
     async def _validate_initial_approval(self, approved: dict, run: dict) -> None:
+        self._validate_review_cursor(run)
         await self._validate_current_snapshot(run)
         await self._validate_evidence(list(approved.get("evidence_bucket_ids") or []))
 
     async def _validate_retry(self, candidate: dict, approved: dict, run: dict) -> None:
+        self._validate_review_cursor(run)
         base = str(candidate.get("operation_id") or "")
         candidate_type = str(approved.get("candidate_type") or "")
         await self._validate_evidence(list(approved.get("evidence_bucket_ids") or []))
@@ -384,9 +399,24 @@ class AutomationExecutor:
                 )
                 return {"status": "failed", "candidate": saved, "error": str(exc)}
 
-            saved = self.store.set_candidate_execution(
-                candidate_id, status="completed", result=result,
-            )
+            snapshot = run.get("input_snapshot") if isinstance(run.get("input_snapshot"), dict) else {}
+            result = dict(result or {})
+            result["reviewed_through_before"] = str(snapshot.get("reviewed_through_date") or "")
+            result["reviewed_through_after"] = str(snapshot.get("review_end_date") or "")
+            try:
+                saved = self.store.complete_candidate_and_advance_review_cursor(
+                    candidate_id,
+                    result=result,
+                    expected_reviewed_through_date=str(snapshot.get("reviewed_through_date") or ""),
+                    reviewed_through_date=str(snapshot.get("review_end_date") or ""),
+                )
+            except Exception as exc:
+                current = self.store.get_candidate(candidate_id)
+                saved = self.store.set_candidate_execution(
+                    candidate_id, status="failed", result=current.get("result") or result,
+                    error=str(exc),
+                )
+                return {"status": "failed", "candidate": saved, "error": str(exc)}
             return {"status": "completed", "candidate": saved, "result": result}
         finally:
             self.store.release_task_lease(

@@ -43,9 +43,9 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `prompt_store.py` | 四类产品 Prompt 覆盖持久化：按 profile 保存 `analyze`、`merge`、`daily_review`、`weekly_journey` 用户版本、revision 与更新时间；代码默认仍是系统真源 |
 | `automation_store.py` | 通用自动化 SQLite 控制面：持久 schedule、逐任务 API/Pro 选择、实际 execution、run、candidate，兼容旧库重复迁移；候选 revision CAS、批准冻结、执行状态和任务 lease 与普通记忆桶隔离 |
 | `automation_model_runner.py` | 仅为 `daily_review` / `weekly_journey` 按 Haven 持久选择调用既有 API client 或 Dashboard Claude Pro runner；Pro 入口缺失、额度/登录/网络失败均原样失败，不自动 fallback |
-| `automation_scheduler.py` | 日回顾与 weekly journey 的香港时区分钟级调度规则：固定 04:00 日界线、下次运行计算和可编辑时间校验 |
-| `automation_executor.py` | 人工批准候选的白名单执行器；当前只注册 `weekly_journey`，负责冲突校验、批准稿 hash、派生 operation ID、重复确认回放与两步切换恢复 |
-| `journey_weekly_engine.py` | 每周 journey 只读输入聚合与严格三类候选生成；按香港周一 04:00–下周一 04:00 读取开放阶段、日回顾、新桶/独立 feel/旧桶 feel 年轮，排除旧日印象/关系天气 feel，支持手动或持久 schedule 触发 |
+| `automation_scheduler.py` | 日回顾与 weekly journey 的香港时区分钟级调度规则：固定 04:00 日界线、下次运行计算、连续轨迹截止游标和可编辑时间校验 |
+| `automation_executor.py` | 人工批准候选的白名单执行器；当前只注册 `weekly_journey`，负责冲突校验、批准稿 hash、派生 operation ID、重复确认回放、两步切换恢复及确认完成时原子推进轨迹游标 |
+| `journey_weekly_engine.py` | 每周触发的 journey 只读输入聚合与严格三类候选生成；从已确认截止日下一天连续读取到最近完整 OB 日，积压单次最多 31 天，读取开放阶段、日回顾、新桶/独立 feel/旧桶 feel 年轮并排除旧日印象/关系天气 feel |
 | `bucket_manager.py` | 桶 CRUD、搜索、评分、回收站、命中统计、分词 |
 | `dehydrator.py` | LLM 脱水、合并、打标（含 `_last_merge_usage` 成本追踪） |
 | `decay_engine.py` | 衰减引擎，只计算排序 score；不自动 resolved、digested 或 archive |
@@ -87,11 +87,11 @@ OMBRE_TRANSPORT=streamable-http python server.py
 
 `automation_schedules`、`automation_runs`、`automation_candidates` 存在独立 `state/automations.sqlite`，不写成普通 bucket。持久调度器每 30 秒检查到期任务，并用任务 lease 防止并发重复领取；设置页可调整日回顾启停/时分与 weekly journey 启停/星期/时分/协作者，时区固定 `Asia/Hong_Kong`，日界线固定 04:00。默认日回顾每日 04:30，weekly journey 周一 05:00，后者错开半小时等待周日日回顾完成。
 
-`weekly_journey` 按周一 04:00–下周一 04:00 的完整 OB 周聚合材料：新桶看 `metadata.created`，独立 feel 排除 whisper 以及 `daily_impression` / `weekly_impression` / `relationship_weather`，旧桶新增 feel 年轮看 `comments[].created`，最终按 bucket ID 去重。日回顾使用当前 Haven `profile_id` 与明确协作者按日期范围读取。定时触发与手动触发复用同一固定快照、候选白名单和幂等链路；定时任务只生成 `pending` 候选，不确认、不调用 journey 生命周期写入。
+`weekly_journey` 的星期/时分只决定触发频率，材料范围从所选协作者的 `reviewed_through_date` 下一天 04:00 连续读取到最近已经完整结束的 OB 日；积压超过 31 天时先处理最早一段，不跳过后续日期。新桶看 `metadata.created`，独立 feel 排除 whisper 以及 `daily_impression` / `weekly_impression` / `relationship_weather`，旧桶新增 feel 年轮看 `comments[].created`，最终按 bucket ID 去重。日回顾使用当前 Haven `profile_id` 与明确协作者按日期范围读取。同一协作者已有 pending/applying/failed 候选时不再次调用模型。
 
 候选只允许 `no_change`、`append_current`、`transition`，证据 ID 必须来自固定输入快照；同一 `cycle_key + input_hash` 重试回放同一 run/candidate。编辑只替换 draft 并增加 revision，原始 preview 保留；确认请求只提交 `expected_revision + approved_payload_hash`，服务端重新规范化并冻结完整 approved payload/hash，浏览器不能临时提交另一份正文。
 
-`automation_executor.py` 只注册 `weekly_journey`。首次确认前会校验候选仍 pending、开放 journey 完整快照、批准稿 hash 和证据桶存在且非 journey；冲突保存结构化原因，不覆盖当前阶段。同一任务的持久 lease 串行化并发确认。`no_change` 零写入；`append_current` 只调用开放阶段追加；`transition` 以稳定的 `:close` / `:create` 派生 operation ID 两步执行。关闭成功而创建失败时保留部分结果，重试幂等回放 close 后继续 create；已完成候选的重复确认只回放结果。手动与定时触发都止于候选生成，只有人工确认才进入本执行器。模型连接复用 `daily_review` 的 Anthropic-compatible `/v1/messages` 配置。
+`automation_executor.py` 只注册 `weekly_journey`。首次确认前会校验候选仍 pending、已梳理截止游标、开放 journey 完整快照、批准稿 hash 和证据桶存在且非 journey；冲突保存结构化原因，不覆盖当前阶段。同一任务的持久 lease 串行化并发确认。`no_change` 零 journey 写入但人工确认后仍推进截止游标；`append_current` 只调用开放阶段追加；`transition` 以稳定的 `:close` / `:create` 派生 operation ID 两步执行。候选完成与游标推进在同一 SQLite 事务；失败、拒绝、冲突和仅生成候选均不推进。关闭成功而创建失败时保留部分结果，重试幂等回放 close 后继续 create。
 
 ## 配置
 
@@ -232,7 +232,7 @@ PATCH /api/journeys/{bucket_id}          # 认证人工纠错；校验唯一 ope
 ### 自动化候选
 ```
 GET  /api/automations/status?task_type=weekly_journey|daily_review
-PATCH /api/automations/schedule                    # 持久调整 weekly journey 启停/星期/时分/协作者
+PATCH /api/automations/schedule                    # 持久调整 weekly journey 启停/星期/时分/协作者/已梳理截止日
 PATCH /api/automations/execution                   # 分别保存 daily_review / weekly_journey 的 API/Pro 与 Pro 模型
 POST /api/automations/weekly-journey/run       # 手动生成 pending 候选；不写 journey
 GET  /api/automations/candidates?task_type=weekly_journey&status=pending

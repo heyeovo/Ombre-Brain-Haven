@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 
@@ -33,10 +33,17 @@ def normalize_policy(task_type: str, policy: dict | None) -> dict:
         "day_start_hour": FIXED_DAY_START_HOUR,
     }
     if task == WEEKLY_JOURNEY_TASK_TYPE:
+        reviewed_through = str(raw.get("reviewed_through_date") or "").strip()
+        if reviewed_through:
+            try:
+                date.fromisoformat(reviewed_through)
+            except ValueError as exc:
+                raise ValueError("reviewed_through_date must use YYYY-MM-DD") from exc
         normalized.update({
             "weekday": _int_between(raw.get("weekday"), 0, 0, 6),
             "persona_id": str(raw.get("persona_id") or "").strip(),
             "candidate_only": True,
+            "reviewed_through_date": reviewed_through,
         })
     return normalized
 

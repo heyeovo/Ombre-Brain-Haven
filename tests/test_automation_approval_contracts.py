@@ -158,15 +158,25 @@ class AutomationApprovalContractsTest(unittest.IsolatedAsyncioTestCase):
             candidate_generator=lambda snapshot: {},
         )
         self.executor = AutomationExecutor(self.store, self.bucket_mgr, self.engine)
+        schedule = self.store.get_schedule(task_type="weekly_journey")
+        policy = dict(schedule.get("policy") or {})
+        policy["reviewed_through_date"] = "2026-08-02"
+        self.store.update_schedule(
+            task_type="weekly_journey", enabled=False, timezone="Asia/Hong_Kong",
+            policy=policy, next_run_at="",
+        )
 
     def tearDown(self):
         self.temp_dir.cleanup()
 
     def make_candidate(self, candidate_type="append_current"):
         snapshot = {
-            "cycle_key": "2026-W32",
-            "window_start": "2026-08-03T00:00:00+08:00",
-            "window_end": "2026-08-10T00:00:00+08:00",
+            "cycle_key": "2026-08-03_2026-08-09",
+            "window_start": "2026-08-03T04:00:00+08:00",
+            "window_end": "2026-08-10T04:00:00+08:00",
+            "reviewed_through_date": "2026-08-02",
+            "review_start_date": "2026-08-03",
+            "review_end_date": "2026-08-09",
             "timezone": "Asia/Hong_Kong",
             "current_journey": self.engine._journey_snapshot(self.bucket_mgr.open_journey),
             "materials": [
@@ -210,7 +220,7 @@ class AutomationApprovalContractsTest(unittest.IsolatedAsyncioTestCase):
         normalized = self.engine.validate_candidate(raw, snapshot)
         run, _ = self.store.start_run(
             task_type="weekly_journey",
-            cycle_key="2026-W32",
+            cycle_key=snapshot["cycle_key"],
             window_start=snapshot["window_start"],
             window_end=snapshot["window_end"],
             timezone="Asia/Hong_Kong",
@@ -253,6 +263,10 @@ class AutomationApprovalContractsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "rejected")
         self.assertEqual(result["candidate"]["status"], "rejected")
         self.assertEqual(self.bucket_mgr.append_calls + self.bucket_mgr.close_calls + self.bucket_mgr.create_calls, [])
+        self.assertEqual(
+            self.store.get_schedule(task_type="weekly_journey")["policy"]["reviewed_through_date"],
+            "2026-08-02",
+        )
 
 
     async def test_duplicate_confirmation_replays_one_append(self):
@@ -295,6 +309,10 @@ class AutomationApprovalContractsTest(unittest.IsolatedAsyncioTestCase):
         self.bucket_mgr.create_failures = 1
         first = await self.confirm(candidate)
         self.assertEqual(first["status"], "failed")
+        self.assertEqual(
+            self.store.get_schedule(task_type="weekly_journey")["policy"]["reviewed_through_date"],
+            "2026-08-02",
+        )
         self.assertEqual(len(self.bucket_mgr.close_calls), 1)
         self.assertEqual(len(self.bucket_mgr.create_calls), 1)
         frozen = self.store.get_candidate(candidate["candidate_id"])
@@ -405,6 +423,11 @@ class AutomationApprovalContractsTest(unittest.IsolatedAsyncioTestCase):
         result = await self.confirm(candidate)
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["result"]["write_count"], 0)
+        self.assertEqual(result["result"]["reviewed_through_after"], "2026-08-09")
+        self.assertEqual(
+            self.store.get_schedule(task_type="weekly_journey")["policy"]["reviewed_through_date"],
+            "2026-08-09",
+        )
         self.assertEqual(self.bucket_mgr.append_calls + self.bucket_mgr.close_calls + self.bucket_mgr.create_calls, [])
 
 

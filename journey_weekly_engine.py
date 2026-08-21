@@ -15,6 +15,7 @@ from automation_store import AutomationStore
 
 TASK_TYPE = "weekly_journey"
 CANDIDATE_TYPES = {"no_change", "append_current", "transition"}
+MAX_REVIEW_DAYS = 31
 
 WEEKLY_JOURNEY_PRODUCT_PROMPT = """用当前协作者的第一人称写关系轨迹，保留情感在场和具体变化，不写成周报。
 判断保持克制，已有阶段已经覆盖的内容不要重复追加。
@@ -95,27 +96,58 @@ class WeeklyJourneyEngine:
             )
 
     def resolve_window(self, cycle_key: str = "", *, now: datetime | None = None) -> dict:
-        key = str(cycle_key or "").strip().upper()
-        if key:
-            match = re.fullmatch(r"(\d{4})-W(\d{2})", key)
-            if not match:
-                raise ValueError("cycle_key must use YYYY-Www")
-            year, week = int(match.group(1)), int(match.group(2))
-            try:
-                start_date = date.fromisocalendar(year, week, 1)
-            except ValueError as exc:
-                raise ValueError("invalid ISO week") from exc
-        else:
-            local_now = now.astimezone(self.tz) if now and now.tzinfo else (now.replace(tzinfo=self.tz) if now else datetime.now(self.tz))
-            current_monday = local_now.date() - timedelta(days=local_now.weekday())
-            start_date = current_monday - timedelta(days=7)
-            iso = start_date.isocalendar()
-            key = f"{iso.year}-W{iso.week:02d}"
-        end_date = start_date + timedelta(days=7)
+        if str(cycle_key or "").strip():
+            raise ValueError("cycle_key is no longer supported; use reviewed_through_date")
+        schedule = self.automation_store.get_schedule(task_type=TASK_TYPE)
+        policy = schedule.get("policy") if isinstance(schedule.get("policy"), dict) else {}
+        reviewed_through = str(policy.get("reviewed_through_date") or "").strip()
+        if not reviewed_through:
+            raise ValueError("weekly journey reviewed_through_date is required")
+        try:
+            reviewed_date = date.fromisoformat(reviewed_through)
+        except ValueError as exc:
+            raise ValueError("reviewed_through_date must use YYYY-MM-DD") from exc
+
+        local_now = now.astimezone(self.tz) if now and now.tzinfo else (
+            now.replace(tzinfo=self.tz) if now else datetime.now(self.tz)
+        )
+        latest_boundary_date = local_now.date() if local_now.time() >= time(4) else local_now.date() - timedelta(days=1)
+        available_through = latest_boundary_date - timedelta(days=1)
+        start_date = reviewed_date + timedelta(days=1)
+        if start_date > available_through:
+            raise ValueError("weekly journey has no newly completed day to review")
+        end_review_date = min(available_through, start_date + timedelta(days=MAX_REVIEW_DAYS - 1))
+        end_date = end_review_date + timedelta(days=1)
+        key = f"{start_date.isoformat()}_{end_review_date.isoformat()}"
         return {
             "cycle_key": key,
             "start": datetime.combine(start_date, time(4), tzinfo=self.tz),
             "end": datetime.combine(end_date, time(4), tzinfo=self.tz),
+            "reviewed_through_date": reviewed_date.isoformat(),
+            "review_start_date": start_date.isoformat(),
+            "review_end_date": end_review_date.isoformat(),
+            "available_through_date": available_through.isoformat(),
+            "range_truncated": end_review_date < available_through,
+            "max_review_days": MAX_REVIEW_DAYS,
+        }
+
+    def window_status(self, *, now: datetime | None = None) -> dict:
+        try:
+            window = self.resolve_window(now=now)
+        except ValueError as exc:
+            schedule = self.automation_store.get_schedule(task_type=TASK_TYPE)
+            policy = schedule.get("policy") if isinstance(schedule.get("policy"), dict) else {}
+            return {
+                "configured": bool(str(policy.get("reviewed_through_date") or "").strip()),
+                "reviewed_through_date": str(policy.get("reviewed_through_date") or ""),
+                "error": str(exc),
+                "max_review_days": MAX_REVIEW_DAYS,
+            }
+        return {
+            "configured": True,
+            **{key: value for key, value in window.items() if key not in {"start", "end"}},
+            "window_start": window["start"].isoformat(),
+            "window_end": window["end"].isoformat(),
         }
 
     @staticmethod
@@ -206,13 +238,13 @@ class WeeklyJourneyEngine:
         if not open_journey:
             raise ValueError("current open journey is required")
 
-        review_end = (end.date() - timedelta(days=1)).isoformat()
+        review_end = window["review_end_date"]
         reviews = self.daily_review_store.list_daily_reviews(
             profile_id=self.profile_id,
             persona_id=str(persona.get("id") or ""),
             start_date=start.date().isoformat(),
             end_date=review_end,
-            limit=7,
+            limit=MAX_REVIEW_DAYS,
         )
         reviews_by_date = {
             str(item.get("review_date") or ""): item
@@ -220,7 +252,8 @@ class WeeklyJourneyEngine:
             if isinstance(item, dict) and str(item.get("review_date") or "")
         }
         expected_dates = [
-            (start.date() + timedelta(days=offset)).isoformat() for offset in range(7)
+            (start.date() + timedelta(days=offset)).isoformat()
+            for offset in range((end.date() - start.date()).days)
         ]
 
         material_by_id: dict[str, dict] = {}
@@ -274,6 +307,11 @@ class WeeklyJourneyEngine:
             "timezone": str(self.tz.key),
             "window_start": start.isoformat(),
             "window_end": end.isoformat(),
+            "reviewed_through_date": window["reviewed_through_date"],
+            "review_start_date": window["review_start_date"],
+            "review_end_date": window["review_end_date"],
+            "available_through_date": window["available_through_date"],
+            "range_truncated": window["range_truncated"],
             "persona": {
                 "id": str(persona.get("id") or ""),
                 "name": str(persona.get("name") or persona.get("id") or ""),
@@ -442,9 +480,9 @@ class WeeklyJourneyEngine:
             close_date = date.fromisoformat(stage_end)
             start_date = date.fromisoformat(stage_start)
             if not (window_start <= close_date < window_end):
-                raise ValueError("close.stage_end must fall within the reviewed week boundary")
+                raise ValueError("close.stage_end must fall within the reviewed range")
             if not (window_start <= start_date < window_end):
-                raise ValueError("create.stage_start must fall within the reviewed week")
+                raise ValueError("create.stage_start must fall within the reviewed range")
             if close_date > start_date:
                 raise ValueError("close.stage_end cannot be after create.stage_start")
             proposal = {
@@ -479,8 +517,24 @@ class WeeklyJourneyEngine:
             "draft": proposal,
         }
 
-    async def _run(self, *, cycle_key: str = "", persona_id: str = "", trigger: str) -> dict:
-        snapshot = await self.collect_input(cycle_key=cycle_key, persona_id=persona_id)
+    async def _run(
+        self, *, cycle_key: str = "", persona_id: str = "", trigger: str,
+        now: datetime | None = None,
+    ) -> dict:
+        persona = self._resolve_persona(persona_id)
+        schedule = self.automation_store.get_schedule(task_type=TASK_TYPE)
+        policy = schedule.get("policy") if isinstance(schedule.get("policy"), dict) else {}
+        configured_persona_id = str(policy.get("persona_id") or "").strip()
+        actual_persona_id = str(persona.get("id") or "").strip()
+        if not configured_persona_id or actual_persona_id != configured_persona_id:
+            raise ValueError("save the weekly journey collaborator before generation")
+        unresolved = self.automation_store.unresolved_candidate_for_persona(
+            task_type=TASK_TYPE, persona_id=actual_persona_id,
+        )
+        if unresolved:
+            run = self.automation_store.get_run(str(unresolved.get("run_id") or ""))
+            return {"status": "pending_exists", "run": run, "candidate": unresolved}
+        snapshot = await self.collect_input(cycle_key=cycle_key, persona_id=persona_id, now=now)
         digest = self.input_hash(snapshot)
         run, created = self.automation_store.start_run(
             task_type=TASK_TYPE,
@@ -524,8 +578,12 @@ class WeeklyJourneyEngine:
                 "error": str(exc),
             }
 
-    async def run_manual(self, *, cycle_key: str = "", persona_id: str = "") -> dict:
-        return await self._run(cycle_key=cycle_key, persona_id=persona_id, trigger="manual")
+    async def run_manual(
+        self, *, cycle_key: str = "", persona_id: str = "", now: datetime | None = None,
+    ) -> dict:
+        return await self._run(
+            cycle_key=cycle_key, persona_id=persona_id, trigger="manual", now=now,
+        )
 
     async def run_scheduled(self, *, persona_id: str) -> dict:
         return await self._run(cycle_key="", persona_id=persona_id, trigger="schedule")

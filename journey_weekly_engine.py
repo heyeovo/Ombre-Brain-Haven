@@ -328,7 +328,7 @@ class WeeklyJourneyEngine:
                 raise ValueError("candidate generator must return an object")
             return result
         client = self.message_client
-        if not client or not all(str(getattr(client, field, "") or "").strip() for field in ("api_key", "base_url", "model")):
+        if not client or not bool(getattr(client, "is_configured", True)):
             raise RuntimeError("weekly journey model is not configured")
         persona = self.daily_review_store.get_cc_persona(snapshot["persona"]["id"]) or {}
         persona_system = client._persona_system(persona) if hasattr(client, "_persona_system") else ""
@@ -516,7 +516,13 @@ class WeeklyJourneyEngine:
             }
         except Exception as exc:
             run = self.automation_store.finish_run(run["run_id"], status="failed", error=str(exc))
-            return {"status": "failed", "run": run, "candidate": {}, "error": str(exc)}
+            return {
+                "status": "failed",
+                "run": run,
+                "candidate": {},
+                "error_code": str(getattr(exc, "code", "model_error")),
+                "error": str(exc),
+            }
 
     async def run_manual(self, *, cycle_key: str = "", persona_id: str = "") -> dict:
         return await self._run(cycle_key=cycle_key, persona_id=persona_id, trigger="manual")

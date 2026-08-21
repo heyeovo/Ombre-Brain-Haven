@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from automation_store import AutomationStore  # noqa: E402
+from automation_model_runner import AutomationModelRouter  # noqa: E402
 from automation_scheduler import next_run_at, schedule_payload  # noqa: E402
 from journey_weekly_engine import WeeklyJourneyEngine  # noqa: E402
 
@@ -172,6 +173,27 @@ class AutomationStoreContractsTest(unittest.TestCase):
             "2026-08-10T05:00:00+08:00",
         )
 
+    def test_execution_choice_and_latest_execution_are_persisted(self):
+        store = self.make_store()
+        store.ensure_schedule(
+            schedule_id="daily_review", task_type="daily_review", handler_key="daily_review",
+        )
+        schedule = store.update_execution_choice(
+            task_type="daily_review", engine="pro", model="claude-sonnet-4-6",
+        )
+        self.assertEqual(schedule["execution_engine"], "pro")
+        execution = store.start_execution(
+            task_type="daily_review", trigger="scheduled", engine="pro",
+            model="claude-sonnet-4-6",
+        )
+        store.finish_execution(
+            execution["execution_id"], status="failed", error_code="pro_limit",
+            error="额度不足",
+        )
+        status = store.task_status(task_type="daily_review")
+        self.assertEqual(status["latest_execution"]["actual_engine"], "pro")
+        self.assertEqual(status["latest_execution"]["error_code"], "pro_limit")
+
     def test_legacy_disabled_weekly_placeholder_migrates_to_five_am(self):
         store = self.make_store()
         store.ensure_schedule(
@@ -185,6 +207,33 @@ class AutomationStoreContractsTest(unittest.TestCase):
         schedule = store.get_schedule(task_type="weekly_journey")
         self.assertEqual(schedule["policy"]["hour"], 5)
         self.assertEqual(schedule["policy"]["minute"], 0)
+
+
+class AutomationModelRouterTest(unittest.IsolatedAsyncioTestCase):
+    async def test_routes_each_task_choice_without_automatic_fallback(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = AutomationStore(db_path=str(Path(root) / "automations.sqlite"))
+            store.ensure_schedule(
+                schedule_id="daily_review", task_type="daily_review", handler_key="daily_review",
+            )
+            api_client = SimpleNamespace(
+                api_key="key", base_url="https://api.test", model="api-model",
+                _create_message=AsyncMock(return_value="api result"),
+            )
+            router = AutomationModelRouter("daily_review", store, api_client)
+            self.assertEqual(
+                await router._create_message(system="s", user="u", max_tokens=100, temperature=0.2),
+                "api result",
+            )
+            store.update_execution_choice(
+                task_type="daily_review", engine="pro", model="claude-sonnet-4-6",
+            )
+            router._call_pro_runner = AsyncMock(side_effect=RuntimeError("pro failed"))
+            with self.assertRaisesRegex(RuntimeError, "pro failed"):
+                await router._create_message(
+                    system="s", user="u", max_tokens=100, temperature=0.2,
+                )
+            self.assertEqual(api_client._create_message.await_count, 1)
 
 
 class FakeDailyReviewStore:
@@ -501,9 +550,20 @@ class AutomationRoutesContractTest(unittest.IsolatedAsyncioTestCase):
             "run": {"run_id": "run-1", "input_snapshot": {"materials": []}},
             "candidate": {"candidate_id": "candidate-1", "status": "pending"},
         }))
+        store = SimpleNamespace(
+            start_execution=lambda **kwargs: {"execution_id": "execution-1"},
+            finish_execution=lambda execution_id, **kwargs: {
+                "execution_id": execution_id, "status": kwargs["status"],
+            },
+        )
         route = load_server_function("api_weekly_journey_run", {
             "_require_dashboard_auth": lambda request: None,
             "weekly_journey_engine": weekly_journey_engine,
+            "weekly_journey_model_router": SimpleNamespace(
+                choice=lambda: {"engine": "api", "model": "api-model"},
+            ),
+            "automation_store": store,
+            "WEEKLY_JOURNEY_TASK_TYPE": "weekly_journey",
             "automation_executor": SimpleNamespace(candidate_for_review=lambda candidate: candidate),
             "_automation_public_run": lambda run: {"run_id": run.get("run_id")},
         })

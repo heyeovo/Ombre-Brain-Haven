@@ -41,7 +41,8 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线 + cc 持久化路由（`Route()` 注册） |
 | `gateway_state.py` | Gateway/cc SQLite 状态：会话原文、窗口闲聊/工作模式、固定日回顾快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与游标、桶排除账本 |
 | `prompt_store.py` | 四类产品 Prompt 覆盖持久化：按 profile 保存 `analyze`、`merge`、`daily_review`、`weekly_journey` 用户版本、revision 与更新时间；代码默认仍是系统真源 |
-| `automation_store.py` | 通用自动化 SQLite 控制面：持久 schedule、run、candidate，兼容旧库重复迁移；候选 revision CAS、批准冻结、执行状态和任务 lease 与普通记忆桶隔离 |
+| `automation_store.py` | 通用自动化 SQLite 控制面：持久 schedule、逐任务 API/Pro 选择、实际 execution、run、candidate，兼容旧库重复迁移；候选 revision CAS、批准冻结、执行状态和任务 lease 与普通记忆桶隔离 |
+| `automation_model_runner.py` | 仅为 `daily_review` / `weekly_journey` 按 Haven 持久选择调用既有 API client 或 Dashboard Claude Pro runner；Pro 入口缺失、额度/登录/网络失败均原样失败，不自动 fallback |
 | `automation_scheduler.py` | 日回顾与 weekly journey 的香港时区分钟级调度规则：固定 04:00 日界线、下次运行计算和可编辑时间校验 |
 | `automation_executor.py` | 人工批准候选的白名单执行器；当前只注册 `weekly_journey`，负责冲突校验、批准稿 hash、派生 operation ID、重复确认回放与两步切换恢复 |
 | `journey_weekly_engine.py` | 每周 journey 只读输入聚合与严格三类候选生成；按香港周一 04:00–下周一 04:00 读取开放阶段、日回顾、新桶/独立 feel/旧桶 feel 年轮，排除旧日印象/关系天气 feel，支持手动或持久 schedule 触发 |
@@ -55,7 +56,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `repair_raw_archive_thinking.py` | 历史档案正文/thinking 一次性幂等修复；默认 dry-run，只更新正文或 thinking 确有差异的消息；`--apply` 使用整批事务从 Haven 私密归档回填并重建正文哈希/FTS，异常时整批回滚 |
 | `recall_policy.py` | 召回策略（vague 闸、相对日期、分词整词判断） |
 | `reflection_engine.py` | 反思/日印象引擎 |
-| `daily_review_engine.py` | 默认每日 04:30 通过 Anthropic-compatible `/v1/messages` 按协作者生成第一人称日回顾；D 日材料固定为 D 日 04:00–D+1 日 04:00，连续性参考仍为 D-2、D-1 两条日回顾，结果不进记忆桶 |
+| `daily_review_engine.py` | 默认每日 04:30 按协作者生成第一人称日回顾；D 日材料固定为 D 日 04:00–D+1 日 04:00，连续性参考仍为 D-2、D-1 两条日回顾，可由逐任务 router 选择 API 或 Pro，结果不进记忆桶 |
 | `persona_engine.py` / `portrait_engine.py` | 用户画像（persona 状态 + 画像生成） |
 | `memory_*.py` | 记忆分层：layers/nodes/edges/metadata/moments/diffusion/relevance/write_gate |
 | `todo_store.py` / `reminder_store.py` | 待办 / 照顾备忘持久化 |
@@ -232,6 +233,7 @@ PATCH /api/journeys/{bucket_id}          # 认证人工纠错；校验唯一 ope
 ```
 GET  /api/automations/status?task_type=weekly_journey|daily_review
 PATCH /api/automations/schedule                    # 持久调整 weekly journey 启停/星期/时分/协作者
+PATCH /api/automations/execution                   # 分别保存 daily_review / weekly_journey 的 API/Pro 与 Pro 模型
 POST /api/automations/weekly-journey/run       # 手动生成 pending 候选；不写 journey
 GET  /api/automations/candidates?task_type=weekly_journey&status=pending
 GET  /api/automations/candidates/{candidate_id}

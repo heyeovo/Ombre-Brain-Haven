@@ -123,7 +123,9 @@ Daily Reflection 可根据当天聊天、已有 auto-memory 产物和近期记�
 
 #### 每周关系轨迹候选
 
-Haven 的通用自动化底座以 `state/automations.sqlite` 持久保存日回顾与 `weekly_journey` 的启停、时分、下次运行、运行错误和任务 lease。香港时区的“OB 日”固定为 04:00–次日 04:00，默认 04:30 生成并归到开始日；“OB 周”固定为周一 04:00–下周一 04:00，默认周一 05:00 生成上一周 journey 候选，等待周日日回顾先完成。Dashboard「自动化与状态」可调整两类任务的生成时间，weekly journey 还可调整星期和协作者；时区与 04:00 日界线只读固定。
+Haven 的通用自动化底座以 `state/automations.sqlite` 持久保存日回顾与 `weekly_journey` 的启停、时分、下次运行、运行错误、任务 lease，以及两项任务各自的 API/Claude Pro 选择和实际 execution 记录。香港时区的“OB 日”固定为 04:00–次日 04:00，默认 04:30 生成并归到开始日；“OB 周”固定为周一 04:00–下周一 04:00，默认周一 05:00 生成上一周 journey 候选，等待周日日回顾先完成。Dashboard「自动化与状态」可调整两类任务的生成时间与执行方式，weekly journey 还可调整星期和协作者；时区与 04:00 日界线只读固定。
+
+API 路线继续使用 Haven 已有的日回顾模型连接。Claude Pro 路线由 Haven 调度后调用 Dashboard 的受限内部 runner：只接受 `daily_review` / `weekly_journey`、固定 Sonnet/Opus ID、无工具、单并发、一次性 Agent SDK session，OAuth 凭据仍只存在 Dashboard `/home/cc/.claude`。Haven 只保存引擎/模型选择与非秘密运行结果；任何 Pro 额度、OAuth、网络或输出校验失败都会停止并显示，必须由用户人工换线后重试，不做自动 fallback。启用前按 [`ENV_VARS.md`](ENV_VARS.md) 在两端配置 runner URL/共享 token。
 
 `weekly_journey` 读取当前开放 journey、该 OB 周日回顾、新桶、独立 feel 与旧桶新增的 feel 年轮，按 bucket ID 去重后只生成 `no_change`、`append_current` 或 `transition` 候选。旧 `daily_impression`、`weekly_impression`、`relationship_weather` feel 明确排除，不作为轨迹材料。候选与输入快照保存在独立 SQLite 状态中，不进入普通记忆、召回或关联扩散。
 
@@ -345,6 +347,8 @@ Gateway 首次启动时会把镜像内的基础配置初始化为 `/config/confi
 上游模型密钥只注入 Gateway 服务；Brain 与 Dashboard 不得接收 `OMBRE_GATEWAY_UPSTREAM_API_KEY` 或各 provider 的真实 key。多 upstream 应通过各自的 `api_key_env` 引用 Gateway 私密环境项。
 
 该栈现承接 VPS Haven 正式流量；Dashboard 通过 Coolify 内网访问 Brain，公网 Remote MCP 入口由 Brain 的 Coolify 域名与 OAuth 配置保护。Zeabur 数据已落后于 VPS，不能把旧 Zeabur 地址作为直接回切目标。
+
+若日回顾或 weekly journey 要使用 Claude Pro，Haven Brain 还需要 Dashboard runner 的完整 URL 与共享 token，Dashboard Application 需要同一个 token；变量名和注入边界见 `ENV_VARS.md`。默认 API 选择不需要这两个变量。
 
 ### Python 直跑
 

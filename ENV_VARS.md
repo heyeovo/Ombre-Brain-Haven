@@ -83,6 +83,15 @@
 | `OMBRE_DREAM_MODEL` | `dream.model` | Dream 模型名 |
 | `OMBRE_DREAM_ENABLED` | `dream.enabled` | 启用/关闭夜梦 |
 
+### 日回顾 / 每周轨迹的 Claude Pro runner
+
+仅当 Dashboard「自动化与状态」把 `daily_review` 或 `weekly_journey` 明确选为 Claude Pro 时需要。两项任务的选择持久化在 Haven `state/automations.sqlite`；默认仍为 API，运行失败不会自动切换引擎。
+
+| 变量名 | 注入位置 | 说明 |
+|--------|----------|------|
+| `OMBRE_AUTOMATION_PRO_RUNNER_URL` | Haven Brain | Dashboard 专用 runner 的完整 URL，例如内部或受 HTTPS 保护的 `https://dashboard.example/api/automation-pro-runner` |
+| `OMBRE_AUTOMATION_PRO_RUNNER_TOKEN` | Haven Brain + Dashboard | 两端相同的随机共享密钥；只用于 runner Bearer 认证，不返回浏览器、不写数据库或 Git |
+
 ## 存储路径
 
 | 变量名 | 说明 |
@@ -107,6 +116,7 @@
 | `HAVEN_RELEASE_SHA` | — | Coolify Compose 专用的发布版本；必须填写完整 Git commit SHA。Brain 与 Gateway 共用此值，变量为空时 `${HAVEN_RELEASE_SHA:?}` 会阻止部署。该值只用于选择构建源，不注入运行中的容器 |
 
 - Brain：`OMBRE_TRANSPORT=streamable-http`、`OMBRE_PORT=8000`、`OMBRE_BUCKETS_DIR=/data`、`OMBRE_STATE_DIR=/state`、`OMBRE_RUNTIME_CONFIG_PATH=/state/config.runtime.yaml`。
+- 若启用两项自动化的 Pro 路线，Brain 还需注入 `OMBRE_AUTOMATION_PRO_RUNNER_URL` 与 `OMBRE_AUTOMATION_PRO_RUNNER_TOKEN`；Dashboard Application 只需注入同一个 `OMBRE_AUTOMATION_PRO_RUNNER_TOKEN`。
 - Gateway：`OMBRE_GATEWAY_HOST=0.0.0.0`、`OMBRE_GATEWAY_PORT=8010`，并与 Brain 共用 `/data` 和 `/state`。
 - Brain 通过 `OMBRE_GATEWAY_ADMIN_URL=http://haven-gateway:8010/api/config` 使用内部服务名连接 Gateway。
 - 密钥变量只从 Coolify 环境注入；Compose 文件不包含真实值。上游模型密钥只允许注入 Gateway，Brain / Dashboard 不得接收。该栈不发布宿主机端口。

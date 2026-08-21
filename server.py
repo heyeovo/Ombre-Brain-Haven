@@ -134,6 +134,7 @@ from daily_review_engine import (
     DailyReviewEngine,
 )
 from automation_store import AutomationStore
+from automation_model_runner import AutomationModelError, AutomationModelRouter
 from automation_scheduler import (
     DAILY_REVIEW_TASK_TYPE,
     FIXED_TIMEZONE as AUTOMATION_TIMEZONE,
@@ -295,11 +296,6 @@ identity_semantic_store = IdentitySemanticStore(config) # Private relationship a
 word_map_store = WordMapStore(config)                   # Derived generic word co-occurrence index / 派生通用词图
 darkroom_store = DarkroomStore(config)                  # Private reflection room / 不回显正文的暗房
 gateway_state_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gateway_state.db"))
-daily_review_engine = DailyReviewEngine(
-    config,
-    gateway_state_store,
-    prompt_resolver=prompt_store.get_effective,
-)
 automation_store = AutomationStore(config)
 _daily_schedule_cfg = config.get("daily_review", {}) if isinstance(config.get("daily_review"), dict) else {}
 _daily_schedule = automation_store.ensure_schedule(
@@ -324,13 +320,30 @@ if not _daily_schedule.get("next_run_at") and _daily_schedule.get("enabled"):
         task_type=DAILY_REVIEW_TASK_TYPE,
         **_initial_daily_payload,
     )
+daily_review_api_client = DailyReviewEngine(
+    config,
+    gateway_state_store,
+    prompt_resolver=prompt_store.get_effective,
+)
+daily_review_model_router = AutomationModelRouter(
+    DAILY_REVIEW_TASK_TYPE, automation_store, daily_review_api_client,
+)
+daily_review_engine = DailyReviewEngine(
+    config,
+    gateway_state_store,
+    prompt_resolver=prompt_store.get_effective,
+    message_client=daily_review_model_router,
+)
+weekly_journey_model_router = AutomationModelRouter(
+    WEEKLY_JOURNEY_TASK_TYPE, automation_store, daily_review_api_client,
+)
 weekly_journey_engine = WeeklyJourneyEngine(
     config,
     automation_store,
     bucket_mgr,
     gateway_state_store,
     profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
-    message_client=daily_review_engine,
+    message_client=weekly_journey_model_router,
     prompt_resolver=prompt_store.get_effective,
 )
 automation_executor = AutomationExecutor(automation_store, bucket_mgr, weekly_journey_engine)
@@ -11850,6 +11863,33 @@ async def api_automation_status(request):
     return JSONResponse(payload)
 
 
+@mcp.custom_route("/api/automations/execution", methods=["PATCH"])
+async def api_automation_execution_update(request):
+    """Persist one task's API/Pro choice; credentials never enter this payload."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    task_type = str(body.get("task_type") or "").strip()
+    if task_type not in {WEEKLY_JOURNEY_TASK_TYPE, DAILY_REVIEW_TASK_TYPE}:
+        return JSONResponse({"error": "unsupported task_type"}, status_code=400)
+    try:
+        schedule = automation_store.update_execution_choice(
+            task_type=task_type,
+            engine=str(body.get("engine") or ""),
+            model=str(body.get("model") or ""),
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse({"task_type": task_type, "schedule": schedule})
+
+
 @mcp.custom_route("/api/automations/schedule", methods=["PATCH"])
 async def api_automation_schedule_update(request):
     """Update the persisted candidate-only weekly schedule."""
@@ -11895,14 +11935,31 @@ async def api_weekly_journey_run(request):
         body = {}
     if not isinstance(body, dict):
         return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    choice = weekly_journey_model_router.choice()
+    execution = automation_store.start_execution(
+        task_type=WEEKLY_JOURNEY_TASK_TYPE,
+        trigger="manual",
+        engine=choice["engine"],
+        model=choice["model"],
+    )
     try:
         result = await weekly_journey_engine.run_manual(
             cycle_key=str(body.get("cycle_key") or ""),
             persona_id=str(body.get("persona_id") or ""),
         )
     except ValueError as exc:
+        automation_store.finish_execution(
+            execution["execution_id"], status="failed", error_code="invalid_input", error=str(exc),
+        )
         return JSONResponse({"error": str(exc)}, status_code=400)
+    execution = automation_store.finish_execution(
+        execution["execution_id"],
+        status="failed" if result.get("status") == "failed" else "completed",
+        error_code=str(result.get("error_code") or ""),
+        error=str(result.get("error") or ""),
+    )
     result = dict(result)
+    result["execution"] = execution
     result["run"] = _automation_public_run(result.get("run") or {})
     if result.get("candidate"):
         result["candidate"] = automation_executor.candidate_for_review(result["candidate"])
@@ -13575,6 +13632,13 @@ async def api_daily_reviews_run(request):
     persona_id = str(body.get("persona_id") or "").strip()
     if not review_date or not persona_id:
         return JSONResponse({"error": "review_date and persona_id are required"}, status_code=400)
+    choice = daily_review_model_router.choice()
+    execution = automation_store.start_execution(
+        task_type=DAILY_REVIEW_TASK_TYPE,
+        trigger="manual",
+        engine=choice["engine"],
+        model=choice["model"],
+    )
     try:
         result = await daily_review_engine.generate(
             profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
@@ -13584,9 +13648,18 @@ async def api_daily_reviews_run(request):
             override_user_edit=_bool_value(body.get("override_user_edit"), False),
         )
     except Exception as exc:
+        automation_store.finish_execution(
+            execution["execution_id"],
+            status="failed",
+            error_code=str(getattr(exc, "code", "model_error")),
+            error=str(exc),
+        )
         logger.warning("Daily review API failed: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
-    return JSONResponse(result)
+    execution = automation_store.finish_execution(
+        execution["execution_id"], status="completed",
+    )
+    return JSONResponse({**result, "execution": execution})
 
 
 def _store_daily_activity_summary_result(result: dict, portrait_engine_arg=None) -> dict:
@@ -14489,7 +14562,7 @@ async def api_config_update(request):
     """Hot-update runtime config. Optionally persist to config.yaml."""
     from starlette.responses import JSONResponse
     import yaml
-    global dream_engine, persona_engine, portrait_engine, reflection_engine, reranker_engine, daily_review_engine, weekly_journey_engine, automation_executor
+    global dream_engine, persona_engine, portrait_engine, reflection_engine, reranker_engine, daily_review_api_client, daily_review_model_router, daily_review_engine, weekly_journey_model_router, weekly_journey_engine, automation_executor
     err = _require_dashboard_auth(request)
     if err:
         return err
@@ -15065,10 +15138,19 @@ async def api_config_update(request):
             os.environ["OMBRE_DAILY_REVIEW_API_KEY"] = daily_review_cfg["api_key"]
             env_updates["OMBRE_DAILY_REVIEW_API_KEY"] = daily_review_cfg["api_key"]
             updated.append("daily_review.api_key")
+        daily_review_api_client = DailyReviewEngine(
+            config,
+            gateway_state_store,
+            prompt_resolver=prompt_store.get_effective,
+        )
+        daily_review_model_router = AutomationModelRouter(
+            DAILY_REVIEW_TASK_TYPE, automation_store, daily_review_api_client,
+        )
         daily_review_engine = DailyReviewEngine(
             config,
             gateway_state_store,
             prompt_resolver=prompt_store.get_effective,
+            message_client=daily_review_model_router,
         )
         daily_schedule_payload = automation_schedule_payload(
             DAILY_REVIEW_TASK_TYPE,
@@ -15645,13 +15727,16 @@ async def api_config_update(request):
                 status_code=500,
             )
 
+    weekly_journey_model_router = AutomationModelRouter(
+        WEEKLY_JOURNEY_TASK_TYPE, automation_store, daily_review_api_client,
+    )
     weekly_journey_engine = WeeklyJourneyEngine(
         config,
         automation_store,
         bucket_mgr,
         gateway_state_store,
         profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
-        message_client=daily_review_engine,
+        message_client=weekly_journey_model_router,
         prompt_resolver=prompt_store.get_effective,
     )
     automation_executor = AutomationExecutor(automation_store, bucket_mgr, weekly_journey_engine)
@@ -16225,6 +16310,7 @@ if __name__ == "__main__":
                 now = datetime.now(ZoneInfo(AUTOMATION_TIMEZONE))
                 for task_type in (DAILY_REVIEW_TASK_TYPE, SCHEDULED_WEEKLY_JOURNEY_TASK_TYPE):
                     claimed = {}
+                    execution = {}
                     try:
                         claimed = automation_store.claim_due_schedule(
                             task_type=task_type, owner=owner, now=now,
@@ -16234,9 +16320,30 @@ if __name__ == "__main__":
                         policy = normalize_automation_policy(task_type, claimed.get("policy"))
                         due_at = datetime.fromisoformat(str(claimed["next_run_at"]).replace("Z", "+00:00"))
                         run_error = ""
+                        router = (
+                            daily_review_model_router
+                            if task_type == DAILY_REVIEW_TASK_TYPE
+                            else weekly_journey_model_router
+                        )
+                        choice = router.choice()
+                        execution = automation_store.start_execution(
+                            task_type=task_type,
+                            trigger="scheduled",
+                            engine=choice["engine"],
+                            model=choice["model"],
+                        )
                         if task_type == DAILY_REVIEW_TASK_TYPE:
-                            local_engine = DailyReviewEngine(
+                            local_api_client = DailyReviewEngine(
                                 config, local_store, prompt_resolver=prompt_store.get_effective,
+                            )
+                            local_router = AutomationModelRouter(
+                                DAILY_REVIEW_TASK_TYPE, automation_store, local_api_client,
+                            )
+                            local_engine = DailyReviewEngine(
+                                config,
+                                local_store,
+                                prompt_resolver=prompt_store.get_effective,
+                                message_client=local_router,
                             )
                             review_date = (due_at.astimezone(ZoneInfo(AUTOMATION_TIMEZONE)).date() - timedelta(days=1)).isoformat()
                             results = [
@@ -16248,6 +16355,16 @@ if __name__ == "__main__":
                                 for persona in local_store.list_cc_personas()
                                 if str(persona.get("id") or "").strip()
                             ]
+                            model_failure = next(
+                                (
+                                    item for item in results
+                                    if item.get("status") == "skipped"
+                                    and item.get("reason") == "model_not_configured"
+                                ),
+                                None,
+                            )
+                            if model_failure:
+                                run_error = "automation model is not configured"
                             logger.info("Daily review scheduled results / 日回顾定时结果: %s", results)
                         else:
                             result = await weekly_journey_engine.run_scheduled(
@@ -16256,6 +16373,12 @@ if __name__ == "__main__":
                             if result.get("status") == "failed":
                                 run_error = str(result.get("error") or "weekly journey generation failed")
                             logger.info("Weekly journey scheduled result / 每周轨迹定时结果: %s", result)
+                        automation_store.finish_execution(
+                            execution["execution_id"],
+                            status="failed" if run_error else "completed",
+                            error_code=str(result.get("error_code") or "") if task_type != DAILY_REVIEW_TASK_TYPE else "",
+                            error=run_error,
+                        )
                         next_at = automation_next_run_at(
                             task_type, policy, after=max(now, due_at),
                         ).isoformat(timespec="seconds")
@@ -16264,6 +16387,16 @@ if __name__ == "__main__":
                         )
                     except Exception as e:
                         logger.warning("Automation scheduler failed for %s: %s", task_type, e)
+                        if execution:
+                            try:
+                                automation_store.finish_execution(
+                                    execution["execution_id"],
+                                    status="failed",
+                                    error_code=str(getattr(e, "code", "model_error")),
+                                    error=str(e),
+                                )
+                            except Exception:
+                                pass
                         if claimed:
                             try:
                                 policy = normalize_automation_policy(task_type, claimed.get("policy"))

@@ -30,9 +30,11 @@ class DailyReviewEngine:
         state_store,
         *,
         prompt_resolver: Callable[[str], str] | None = None,
+        message_client=None,
     ):
         self.state_store = state_store
         self.prompt_resolver = prompt_resolver
+        self.message_client = message_client
         cfg = config.get("daily_review", {}) if isinstance(config.get("daily_review"), dict) else {}
         fallback = config.get("reflection", {}) if isinstance(config.get("reflection"), dict) else {}
         self.enabled = bool(cfg.get("enabled", True))
@@ -105,6 +107,13 @@ class DailyReviewEngine:
     async def _create_message(
         self, *, system: str, user: str, max_tokens: int, temperature: float,
     ) -> str:
+        if self.message_client is not None:
+            return await self.message_client._create_message(
+                system=system,
+                user=user,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
         payload: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max(1, int(max_tokens)),
@@ -157,7 +166,8 @@ class DailyReviewEngine:
         items: list[dict[str, Any]],
         persona: dict[str, Any],
     ) -> str:
-        if not items or not self.api_key or not self.base_url or not self.model:
+        routed_ready = bool(getattr(self.message_client, "is_configured", False))
+        if not items or not (routed_ready or (self.api_key and self.base_url and self.model)):
             return ""
         user_name = str(persona.get("user_name") or "用户")
         assistant_name = str(persona.get("name") or "助手")
@@ -269,7 +279,12 @@ class DailyReviewEngine:
         persona = self.state_store.get_cc_persona(persona_id)
         if not persona:
             return {"status": "skipped", "reason": "persona_not_found", "date": review_date}
-        if not self.api_key or not self.base_url or not self.model:
+        model_ready = (
+            bool(getattr(self.message_client, "is_configured", False))
+            if self.message_client is not None
+            else bool(self.api_key and self.base_url and self.model)
+        )
+        if not model_ready:
             return {"status": "skipped", "reason": "model_not_configured", "date": review_date}
         material, session_ids = await self._materials(turns, persona)
         if not material.strip():
@@ -295,7 +310,8 @@ class DailyReviewEngine:
             return {"status": "skipped", "reason": "empty_model_output", "date": review_date}
         review = self.state_store.upsert_daily_review(
             profile_id=profile_id, persona_id=persona_id, review_date=review_date, content=content,
-            source_session_ids=session_ids, source_turn_count=len(turns), model=self.model,
+            source_session_ids=session_ids, source_turn_count=len(turns),
+            model=str(getattr(self.message_client, "model", "") or self.model),
             edited_by_user=False, preserve_user_edit=not override_user_edit,
         )
         return {"status": "created", "review": review}

@@ -96,6 +96,8 @@ class AutomationStore:
                     lease_until TEXT NOT NULL DEFAULT '',
                     last_run_at TEXT NOT NULL DEFAULT '',
                     last_error TEXT NOT NULL DEFAULT '',
+                    execution_engine TEXT NOT NULL DEFAULT 'api',
+                    execution_model TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -115,6 +117,8 @@ class AutomationStore:
                     "lease_until": "TEXT NOT NULL DEFAULT ''",
                     "last_run_at": "TEXT NOT NULL DEFAULT ''",
                     "last_error": "TEXT NOT NULL DEFAULT ''",
+                    "execution_engine": "TEXT NOT NULL DEFAULT 'api'",
+                    "execution_model": "TEXT NOT NULL DEFAULT ''",
                     "created_at": "TEXT NOT NULL DEFAULT ''",
                     "updated_at": "TEXT NOT NULL DEFAULT ''",
                 },
@@ -209,8 +213,45 @@ class AutomationStore:
                 },
             )
             conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS automation_executions (
+                    execution_id TEXT PRIMARY KEY,
+                    task_type TEXT NOT NULL,
+                    trigger TEXT NOT NULL DEFAULT 'scheduled',
+                    requested_engine TEXT NOT NULL,
+                    actual_engine TEXT NOT NULL,
+                    model TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'running',
+                    error_code TEXT NOT NULL DEFAULT '',
+                    error TEXT NOT NULL DEFAULT '',
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            self._ensure_columns(
+                conn,
+                "automation_executions",
+                {
+                    "task_type": "TEXT NOT NULL DEFAULT ''",
+                    "trigger": "TEXT NOT NULL DEFAULT 'scheduled'",
+                    "requested_engine": "TEXT NOT NULL DEFAULT 'api'",
+                    "actual_engine": "TEXT NOT NULL DEFAULT 'api'",
+                    "model": "TEXT NOT NULL DEFAULT ''",
+                    "status": "TEXT NOT NULL DEFAULT 'running'",
+                    "error_code": "TEXT NOT NULL DEFAULT ''",
+                    "error": "TEXT NOT NULL DEFAULT ''",
+                    "started_at": "TEXT NOT NULL DEFAULT ''",
+                    "completed_at": "TEXT NOT NULL DEFAULT ''",
+                },
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_automation_schedules_due "
                 "ON automation_schedules(enabled, next_run_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_automation_executions_task_started "
+                "ON automation_executions(task_type, started_at DESC)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_automation_runs_task_started "
@@ -320,6 +361,32 @@ class AutomationStore:
                 (str(task_type),),
             ).fetchone()
             return self._schedule_payload(row)
+        finally:
+            conn.close()
+
+    def update_execution_choice(
+        self, *, task_type: str, engine: str, model: str = "",
+    ) -> dict:
+        normalized_engine = str(engine or "").strip().lower()
+        if normalized_engine not in {"api", "pro"}:
+            raise ValueError("execution engine must be api or pro")
+        normalized_model = str(model or "").strip()[:200]
+        if normalized_engine == "pro" and not normalized_model:
+            normalized_model = "claude-sonnet-4-6"
+        conn = self._connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE automation_schedules
+                    SET execution_engine = ?, execution_model = ?, updated_at = ?
+                    WHERE task_type = ?
+                    """,
+                    (normalized_engine, normalized_model, _now_iso(), str(task_type)),
+                )
+            if cursor.rowcount != 1:
+                raise ValueError("automation schedule not found")
+            return self.get_schedule(task_type=task_type)
         finally:
             conn.close()
 
@@ -571,6 +638,79 @@ class AutomationStore:
                 (str(task_type),),
             ).fetchone()
             return self._run_payload(row)
+        finally:
+            conn.close()
+
+    def start_execution(
+        self, *, task_type: str, trigger: str, engine: str, model: str = "",
+    ) -> dict:
+        execution_id = uuid.uuid4().hex[:24]
+        now = _now_iso()
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO automation_executions (
+                        execution_id, task_type, trigger, requested_engine,
+                        actual_engine, model, status, started_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?)
+                    """,
+                    (
+                        execution_id, str(task_type), str(trigger or "scheduled"),
+                        str(engine), str(engine), str(model or ""), now,
+                    ),
+                )
+            return self.get_execution(execution_id)
+        finally:
+            conn.close()
+
+    def finish_execution(
+        self, execution_id: str, *, status: str, error_code: str = "", error: str = "",
+    ) -> dict:
+        normalized = str(status or "").strip().lower()
+        if normalized not in {"completed", "failed"}:
+            raise ValueError("invalid automation execution status")
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    UPDATE automation_executions
+                    SET status = ?, error_code = ?, error = ?, completed_at = ?
+                    WHERE execution_id = ?
+                    """,
+                    (
+                        normalized, str(error_code or "")[:100], str(error or "")[:1000],
+                        _now_iso(), str(execution_id),
+                    ),
+                )
+            return self.get_execution(execution_id)
+        finally:
+            conn.close()
+
+    def get_execution(self, execution_id: str) -> dict:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM automation_executions WHERE execution_id = ?",
+                (str(execution_id),),
+            ).fetchone()
+            return dict(row) if row is not None else {}
+        finally:
+            conn.close()
+
+    def latest_execution(self, *, task_type: str) -> dict:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT * FROM automation_executions
+                WHERE task_type = ? ORDER BY started_at DESC, execution_id DESC LIMIT 1
+                """,
+                (str(task_type),),
+            ).fetchone()
+            return dict(row) if row is not None else {}
         finally:
             conn.close()
 
@@ -854,5 +994,6 @@ class AutomationStore:
             "task_type": str(task_type),
             "schedule": self.get_schedule(task_type=task_type),
             "latest_run": self.latest_run(task_type=task_type),
+            "latest_execution": self.latest_execution(task_type=task_type),
             "pending_candidates": int(pending or 0),
         }

@@ -268,6 +268,8 @@ def infer_bucket_layer(bucket: dict[str, Any] | None) -> str:
         return LAYER_ARCHIVE
     if bucket_type == "archived":
         return LAYER_ARCHIVE
+    if "noise" in tags:
+        return LAYER_ARCHIVE
     if bucket_type in {"source", "raw", "chat_log", "diary_source"} or tags & RAW_SOURCE_TAGS:
         return LAYER_SOURCE_RECORD
     if bucket_type == "dream" or "dream" in tags or "night_dream" in tags:

@@ -1556,6 +1556,9 @@ class RecallPolicy:
         text = str(query or "").strip()
         if not text:
             return True, "empty_query"
+        compact_chars = re.sub(r"[^0-9a-z一-鿿]+", "", text.lower())
+        if len(compact_chars) <= 10 and not self._query_has_explicit_recall_marker(text):
+            return True, "short_message"
         if self.is_auto_query_too_vague(text):
             return True, "auto_vague_query"
         protected_phrases = tuple(extract_protected_phrases(text))

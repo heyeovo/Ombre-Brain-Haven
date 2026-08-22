@@ -637,7 +637,7 @@ class GatewayService:
         )
         self.date_recall_enabled = self._bool_config_value(
             self.gateway_cfg.get("date_recall_enabled"),
-            True,
+            False,
         )
         self.date_recall_budget = max(0, int(self.gateway_cfg.get("date_recall_budget", 520)))
         self.date_recall_max_turns = max(1, min(12, int(self.gateway_cfg.get("date_recall_max_turns", 8))))
@@ -18368,6 +18368,9 @@ class GatewayService:
         return bool(keys and text and all(key in text for key in keys))
 
     def _dynamic_bucket_item_has_reliable_recall_signal(self, query: str, item: dict) -> bool:
+        semantic_score = self._safe_float(item.get("semantic_score"), 0.0)
+        if semantic_score < 0.40:
+            return False
         if (
             self._planner_lexical_direct_signal(item)
             or item.get("exact_anchor_match")

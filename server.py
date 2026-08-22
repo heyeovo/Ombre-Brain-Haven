@@ -10255,6 +10255,7 @@ async def search_chat(
         return "请提供搜索关键词。"
     result = gateway_state_store.search_turns(
         query=query,
+        profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
         session_id=str(session_id or "").strip(),
         since=str(since or "").strip(),
         until=str(until or "").strip(),

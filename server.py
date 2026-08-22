@@ -10244,12 +10244,13 @@ async def introspection(
 async def search_chat(
     query: str,
     session_id: str = "",
+    exclude_session: str = "",
     since: str = "",
     until: str = "",
     role: str = "",
     limit: int = 20,
 ) -> str:
-    """搜索聊天原文。按关键词在历史对话中查找，返回匹配的用户和助手原话。role 可选 user/assistant 只看一方。since/until 格式 YYYY-MM-DD。"""
+    """搜索聊天原文。按关键词在历史对话中查找，返回匹配的用户和助手原话。role 可选 user/assistant 只看一方。since/until 格式 YYYY-MM-DD。exclude_session 排除指定会话（如当前窗口）。"""
     query = str(query or "").strip()
     if not query:
         return "请提供搜索关键词。"
@@ -10257,6 +10258,7 @@ async def search_chat(
         query=query,
         profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
         session_id=str(session_id or "").strip(),
+        exclude_session_id=str(exclude_session or "").strip(),
         since=str(since or "").strip(),
         until=str(until or "").strip(),
         role=str(role or "").strip(),
@@ -13216,6 +13218,7 @@ async def api_search_chat(request):
             query=str(value("q", value("query", "")) or ""),
             profile_id=str(value("profile_id", "default") or "default"),
             session_id=str(value("session_id", "") or ""),
+            exclude_session_id=str(value("exclude_session", "") or ""),
             since=str(value("since", "") or ""),
             until=str(value("until", "") or ""),
             role=str(value("role", "") or ""),

@@ -2176,6 +2176,7 @@ class GatewayStateStore:
         query: str = "",
         profile_id: str = "default",
         session_id: str = "",
+        exclude_session_id: str = "",
         since: str = "",
         until: str = "",
         role: str = "",
@@ -2185,6 +2186,7 @@ class GatewayStateStore:
         safe_profile = str(profile_id or "default").strip() or "default"
         safe_query = str(query or "").strip()
         safe_session = str(session_id or "").strip()
+        safe_exclude = str(exclude_session_id or "").strip()
         safe_role = str(role or "").strip().lower()
         safe_since = str(since or "").strip()
         safe_until = str(until or "").strip()
@@ -2195,6 +2197,9 @@ class GatewayStateStore:
             if safe_session:
                 clauses.append("e.session_id = ?")
                 params.append(safe_session)
+            if safe_exclude:
+                clauses.append("e.session_id != ?")
+                params.append(safe_exclude)
             if safe_since:
                 clauses.append("e.created_at >= ?")
                 params.append(safe_since)

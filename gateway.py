@@ -2482,6 +2482,18 @@ class GatewayService:
                 ):
                     debug.pop(key, None)
             response["debug"] = {**debug, **minimal_debug}
+
+        try:
+            round_id = self.state_store.record_success(session_id, list(recalled_ids or []))
+            if debug_payload is not None:
+                self.state_store.record_injection_debug(session_id, round_id, debug_payload)
+        except Exception as exc:
+            logger.warning(
+                "Gateway hook_recall debug record failed | session=%s error=%s",
+                session_id,
+                exc,
+            )
+
         return JSONResponse(response)
 
     async def handle_recall_eval_debug(self, request: Request) -> JSONResponse:

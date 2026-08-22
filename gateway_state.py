@@ -2272,6 +2272,7 @@ class GatewayStateStore:
 
         def _format(row: sqlite3.Row) -> dict[str, Any]:
             item: dict[str, Any] = {
+                "turn_id": int(row["id"]),
                 "session_id": row["session_id"],
                 "round_id": row["round_id"],
                 "created_at": row["created_at"],
@@ -2293,6 +2294,61 @@ class GatewayStateStore:
             "query": safe_query,
             "count": len(rows),
             "items": [_format(r) for r in rows],
+        }
+
+    def get_turn_context(
+        self,
+        *,
+        turn_id: int,
+        profile_id: str = "default",
+        rounds: int = 3,
+    ) -> dict[str, Any]:
+        safe_profile = str(profile_id or "default").strip() or "default"
+        safe_rounds = max(1, min(20, int(rounds or 3)))
+        conn = self._connect()
+        try:
+            anchor = conn.execute(
+                "SELECT session_id, round_id FROM conversation_turns WHERE id = ? AND profile_id = ?",
+                (int(turn_id), safe_profile),
+            ).fetchone()
+            if not anchor:
+                return {"ok": False, "error": "turn not found"}
+            session_id = anchor["session_id"]
+            anchor_round = int(anchor["round_id"])
+            rows = conn.execute(
+                """
+                SELECT id, session_id, round_id, created_at, user_text, assistant_text, source
+                FROM conversation_turns
+                WHERE profile_id = ? AND session_id = ?
+                  AND round_id BETWEEN ? AND ?
+                ORDER BY round_id ASC
+                """,
+                (safe_profile, session_id, anchor_round - safe_rounds, anchor_round + safe_rounds),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        items = []
+        for r in rows:
+            item: dict[str, Any] = {
+                "turn_id": int(r["id"]),
+                "round_id": int(r["round_id"]),
+                "created_at": r["created_at"],
+                "is_anchor": int(r["round_id"]) == anchor_round,
+            }
+            u = str(r["user_text"] or "").strip()
+            a = str(r["assistant_text"] or "").strip()
+            if u:
+                item["user_text"] = u[:2000]
+            if a:
+                item["assistant_text"] = a[:2000]
+            items.append(item)
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "anchor_round": anchor_round,
+            "rounds": safe_rounds,
+            "items": items,
         }
 
     def list_conversation_turns_between(

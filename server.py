@@ -10267,13 +10267,42 @@ async def search_chat(
         return f"没有找到包含「{query}」的聊天记录。"
     parts = []
     for item in items:
-        lines = [f"[{item['created_at']}] session={item['session_id'][:8]}"]
+        lines = [f"[{item['created_at']}] turn_id={item['turn_id']} session={item['session_id'][:8]}"]
         if item.get("user_text"):
             lines.append(f"  小羊: {item['user_text']}")
         if item.get("assistant_text"):
             lines.append(f"  言之: {item['assistant_text']}")
         parts.append("\n".join(lines))
     return f"找到 {len(items)} 条匹配「{query}」的记录：\n\n" + "\n---\n".join(parts)
+
+
+@mcp.tool()
+async def get_chat_context(
+    turn_id: int,
+    rounds: int = 3,
+) -> str:
+    """展开某条聊天记录的上下文。传入 search_chat 返回的 turn_id，返回前后 N 轮对话。"""
+    result = gateway_state_store.get_turn_context(
+        turn_id=int(turn_id),
+        profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
+        rounds=_int_between(rounds, 3, 1, 20),
+    )
+    if not result.get("ok"):
+        return f"找不到 turn_id={turn_id} 的记录。"
+    items = result.get("items", [])
+    if not items:
+        return "没有上下文记录。"
+    parts = []
+    for item in items:
+        marker = " ← 匹配" if item.get("is_anchor") else ""
+        lines = [f"[round {item['round_id']}] {item['created_at']}{marker}"]
+        if item.get("user_text"):
+            lines.append(f"  小羊: {item['user_text']}")
+        if item.get("assistant_text"):
+            lines.append(f"  言之: {item['assistant_text']}")
+        parts.append("\n".join(lines))
+    header = f"session={result['session_id'][:8]}，第 {result['anchor_round']} 轮 ±{result['rounds']} 轮上下文：\n\n"
+    return header + "\n---\n".join(parts)
 
 
 PROFILE_FACT_CANDIDATE_PATTERN_SPECS = (
@@ -13195,6 +13224,41 @@ async def api_search_chat(request):
         return JSONResponse(result)
     except Exception as exc:
         logger.warning("chat search failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/chat-context", methods=["GET", "POST"])
+async def api_chat_context(request):
+    """Get surrounding turns for a specific turn_id."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    params = dict(getattr(request, "query_params", {}) or {})
+    body = {}
+    try:
+        parsed = await request.json()
+        if isinstance(parsed, dict):
+            body = parsed
+    except Exception:
+        body = {}
+
+    def value(name: str, default: str = ""):
+        return body.get(name, params.get(name, default))
+
+    try:
+        turn_id = int(value("turn_id", "0") or 0)
+        if not turn_id:
+            return JSONResponse({"error": "turn_id is required"}, status_code=400)
+        result = gateway_state_store.get_turn_context(
+            turn_id=turn_id,
+            profile_id=str(value("profile_id", "default") or "default"),
+            rounds=_int_between(value("rounds", 3), 3, 1, 20),
+        )
+        return JSONResponse(result)
+    except Exception as exc:
+        logger.warning("chat context failed: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 

@@ -541,6 +541,8 @@ Codex 接线时注意：
 | `reminder_create/list/update` | 管理独立照顾备忘 |
 | `darkroom_enter/rooms/view` | 写入、列出和在解锁后读取 Darkroom |
 | `trace` / `pulse` / `introspection` | 近期轨迹、系统脉搏与内省 |
+| `search_chat` | 按关键词搜索聊天原文（FTS5 + LIKE）；支持日期/角色/会话过滤和排除当前窗口 |
+| `get_chat_context` | 按 turn_id 展开某条聊天记录的前后 N 轮上下文 |
 
 Journey 是关系阶段索引，不属于普通召回池。普通关键词、向量、日期、开窗浮现和关联扩散都不会带出 journey；Dashboard 使用独立关系轨迹页查看并人工纠错，普通记忆库不混排。显式调用 `breath(domain="journey")` 只返回阶段目录，选中其中的 `bucket_id` 后再用 `read_bucket(bucket_id)` 读取完整阶段记录与证据桶名称/ID；需要核实时再按证据 ID 读取原桶。普通聊天 MCP 和通用 Dashboard 新建入口都不能创建、追加、修改或删除 journey；公共 `hold` 即使传 `journey=True` 或 `domain="journey"` 也会拒绝，阶段状态只由 Haven 后台生命周期维护，认证的 journey 专用 REST 接口保留人工纠错能力。
 

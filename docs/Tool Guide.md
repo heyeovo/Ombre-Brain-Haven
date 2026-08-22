@@ -50,6 +50,12 @@
 - 给用户查看只用 darkroom_view。darkroom_view 必须同时满足 active、锁门时间已过；没解锁返回 unlock_at；可按 room_id 读取该房间全部 revisions 正文和每次写入时间。
 - 让用户可见并公开暗房内容：darkroom_release(entry_id="xxx", reason="用户问了那件事")。会直接返回正文，只在明确想让内容可见时调用。
 
+聊天原文搜索：
+- 用户提到过去的对话原文（"你/我之前说过……"、"我们聊过……"），而当前上下文和记忆桶都不足时：search_chat(query="关键词")。支持 session_id 限定窗口、since/until 日期范围、role 过滤说话人、exclude_session 排除当前窗口。
+- 搜索返回匹配列表，每条带 turn_id。想看某条的前后上下文：get_chat_context(turn_id=xxx, rounds=3)，rounds 控制前后几轮，默认 3，上限 20。
+- 两步操作：先搜概览，锁定目标后再展开上下文。不要一次性展开所有结果的上下文。
+- 聊天原文搜索是关键词匹配（FTS + LIKE），不是语义搜索；搜不到时换关键词或用日期范围缩小。
+
 自省：
 - 清醒回看最近普通记忆：introspection()。
 

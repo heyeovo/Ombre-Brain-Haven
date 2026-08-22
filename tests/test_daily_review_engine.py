@@ -129,7 +129,30 @@ class DailyReviewEngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("当天旧稿", reference)
         self.assertNotIn("更早内容", reference)
 
-    async def test_chat_keeps_full_text_and_work_uses_summary_plus_tail(self):
+    async def test_within_budget_keeps_all_work_text_and_only_calls_final_review_once(self):
+        class Store:
+            @staticmethod
+            def list_daily_reviews(**kwargs):
+                return []
+
+            @staticmethod
+            def list_daily_review_turns(**kwargs):
+                return [
+                    {
+                        "session_id": "work-1", "mode": "work", "session_title": "工作",
+                        "user_text": f"工作问题{i}", "assistant_text": f"工作回答{i}",
+                    }
+                    for i in range(12)
+                ]
+
+            @staticmethod
+            def get_cc_persona(persona_id):
+                return {"id": persona_id, "name": "言之", "user_name": "小羊", "base_prompt": "你是言之。"}
+
+            @staticmethod
+            def upsert_daily_review(**kwargs):
+                return kwargs
+
         engine = DailyReviewEngine(
             {
                 "daily_review": {
@@ -139,9 +162,25 @@ class DailyReviewEngineTest(unittest.IsolatedAsyncioTestCase):
                     "work_tail_turns": 10,
                 }
             },
+            state_store=Store(),
+        )
+        engine._create_message = AsyncMock(return_value="今天继续推进了工作。")
+        await engine.generate(profile_id="default", persona_id="ombre", review_date="2026-08-08")
+
+        self.assertEqual(engine._create_message.await_count, 1)
+        final_call = engine._create_message.await_args.kwargs
+        self.assertIn("工作问题0", final_call["user"])
+        self.assertIn("工作问题11", final_call["user"])
+        self.assertNotIn("较早对话脉络摘要", final_call["user"])
+
+    async def test_over_budget_summarizes_older_work_and_keeps_recent_turns_verbatim(self):
+        engine = DailyReviewEngine(
+            {"daily_review": {"model": "m", "base_url": "https://relay", "api_key": "k"}},
             state_store=SimpleNamespace(),
         )
-        engine._create_message = AsyncMock(return_value="较早阶段已经完成范围确认，正在实现。")
+        engine.max_input_chars = 2000
+        engine.work_tail_turns = 3
+        engine._create_message = AsyncMock(return_value="较早阶段摘要")
         persona = {
             "name": "言之",
             "user_name": "小羊",
@@ -151,29 +190,61 @@ class DailyReviewEngineTest(unittest.IsolatedAsyncioTestCase):
         }
         turns = [
             {
-                "session_id": "chat-1", "mode": "chat", "session_title": "闲聊",
-                "user_text": "闲聊最早原文", "assistant_text": "闲聊回复",
-            },
+                "session_id": "work-1", "mode": "work", "session_title": "工作",
+                "user_text": f"问题{i}-" + "甲" * 180, "assistant_text": f"回答{i}-" + "乙" * 180,
+            }
+            for i in range(12)
+        ]
+
+        material, session_ids = await engine._materials(turns, persona)
+
+        self.assertEqual(session_ids, ["work-1"])
+        self.assertIn("较早对话脉络摘要", material)
+        self.assertIn("问题11-", material)
+        self.assertNotIn("问题0-", material)
+        self.assertLessEqual(len(material), engine.max_input_chars)
+        self.assertEqual(engine._create_message.await_count, 1)
+        summary_call = engine._create_message.await_args.kwargs
+        self.assertIn("你是言之。", summary_call["system"])
+        self.assertIn("认真记得彼此。", summary_call["system"])
+
+    async def test_over_budget_keeps_every_work_window_and_summarizes_each_older_section(self):
+        engine = DailyReviewEngine(
+            {"daily_review": {"model": "m", "base_url": "https://relay", "api_key": "k"}},
+            state_store=SimpleNamespace(),
+        )
+        engine.max_input_chars = 4000
+        engine.work_tail_turns = 2
+        engine._create_message = AsyncMock(side_effect=["窗口一摘要", "窗口二摘要"])
+        persona = {"name": "言之", "user_name": "小羊", "base_prompt": "你是言之。"}
+        turns = [
             *[
                 {
-                    "session_id": "work-1", "mode": "work", "session_title": "工作",
-                    "user_text": f"工作问题{i}", "assistant_text": f"工作回答{i}",
+                    "session_id": "work-1", "mode": "work", "session_title": "项目一",
+                    "user_text": f"一问{i}-" + "甲" * 220, "assistant_text": f"一答{i}-" + "乙" * 220,
                 }
-                for i in range(12)
+                for i in range(8)
+            ],
+            *[
+                {
+                    "session_id": "work-2", "mode": "work", "session_title": "项目二",
+                    "user_text": f"二问{i}-" + "丙" * 220, "assistant_text": f"二答{i}-" + "丁" * 220,
+                }
+                for i in range(8)
             ],
         ]
 
         material, session_ids = await engine._materials(turns, persona)
 
-        self.assertEqual(session_ids, ["chat-1", "work-1"])
-        self.assertIn("闲聊最早原文", material)
-        self.assertIn("较早对话脉络摘要", material)
-        self.assertIn("工作问题11", material)
-        self.assertNotIn("工作问题0\n", material)
-        self.assertEqual(engine._create_message.await_count, 1)
-        summary_call = engine._create_message.await_args.kwargs
-        self.assertIn("你是言之。", summary_call["system"])
-        self.assertIn("认真记得彼此。", summary_call["system"])
+        self.assertEqual(session_ids, ["work-1", "work-2"])
+        self.assertIn("【工作窗口：项目一】", material)
+        self.assertIn("【工作窗口：项目二】", material)
+        self.assertIn("一问7-", material)
+        self.assertIn("二问7-", material)
+        self.assertIn("窗口一摘要", material)
+        self.assertIn("窗口二摘要", material)
+        self.assertEqual(engine._create_message.await_count, 2)
+        self.assertLessEqual(len(material), engine.max_input_chars)
 
     async def test_manual_edit_requires_explicit_override_before_regeneration(self):
         class Store:

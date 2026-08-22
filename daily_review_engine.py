@@ -196,21 +196,23 @@ class DailyReviewEngine:
             grouped[str(turn.get("session_id") or "")].append(turn)
         user_name = str(persona.get("user_name") or "用户")
         assistant_name = str(persona.get("name") or "助手")
-        blocks: list[str] = []
+        windows: list[dict[str, Any]] = []
         session_ids: list[str] = []
         for session_id, items in grouped.items():
             if not session_id:
                 continue
             session_ids.append(session_id)
             mode = str(items[0].get("mode") or "chat")
-            selected = items if mode == "chat" else items[-self.work_tail_turns :]
             title = str(items[0].get("session_title") or "未命名窗口").strip()
+            windows.append({"items": items, "mode": mode, "title": title})
+
+        def render_block(window: dict[str, Any], selected_count: int, summary: str = "") -> str:
+            items = window["items"]
+            mode = window["mode"]
+            selected = items if selected_count >= len(items) else items[-selected_count:]
+            title = window["title"]
             lines = [f"【{'闲聊' if mode == 'chat' else '工作'}窗口：{title}】"]
             if mode == "work" and len(items) > len(selected):
-                try:
-                    summary = await self._summarize_work_history(items[: -len(selected)], persona)
-                except Exception:
-                    summary = ""
                 if summary:
                     lines.append(f"较早对话脉络摘要：{summary}")
                 else:
@@ -223,10 +225,63 @@ class DailyReviewEngine:
                     lines.append(f"{user_name}：{user_text}")
                 if assistant_text:
                     lines.append(f"{assistant_name}：{assistant_text}")
-            blocks.append("\n\n".join(lines))
-        material = "\n\n---\n\n".join(blocks)
-        if len(material) > self.max_input_chars:
-            material = "（当天对话超过输入边界，以下保留靠后的内容。）\n\n" + material[-self.max_input_chars :]
+            return "\n\n".join(lines)
+
+        full_counts = [len(window["items"]) for window in windows]
+        material = "\n\n---\n\n".join(
+            render_block(window, full_counts[index]) for index, window in enumerate(windows)
+        )
+        if len(material) <= self.max_input_chars:
+            return material, session_ids
+
+        selected_counts = [
+            len(window["items"])
+            if window["mode"] == "chat"
+            else min(len(window["items"]), self.work_tail_turns)
+            for window in windows
+        ]
+        summary_reserve = "摘" * 400
+
+        def preview(counts: list[int]) -> str:
+            return "\n\n---\n\n".join(
+                render_block(
+                    window,
+                    counts[index],
+                    summary_reserve if counts[index] < len(window["items"]) else "",
+                )
+                for index, window in enumerate(windows)
+            )
+
+        # 在每个工作窗口的最低尾部之上，逐轮公平补回较近原文；不再从最终材料尾部硬截断。
+        made_progress = True
+        while made_progress:
+            made_progress = False
+            for index, window in enumerate(windows):
+                if window["mode"] != "work" or selected_counts[index] >= len(window["items"]):
+                    continue
+                candidate = list(selected_counts)
+                candidate[index] += 1
+                if len(preview(candidate)) <= self.max_input_chars:
+                    selected_counts = candidate
+                    made_progress = True
+
+        summaries: dict[int, str] = {}
+        for index, window in enumerate(windows):
+            selected_count = selected_counts[index]
+            if window["mode"] != "work" or selected_count >= len(window["items"]):
+                continue
+            try:
+                summary = await self._summarize_work_history(
+                    window["items"][: -selected_count], persona,
+                )
+            except Exception:
+                summary = ""
+            summaries[index] = summary.strip()[:400]
+
+        material = "\n\n---\n\n".join(
+            render_block(window, selected_counts[index], summaries.get(index, ""))
+            for index, window in enumerate(windows)
+        )
         return material, session_ids
 
     def _continuity_reference(

@@ -127,6 +127,8 @@ Haven 的通用自动化底座以 `state/automations.sqlite` 持久保存日回�
 
 API 路线继续使用 Haven 已有的日回顾模型连接。Claude Pro 路线由 Haven 调度后调用 Dashboard 的受限内部 runner：只接受 `daily_review` / `weekly_journey`、固定 Sonnet/Opus ID、无工具、单并发、一次性 Agent SDK session，OAuth 凭据仍只存在 Dashboard `/home/cc/.claude`。Haven 只保存引擎/模型选择与非秘密运行结果；任何 Pro 额度、OAuth、网络或输出校验失败都会停止并显示，必须由用户人工换线后重试，不做自动 fallback。启用前按 [`ENV_VARS.md`](ENV_VARS.md) 在两端配置 runner URL/共享 token。
 
+日回顾先汇总目标 OB 日内各窗口保存的用户与助手可见正文。完整材料不超过 `daily_review.max_input_chars` 时直接一次生成；只有超预算才压缩工作窗口的较早轮次，并为每个工作窗口保留 `work_tail_turns`（默认 10）轮最近原文。多个工作窗口轮流补回较近原文，不再从最终材料尾部整体截断；thinking 与 Bash、Read、Grep、MCP 等工具正文不属于日回顾输入。
+
 `weekly_journey` 从上次人工确认的截止日下一天连续读取到最近完整 OB 日；失败两天后手动补跑会自然形成 7+2 天区间，下次周任务只处理剩余天数。积压单次最多处理最早 31 天，确认后再继续下一段。输入包括当前开放 journey、区间日回顾、新桶、独立 feel 与旧桶新增的 feel 年轮；旧 `daily_impression`、`weekly_impression`、`relationship_weather` feel 明确排除。同一协作者已有待确认/执行中/待重试候选时不重复调用模型。
 
 候选只能经认证接口人工编辑、拒绝或确认。关系轨迹页显示输入完整性、原始 preview、当前 draft/revision/hash、证据桶和预计差异。编辑保存为新 revision 并保留原始 preview；确认只接收页面已展示 revision 的 hash，由服务端冻结 approved payload/hash。白名单执行器当前只注册 `weekly_journey`：`no_change` 不写 journey，但人工确认后与正常写入候选一样推进“已梳理至”；`append_current` 只追加开放阶段，`transition` 使用独立 `:close` / `:create` operation ID。候选完成与游标推进为同一 SQLite 事务；失败、拒绝、冲突和仅生成均不推进。

@@ -56,7 +56,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `repair_raw_archive_thinking.py` | 历史档案正文/thinking 一次性幂等修复；默认 dry-run，只更新正文或 thinking 确有差异的消息；`--apply` 使用整批事务从 Haven 私密归档回填并重建正文哈希/FTS，异常时整批回滚 |
 | `recall_policy.py` | 召回策略（vague 闸、相对日期、分词整词判断） |
 | `reflection_engine.py` | 反思/日印象引擎 |
-| `daily_review_engine.py` | 默认每日 04:30 按协作者生成第一人称日回顾；D 日材料固定为 D 日 04:00–D+1 日 04:00，连续性参考仍为 D-2、D-1 两条日回顾，可由逐任务 router 选择 API 或 Pro，结果不进记忆桶 |
+| `daily_review_engine.py` | 默认每日 04:30 按协作者生成第一人称日回顾；D 日材料固定为 D 日 04:00–D+1 日 04:00，安全字符预算内直接使用全部可见正文，超预算才按工作窗口压缩较早轮次并保留每窗最近原文；连续性参考仍为 D-2、D-1 两条日回顾，可由逐任务 router 选择 API 或 Pro，结果不进记忆桶 |
 | `persona_engine.py` / `portrait_engine.py` | 用户画像（persona 状态 + 画像生成） |
 | `memory_*.py` | 记忆分层：layers/nodes/edges/metadata/moments/diffusion/relevance/write_gate |
 | `todo_store.py` / `reminder_store.py` | 待办 / 照顾备忘持久化 |

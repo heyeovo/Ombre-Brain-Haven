@@ -550,6 +550,28 @@ class GatewayStateStore:
             )
             """
         )
+        try:
+            conn.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS conversation_turns_fts
+                USING fts5(user_text, assistant_text, session_id, content='conversation_turns', content_rowid='id')
+                """
+            )
+            self._fts_enabled = True
+        except sqlite3.OperationalError:
+            self._fts_enabled = False
+        if self._fts_enabled:
+            indexed = conn.execute(
+                "SELECT COUNT(*) FROM conversation_turns_fts"
+            ).fetchone()[0]
+            total = conn.execute(
+                "SELECT COUNT(*) FROM conversation_turns"
+            ).fetchone()[0]
+            if indexed == 0 and total > 0:
+                conn.execute(
+                    "INSERT INTO conversation_turns_fts(rowid, user_text, assistant_text, session_id) "
+                    "SELECT id, user_text, assistant_text, session_id FROM conversation_turns"
+                )
         conn.commit()
         conn.close()
 
@@ -1196,6 +1218,14 @@ class GatewayStateStore:
         # conversation_turns 现在是 cc / Polaris / API 共用的长期原文存储。
         # max_entries 参数为兼容旧调用保留，但不再据此删除历史；读取量由分页控制。
         _ = max_entries
+        if getattr(self, "_fts_enabled", False):
+            row_id = cursor.lastrowid
+            if row_id:
+                conn.execute(
+                    "INSERT OR REPLACE INTO conversation_turns_fts(rowid, user_text, assistant_text, session_id) "
+                    "VALUES (?, ?, ?, ?)",
+                    (row_id, str(user_text or ""), str(assistant_text or ""), safe_session_id),
+                )
         conn.commit()
         turn_id = int(cursor.lastrowid or 0)
         conn.close()
@@ -1906,6 +1936,12 @@ class GatewayStateStore:
                     """,
                     [turn_id, next_round, safe_profile_id, safe_session_id, *requested_attachment_ids],
                 )
+            if getattr(self, "_fts_enabled", False) and turn_id:
+                conn.execute(
+                    "INSERT OR REPLACE INTO conversation_turns_fts(rowid, user_text, assistant_text, session_id) "
+                    "VALUES (?, ?, ?, ?)",
+                    (turn_id, str(user_text or ""), str(assistant_text or ""), safe_session_id),
+                )
             conn.commit()
             row = conn.execute(
                 """
@@ -2068,6 +2104,12 @@ class GatewayStateStore:
                 """,
                 (safe_profile_id, safe_session_id, safe_source, len(turns)),
             )
+            if getattr(self, "_fts_enabled", False):
+                conn.execute("DELETE FROM conversation_turns_fts")
+                conn.execute(
+                    "INSERT INTO conversation_turns_fts(rowid, user_text, assistant_text, session_id) "
+                    "SELECT id, user_text, assistant_text, session_id FROM conversation_turns"
+                )
             conn.commit()
             return {
                 "session_id": safe_session_id,
@@ -2127,6 +2169,131 @@ class GatewayStateStore:
             }
             for row in rows
         ]
+
+    def search_turns(
+        self,
+        *,
+        query: str = "",
+        profile_id: str = "default",
+        session_id: str = "",
+        since: str = "",
+        until: str = "",
+        role: str = "",
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        safe_limit = max(1, min(50, int(limit or 20)))
+        safe_profile = str(profile_id or "default").strip() or "default"
+        safe_query = str(query or "").strip()
+        safe_session = str(session_id or "").strip()
+        safe_role = str(role or "").strip().lower()
+        safe_since = str(since or "").strip()
+        safe_until = str(until or "").strip()
+
+        def _extra_filters() -> tuple[str, list[Any]]:
+            clauses: list[str] = []
+            params: list[Any] = []
+            if safe_session:
+                clauses.append("e.session_id = ?")
+                params.append(safe_session)
+            if safe_since:
+                clauses.append("e.created_at >= ?")
+                params.append(safe_since)
+            if safe_until:
+                clauses.append("e.created_at <= ?")
+                params.append(safe_until)
+            return (" AND " + " AND ".join(clauses) if clauses else ""), params
+
+        extra_sql, extra_params = _extra_filters()
+
+        def _fts_search(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+            if not getattr(self, "_fts_enabled", False) or not safe_query:
+                return []
+            match = '"' + safe_query.replace('"', '""') + '"'
+            try:
+                return conn.execute(
+                    f"""
+                    SELECT e.*
+                    FROM conversation_turns_fts f
+                    JOIN conversation_turns e ON e.id = f.rowid
+                    WHERE conversation_turns_fts MATCH ?
+                      AND e.profile_id = ?
+                      {extra_sql}
+                    ORDER BY bm25(conversation_turns_fts), e.created_at DESC, e.id DESC
+                    LIMIT ?
+                    """,
+                    [match, safe_profile, *extra_params, safe_limit],
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+
+        def _like_search(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+            if not safe_query:
+                return []
+            return conn.execute(
+                f"""
+                SELECT e.*
+                FROM conversation_turns e
+                WHERE e.profile_id = ?
+                  AND (e.user_text LIKE ? OR e.assistant_text LIKE ?)
+                  {extra_sql}
+                ORDER BY e.created_at DESC, e.id DESC
+                LIMIT ?
+                """,
+                [safe_profile, f"%{safe_query}%", f"%{safe_query}%", *extra_params, safe_limit],
+            ).fetchall()
+
+        def _recent(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+            return conn.execute(
+                f"""
+                SELECT e.*
+                FROM conversation_turns e
+                WHERE e.profile_id = ?
+                  {extra_sql}
+                ORDER BY e.created_at DESC, e.id DESC
+                LIMIT ?
+                """,
+                [safe_profile, *extra_params, safe_limit],
+            ).fetchall()
+
+        conn = self._connect()
+        try:
+            rows = _fts_search(conn) if safe_query else []
+            if len(rows) < safe_limit:
+                seen = {int(r["id"]) for r in rows}
+                fallback = _like_search(conn) if safe_query else _recent(conn)
+                for r in fallback:
+                    if int(r["id"]) not in seen:
+                        rows.append(r)
+                        seen.add(int(r["id"]))
+                        if len(rows) >= safe_limit:
+                            break
+        finally:
+            conn.close()
+
+        def _format(row: sqlite3.Row) -> dict[str, Any]:
+            item: dict[str, Any] = {
+                "session_id": row["session_id"],
+                "round_id": row["round_id"],
+                "created_at": row["created_at"],
+                "source": row["source"] or "gateway",
+            }
+            u = str(row["user_text"] or "").strip()
+            a = str(row["assistant_text"] or "").strip()
+            if safe_role == "user":
+                item["user_text"] = u[:2000]
+            elif safe_role == "assistant":
+                item["assistant_text"] = a[:2000]
+            else:
+                item["user_text"] = u[:2000]
+                item["assistant_text"] = a[:2000]
+            return item
+
+        return {
+            "ok": True,
+            "query": safe_query,
+            "count": len(rows),
+            "items": [_format(r) for r in rows],
+        }
 
     def list_conversation_turns_between(
         self,

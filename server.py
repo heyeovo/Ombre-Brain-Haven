@@ -10240,6 +10240,41 @@ async def introspection(
     return header + "\n---\n".join(parts) + connection_hint + crystal_hint + profile_hint
 
 
+@mcp.tool()
+async def search_chat(
+    query: str,
+    session_id: str = "",
+    since: str = "",
+    until: str = "",
+    role: str = "",
+    limit: int = 20,
+) -> str:
+    """搜索聊天原文。按关键词在历史对话中查找，返回匹配的用户和助手原话。role 可选 user/assistant 只看一方。since/until 格式 YYYY-MM-DD。"""
+    query = str(query or "").strip()
+    if not query:
+        return "请提供搜索关键词。"
+    result = gateway_state_store.search_turns(
+        query=query,
+        session_id=str(session_id or "").strip(),
+        since=str(since or "").strip(),
+        until=str(until or "").strip(),
+        role=str(role or "").strip(),
+        limit=_int_between(limit, 20, 1, 50),
+    )
+    items = result.get("items", [])
+    if not items:
+        return f"没有找到包含「{query}」的聊天记录。"
+    parts = []
+    for item in items:
+        lines = [f"[{item['created_at']}] session={item['session_id'][:8]}"]
+        if item.get("user_text"):
+            lines.append(f"  小羊: {item['user_text']}")
+        if item.get("assistant_text"):
+            lines.append(f"  言之: {item['assistant_text']}")
+        parts.append("\n".join(lines))
+    return f"找到 {len(items)} 条匹配「{query}」的记录：\n\n" + "\n---\n".join(parts)
+
+
 PROFILE_FACT_CANDIDATE_PATTERN_SPECS = (
     ("preference", "likes", "喜欢", r"\s*(?:很|最|一直|特别|偏)?喜欢\s*([^。；;，,\n]{1,32})"),
     ("preference", "dislikes", "不喜欢", r"\s*(?:很|最|一直|特别)?不喜欢\s*([^。；;，,\n]{1,32})"),
@@ -13123,6 +13158,42 @@ async def api_ingest_raw(request):
         return JSONResponse(result)
     except Exception as exc:
         logger.warning("raw ingest failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/search-chat", methods=["GET", "POST"])
+async def api_search_chat(request):
+    """Full-text search over conversation_turns (daily chat history)."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+
+    params = dict(getattr(request, "query_params", {}) or {})
+    body = {}
+    try:
+        parsed = await request.json()
+        if isinstance(parsed, dict):
+            body = parsed
+    except Exception:
+        body = {}
+
+    def value(name: str, default: str = ""):
+        return body.get(name, params.get(name, default))
+
+    try:
+        result = gateway_state_store.search_turns(
+            query=str(value("q", value("query", "")) or ""),
+            profile_id=str(value("profile_id", "default") or "default"),
+            session_id=str(value("session_id", "") or ""),
+            since=str(value("since", "") or ""),
+            until=str(value("until", "") or ""),
+            role=str(value("role", "") or ""),
+            limit=_int_between(value("limit", 20), 20, 1, 50),
+        )
+        return JSONResponse(result)
+    except Exception as exc:
+        logger.warning("chat search failed: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 

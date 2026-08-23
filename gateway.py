@@ -13789,6 +13789,17 @@ class GatewayService:
         normalized = self._normalized_recall_query(text)
         if normalized:
             terms.extend(self._locatable_query_terms(normalized))
+
+        specific = self.recall_policy.specific_query_terms(text)
+        terms.extend(specific)
+
+        compact_query = self._compact_lookup_key(text)
+        for i in range(len(specific) - 1):
+            merged = str(specific[i]) + str(specific[i + 1])
+            merged_key = self._compact_lookup_key(merged)
+            if merged_key and merged_key in compact_query:
+                terms.append(merged)
+
         output: list[str] = []
         seen: set[str] = set()
         for term in terms:

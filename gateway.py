@@ -22003,23 +22003,43 @@ async function loadRounds(sid, row) {
     let html = '<h3 style="margin-bottom:12px;font-size:14px;color:#8b949e;font-family:monospace">' + sid + '</h3>';
     for (const item of d.items) {
       const p = item.payload || {};
+      const isHook = !!(p.hook_recall_debug);
       const qp = p.query_planner_debug || {};
+      const hr = p.hook_recall_debug || {};
+      const ds = p.domain_sentinel_debug || {};
       const pt = p.prepare_timing_debug || {};
       const total = pt.total_ms || 0;
-      const steps = pt.steps_ms || {};
-      const tagCls = total > 2000 ? 'tag-slow' : total > 500 ? 'tag-ok' : 'tag-fast';
-      const reason = qp.trigger_reason || '';
+      const reason = qp.trigger_reason || qp.skip_reason || hr.skip_reason || '';
+      const tagCls = isHook ? (reason ? 'tag-reason' : 'tag-fast') : (total > 2000 ? 'tag-slow' : total > 500 ? 'tag-ok' : 'tag-fast');
+      const timeLabel = isHook ? (hr.mode || 'hook') : (total + 'ms');
       let stepHtml = '';
-      for (const [k, v] of Object.entries(steps)) {
-        if (v > 0) stepHtml += '<span class="bucket-tag">' + k + ': ' + v + 'ms</span> ';
+      if (!isHook) {
+        const steps = pt.steps_ms || {};
+        for (const [k, v] of Object.entries(steps)) {
+          if (v > 0) stepHtml += '<span class="bucket-tag">' + k + ': ' + v + 'ms</span> ';
+        }
       }
       let bucketsHtml = '';
-      const rws = p.recall_why_summary || {};
-      for (const [bid, bw] of Object.entries(rws.by_bucket_id || {})) {
-        const cls = bw.final_status === 'injected' ? 'bucket-injected' : 'bucket-suppressed';
-        const name = bw.bucket_name || bid;
-        const reasons = (bw.admission_reasons || []).join(', ');
-        bucketsHtml += '<span class="bucket-tag ' + cls + '" title="' + reasons + '">' + name + '</span> ';
+      if (isHook) {
+        for (const rb of (p.recalled_bucket_debug || [])) {
+          const name = rb.name || rb.bucket_id || '?';
+          const score = rb.score != null ? ' (' + rb.score.toFixed(3) + ')' : '';
+          bucketsHtml += '<span class="bucket-tag bucket-injected" title="' + (rb.admission_reason || 'admitted') + '">' + name + score + '</span> ';
+        }
+        for (const sb of (p.suppressed_bucket_candidates || [])) {
+          const name = sb.name || sb.bucket_id || '?';
+          const reason = sb.admission_reason || sb.blocked_reason || 'suppressed';
+          const score = sb.score != null ? ' (' + sb.score.toFixed(3) + ')' : '';
+          bucketsHtml += '<span class="bucket-tag bucket-suppressed" title="' + reason + '">' + name + score + '</span> ';
+        }
+      } else {
+        const rws = p.recall_why_summary || {};
+        for (const [bid, bw] of Object.entries(rws.by_bucket_id || {})) {
+          const cls = bw.final_status === 'injected' ? 'bucket-injected' : 'bucket-suppressed';
+          const name = bw.bucket_name || bid;
+          const reasons = (bw.admission_reasons || []).join(', ');
+          bucketsHtml += '<span class="bucket-tag ' + cls + '" title="' + reasons + '">' + name + '</span> ';
+        }
       }
       let finalMsgsHtml = '';
       const fm = p.final_messages;
@@ -22031,22 +22051,30 @@ async function loadRounds(sid, row) {
           finalMsgsHtml += '<div class="final-msg"><b>[' + i + ']</b> <b>' + m.role + '</b>: ' + content.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>';
         }
       }
+      const injectedIds = p.injected_bucket_ids || p.recalled_bucket_ids || [];
+      const suppressedCount = (p.suppressed_bucket_candidates || []).length || p.suppressed_bucket_count || 0;
+      const recalledCount = (p.recalled_bucket_debug || []).length || p.recalled_moment_count || 0;
+      let domainHtml = '';
+      if (ds.domains && ds.domains.length) {
+        domainHtml = '<div class="meta">domains: ' + ds.domains.join(', ') + (ds.skip_applied ? ' <span class="tag tag-reason">skipped</span>' : '') + '</div>';
+      }
       html += '<div class="round-card" onclick="this.classList.toggle(\'open\')">' +
         '<div class="head">' +
-          '<span class="meta">Round ' + item.round_id + ' | ' + item.created_at + '</span>' +
-          '<span class="tag ' + tagCls + '">' + total + 'ms</span>' +
+          '<span class="meta">Round ' + item.round_id + ' | ' + item.created_at + (isHook ? ' | hook' : '') + '</span>' +
+          '<span class="tag ' + tagCls + '">' + timeLabel + '</span>' +
           (reason ? '<span class="tag tag-reason">' + reason + '</span>' : '') +
           '<span style="font-size:10px;color:#484f58;margin-left:4px">&#9660;</span>' +
         '</div>' +
         '<div class="query">' + (p.query_preview || '').slice(0, 200) + '</div>' +
-        '<div class="meta">steps: ' + (stepHtml || '(none)') + '</div>' +
+        (stepHtml ? '<div class="meta">steps: ' + stepHtml + '</div>' : '') +
+        domainHtml +
         (bucketsHtml ? '<div class="meta">buckets: ' + bucketsHtml + '</div>' : '') +
         '<div class="round-detail-expanded">' +
           ((p.recalled_memory || '') ? '<div class="detail-section"><div class="title">Recalled Memory</div><div class="body">' + p.recalled_memory.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div></div>' : '') +
           ((p.stable_context || '') ? '<div class="detail-section"><div class="title">Stable Context</div><div class="body">' + p.stable_context.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div></div>' : '') +
           ((p.dynamic_context || '') ? '<div class="detail-section"><div class="title">Dynamic Context</div><div class="body">' + p.dynamic_context.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div></div>' : '') +
           (finalMsgsHtml ? '<div class="detail-section"><div class="title">Final Messages (' + fm.length + ')</div>' + finalMsgsHtml + '</div>' : '') +
-          '<div class="detail-section"><div class="title">Debug</div><div class="meta">injected_buckets=' + JSON.stringify(p.injected_bucket_ids) + ' | recalled=' + (p.recalled_moment_count || 0) + ' | suppressed=' + (p.suppressed_bucket_count || 0) + ' | diffused=' + (p.diffused_item_count || 0) + ' | handoff_first=' + (pt.needs_handoff_first || false) + '</div></div>' +
+          '<div class="detail-section"><div class="title">Debug</div><div class="meta">injected=' + JSON.stringify(injectedIds) + ' | recalled=' + recalledCount + ' | suppressed=' + suppressedCount + (isHook ? ' | search_query=' + (hr.search_query || '(none)') + ' | candidates=' + (hr.candidate_count || 0) : ' | diffused=' + (p.diffused_item_count || 0) + ' | handoff_first=' + (pt.needs_handoff_first || false)) + '</div></div>' +
         '</div>' +
       '</div>';
     }

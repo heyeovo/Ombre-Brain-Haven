@@ -76,11 +76,86 @@ _select_dynamic_buckets                     gateway.py ~16509
 | `semantic_session_dedupe_threshold` | `0.90` | 会话语义去重阈值 |
 | `_RECALL_EXCLUDED_DOMAINS` | `journey, journal` | 动态召回排除的域 |
 
+## Admission Gate 详细路径
+
+```
+_admit_bucket_for_recall                    gateway.py ~17628
+  -> _bucket_evidence_labels                证据标签（distinctive_anchor, strong_semantic 等）
+  -> _anchor_plan_direct_rejection          锚点硬拒（must_groups 全 AND）
+  -> recall_policy.assess                   recall_policy.py ~2763
+       -> auto_too_vague 判定               来自 is_auto_query_too_vague (recall_policy.py:1622)
+       -> topic_evidence 检查
+  -> discriminative_anchor_missing 检查     gateway.py ~17677
+  -> non_explicit_query 准入               （较宽松，不检查 topic evidence）
+  -> activated_axis_mismatch               桶不在 query 的 activated axis 上
+  -> semantic_only                         只有语义信号没有关键词信号
+  -> query_topic_evidence_missing          桶不包含 query 的 topic 证据词
+  -> relationship_background_without_query_topic_evidence
+```
+
+### auto_vague 判定链 (is_auto_query_too_vague)
+
+```
+is_auto_query_too_vague                     recall_policy.py ~1622
+  -> _is_reaction_only_query               纯反应（嗯/哦/好的）→ vague
+  -> _is_probe_only_query                  纯探测 → vague
+  -> _is_short_casual_only_query           短闲聊 → vague
+  -> query_has_explicit_entity_marker      有实体标记 → NOT vague
+  -> _query_has_relative_date_recall_hint  有相对日期 → NOT vague
+  -> _is_affection_only_query              纯情感 → vague
+  -> is_detail_read_query                  详细阅读 → NOT vague
+  -> locatable_query_terms                 有可定位词 → NOT vague（POS 过滤严格，常见词过不了）
+  -> is_emotional_reason_lookup            情感原因查询 → NOT vague
+  -> _query_has_low_signal_shell           低信号壳 → vague
+  -> AUTO_VAGUE_RECALL_MARKERS check       最终兜底
+```
+
+### search_query 提取链
+
+```
+_dynamic_recall_search_query                gateway.py ~13111
+  → _memory_sentinel_searchable_residue_terms  gateway.py ~13784
+    → _locatable_query_terms (recall_policy)   recall_policy.py ~2311（POS 严格：只 eng/nr/ns/nz）
+    → specific_query_terms (recall_policy)     recall_policy.py ~2614（较宽松，content_terms_for_query）
+    → 相邻词合并                                还原被 jieba 切碎的复合词
+    → _memory_sentinel_searchable_residue_term gateway.py ~13803
+      → strip MEMORY_SENTINEL_RESIDUE_STRIP_TERMS（含 DEFAULT_AI_ADDRESS_TERMS: 老公/老婆/宝宝/宝贝/…）
+      → strip MEMORY_SENTINEL_RESIDUE_PREFIXES: [想和/想跟/想要/想把/想给/想让/想]
+      → strip particles regex: [我你他她它的是了啦呢啊呀嘛吗吧欸诶]+
+      → _memory_sentinel_residue_key_allowed   gateway.py ~13845（中文 ≥2 字符，87 项停用词过滤）
+```
+
+### discriminative anchor 判定链
+
+```
+_dynamic_anchor_plan                        gateway.py ~15718
+  → _dynamic_anchor_query_terms             提取 query terms
+  → lexical_term_specificity_stats          计算每个 term 在桶库中的出现频率
+  → 分类: discriminative（稀有）/ category（常见）/ support（辅助）/ unseen
+  → required_terms = discriminative_terms
+
+_annotate_dynamic_anchor_for_bucket         gateway.py ~15829
+  → covered(term) 检查桶的 name/subject/keywords/tags/full_text 是否包含 term
+  → distinctive_anchor_match = bool(required_terms and not missing_terms)  # 全 AND
+  → anchor_coverage = len(matched) / len(discriminative)                   # 已算但未用于准入
+
+_admit_bucket_for_recall                    gateway.py ~17677
+  → dynamic_anchor_missing = required_terms AND NOT distinctive_anchor_match
+  → 如果 missing 且没有独立 anchor evidence → 拒绝 "discriminative_anchor_missing"
+
+must_groups (recall_policy.py:1087):
+  → 组间: any() = OR
+  → 组内: _anchor_group_matches (recall_policy.py:1232) = 全 AND + 距离约束 ANCHOR_MUST_GROUP_MAX_SPAN
+```
+
 ## Debug 观测
 
-- **Debug 面板**: `/gateway/debug` — 查看每轮的 injection_debug 记录
+- **Debug 面板**: `https://ygao2jdgxlqzxfoasmjpvxcf.23.95.136.46.sslip.io/gateway/debug`
+- **Debug API**: `GET /gateway/api/debug/injections?session_id=xxx&include_payload=1&limit=20`，认证: `Authorization: Bearer HONOO`
 - 每个候选桶的 debug 包含: `score`, `semantic_score`, `keyword_score`, `admission_reason`, `evidence_labels`
 - 被拒绝的桶在 `suppressed_bucket_candidates` 里，带 `admission_reason`
+- hook_recall 展开卡片显示: `search_query`, `residue_terms`, `candidates` 计数
+- payload 中 `memory_sentinel_debug.searchable_residue_terms` 包含提取的搜索词列表
 
 ## 衰减 (freshness)
 

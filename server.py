@@ -14840,6 +14840,13 @@ async def api_config_update(request):
         else:
             embedding_engine.client = None
 
+        gateway_hot_update_payload["embedding"] = {
+            "enabled": emb.get("enabled", True),
+            "model": embedding_engine.model,
+            "base_url": embedding_engine.base_url,
+            "api_key": embedding_engine.api_key,
+        }
+
     # --- Merge threshold ---
     if "merge_threshold" in body:
         config["merge_threshold"] = int(body["merge_threshold"])

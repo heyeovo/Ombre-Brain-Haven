@@ -1649,6 +1649,26 @@ class GatewayService:
             self.domain_sentinel_api_key = self._resolve_domain_sentinel_api_key("")
         return updated
 
+    def _apply_embedding_config(self, payload: dict[str, Any]) -> list[str]:
+        if not isinstance(payload, dict):
+            return []
+        embed_cfg = self.config.setdefault("embedding", {})
+        updated: list[str] = []
+        if "enabled" in payload:
+            embed_cfg["enabled"] = self._bool_config_value(payload["enabled"], True)
+            updated.append("embedding.enabled")
+        for key in ("model", "base_url"):
+            if key in payload:
+                embed_cfg[key] = str(payload[key] or "").strip()
+                updated.append(f"embedding.{key}")
+        if "api_key" in payload and payload["api_key"]:
+            embed_cfg["api_key"] = str(payload["api_key"])
+            os.environ["OMBRE_EMBEDDING_API_KEY"] = embed_cfg["api_key"]
+            updated.append("embedding.api_key")
+        if updated:
+            self.embedding_engine = EmbeddingEngine(self.config)
+        return updated
+
     def _apply_reranker_config(self, payload: dict[str, Any]) -> list[str]:
         if not isinstance(payload, dict):
             return []
@@ -1793,6 +1813,7 @@ class GatewayService:
 
         gateway_payload = body.get("gateway")
         dehydration_payload = body.get("dehydration")
+        embedding_payload = body.get("embedding")
         diffusion_payload = body.get("memory_diffusion")
         reranker_payload = body.get("reranker")
         persona_payload = body.get("persona")
@@ -1800,6 +1821,7 @@ class GatewayService:
         if (
             gateway_payload is None
             and dehydration_payload is None
+            and embedding_payload is None
             and diffusion_payload is None
             and reranker_payload is None
             and persona_payload is None
@@ -1810,6 +1832,8 @@ class GatewayService:
             return JSONResponse({"error": "invalid gateway config"}, status_code=400)
         if dehydration_payload is not None and not isinstance(dehydration_payload, dict):
             return JSONResponse({"error": "invalid dehydration config"}, status_code=400)
+        if embedding_payload is not None and not isinstance(embedding_payload, dict):
+            return JSONResponse({"error": "invalid embedding config"}, status_code=400)
         if diffusion_payload is not None and not isinstance(diffusion_payload, dict):
             return JSONResponse({"error": "invalid memory diffusion config"}, status_code=400)
         if reranker_payload is not None and not isinstance(reranker_payload, dict):
@@ -1822,6 +1846,8 @@ class GatewayService:
         updated = []
         if dehydration_payload is not None:
             updated.extend(self._apply_dehydration_config(dehydration_payload))
+        if embedding_payload is not None:
+            updated.extend(self._apply_embedding_config(embedding_payload))
         if gateway_payload is not None:
             updated.extend(self._apply_gateway_memory_config(gateway_payload))
         if diffusion_payload is not None:
@@ -1850,11 +1876,10 @@ class GatewayService:
 
     def _save_gateway_runtime_config(self) -> None:
         try:
-            # Save all hot-reloadable config sections: gateway, dehydration, reranker,
-            # memory_diffusion, persona, dream
             payload = {
                 "gateway": self.gateway_cfg,
                 "dehydration": self.config.get("dehydration", {}),
+                "embedding": self.config.get("embedding", {}),
                 "reranker": self.config.get("reranker", {}),
                 "memory_diffusion": self.config.get("memory_diffusion", {}),
                 "persona": self.config.get("persona", {}),
@@ -1888,9 +1913,11 @@ class GatewayService:
                 self.upstream_base_url = self.gateway_cfg.get("upstream_base_url", "").rstrip("/")
                 self.upstream_default_model = self.gateway_cfg.get("upstream_default_model", "")
             # Restore other hot-reloadable sections
-            for section in ("dehydration", "reranker", "memory_diffusion", "persona", "dream"):
+            for section in ("dehydration", "embedding", "reranker", "memory_diffusion", "persona", "dream"):
                 if isinstance(data.get(section), dict) and data[section]:
                     self.config[section] = data[section]
+            if isinstance(data.get("embedding"), dict) and data["embedding"]:
+                self.embedding_engine = EmbeddingEngine(self.config)
             logger.info("Gateway runtime config loaded from %s", path)
         except Exception as exc:
             logger.warning("Failed to load gateway runtime config: %s", exc)

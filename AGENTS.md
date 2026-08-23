@@ -16,6 +16,10 @@
 - 会话数据的新增、读取和删除必须保留 `profile_id` 隔离。旧表做不到安全隔离时，宁可暂不删除并记录技术债务，不得扩大删除范围。
 - 含密钥配置不能返回浏览器；浏览器只接收掩码后的值。
 
+## 架构文档
+
+- 动态召回 pipeline 架构见 `docs/recall-pipeline.md`，排查召回问题时先读这个文件再进代码。
+
 ## 验证与 Coolify 发布
 
 - 涉及 VPS、Coolify、发布、回滚或 Dashboard/Haven 跨仓库联动时，开始前必须同时读取本文件与相邻 `ob-dashboard2/AGENTS.md`；不能只读当前仓库规则。

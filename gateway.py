@@ -21282,6 +21282,8 @@ class GatewayService:
         )
 
     def _is_relevance_candidate_bucket(self, query: str, bucket: dict) -> bool:
+        if self._is_recall_excluded_domain_bucket(bucket):
+            return False
         if self._is_self_anchor_recall_excluded_bucket(bucket):
             return False
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
@@ -21311,7 +21313,16 @@ class GatewayService:
             return True
         return False
 
+    _RECALL_EXCLUDED_DOMAINS = frozenset({"journey", "journal"})
+
+    @classmethod
+    def _is_recall_excluded_domain_bucket(cls, bucket: dict) -> bool:
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        return bool({str(d).strip().lower() for d in meta.get("domain", []) or []} & cls._RECALL_EXCLUDED_DOMAINS)
+
     def _is_dynamic_candidate(self, bucket: dict) -> bool:
+        if self._is_recall_excluded_domain_bucket(bucket):
+            return False
         if self._is_self_anchor_recall_excluded_bucket(bucket):
             return False
         meta = bucket.get("metadata", {})
@@ -21326,6 +21337,8 @@ class GatewayService:
     def _is_identity_name_candidate_bucket(self, query: str, bucket: dict) -> bool:
         terms = self._identity_name_search_terms(query)
         if not terms or not isinstance(bucket, dict) or self._is_self_anchor_recall_excluded_bucket(bucket):
+            return False
+        if self._is_recall_excluded_domain_bucket(bucket):
             return False
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         if meta.get("type") in {"feel", "archived"}:
@@ -21363,6 +21376,8 @@ class GatewayService:
         return any(anchor and anchor in fields for anchor in anchor_keys)
 
     def _is_semantic_candidate_bucket(self, bucket: dict) -> bool:
+        if self._is_recall_excluded_domain_bucket(bucket):
+            return False
         if self._is_self_anchor_recall_excluded_bucket(bucket):
             return False
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}

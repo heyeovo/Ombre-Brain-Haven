@@ -99,13 +99,6 @@ dehydration:
   # DeepSeek v4 可选思考模式覆盖：
   #   disabled = 非思考 / enabled = 思考 / 留空 = 走模型默认行为
   thinking_mode: ""
-  # Auto-tagging uses its own short JSON completion budget.
-  # 自动打标使用独立的短 JSON 输出参数，不影响记忆合并。
-  analyze_max_tokens: 256
-  analyze_temperature: 0.1
-  # enabled = send thinking.type=enabled; empty = do not send thinking.
-  # enabled = 开启思考；留空 = 不发送 thinking 参数。
-  analyze_thinking_mode: ""
   # Common base_url examples / 常见 base_url 示例：
   #   DeepSeek:    https://api.deepseek.com/v1
   #   SiliconFlow: https://api.siliconflow.cn/v1

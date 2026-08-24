@@ -63,16 +63,16 @@ class PromptLayeringTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不可覆盖的字段、白名单与输出协议", system)
         self.assertIn('"memory_layer"', system)
 
-    async def test_analyze_uses_dedicated_runtime_parameters(self):
+    async def test_analyze_uses_dehydration_runtime_parameters(self):
         completions = FakeCompletions(json.dumps({
             "domain": ["general"], "valence": 0.5, "arousal": 0.3,
             "tags": [], "suggested_name": "测试",
             "memory_subject": "event", "memory_layer": "process_event",
         }))
         dehydrator = Dehydrator({"dehydration": {
-            "analyze_max_tokens": 640,
-            "analyze_temperature": 0.35,
-            "analyze_thinking_mode": "enabled",
+            "max_tokens": 640,
+            "temperature": 0.35,
+            "thinking_mode": "enabled",
         }})
         dehydrator.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
 
@@ -95,7 +95,7 @@ class PromptLayeringTest(unittest.IsolatedAsyncioTestCase):
         await dehydrator._api_analyze("测试正文")
 
         call = completions.calls[0]
-        self.assertEqual(call["max_tokens"], 256)
+        self.assertEqual(call["max_tokens"], 1024)
         self.assertEqual(call["temperature"], 0.1)
         self.assertNotIn("extra_body", call)
 

@@ -47,7 +47,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `automation_executor.py` | 人工批准候选的白名单执行器；当前只注册 `weekly_journey`，负责冲突校验、批准稿 hash、派生 operation ID、重复确认回放、两步切换恢复及确认完成时原子推进轨迹游标 |
 | `journey_weekly_engine.py` | 每周触发的 journey 只读输入聚合与严格三类候选生成；从已确认截止日下一天连续读取到最近完整 OB 日，积压单次最多 31 天，读取开放阶段、日回顾、新桶/独立 feel/旧桶 feel 年轮并排除旧日印象/关系天气 feel |
 | `bucket_manager.py` | 桶 CRUD、搜索、评分、回收站、命中统计、分词 |
-| `dehydrator.py` | LLM 脱水、合并、打标；自动打标独立使用可热更新的 token、temperature、thinking 参数（含 `_last_merge_usage` 成本追踪） |
+| `dehydrator.py` | LLM 脱水、合并、打标；三类调用共用可热更新的 dehydration token、temperature、thinking 参数（含 `_last_merge_usage` 成本追踪） |
 | `decay_engine.py` | 衰减引擎，只计算排序 score；不自动 resolved、digested 或 archive |
 | `embedding_engine.py` | 向量嵌入 + 相似度搜索 |
 | `import_memory.py` | 对话历史导入引擎（含成本追踪） |
@@ -297,7 +297,7 @@ GET /api/debug/injections             # 注入调试（见 README「Gateway 注�
 ### 产品 Prompt 持久化与硬约束
 `state/prompt_overrides.sqlite` 只保存用户自定义产品层，不复制代码默认；不存在覆盖时始终读取当前版本的系统默认。表按 `profile_id + name` 隔离，初始化和旧表补列可重复执行，保存使用 revision 检查跨窗口冲突。四个白名单名称为 `analyze`、`merge`、`daily_review`、`weekly_journey`。
 
-生成时按“协作者基础提示词/默认模块 + 可配置产品层 + 服务端硬约束 + 固定材料”组装。自动打标的 JSON/字段/domain/保留标签、记忆合并的 section/身份/正文约束、日回顾的材料与独立表边界、weekly journey 的 JSON/三类候选/固定证据/实质变化/不得编造/零自动写入/revision-hash 均不可由自定义正文替换。`GET /api/prompts` 同时返回运行时叠加说明、实际模型硬约束全文和模型返回后的服务端校验摘要，供 dashboard 只读展示完整分层。自动打标另有 `analyze_max_tokens`、`analyze_temperature`、`analyze_thinking_mode` 三项运行参数，经 `/api/config` 热更新并写入 runtime overlay；正式打标与草稿测试共用，记忆合并继续使用原有 dehydration 全局参数。`analyze` 和 `merge` 的测试通过局部 Prompt 参数试跑，不再临时改写全局 `Dehydrator` 属性；日回顾与 weekly journey 不提供会污染正式表或候选的测试入口。
+生成时按“协作者基础提示词/默认模块 + 可配置产品层 + 服务端硬约束 + 固定材料”组装。自动打标的 JSON/字段/domain/保留标签、记忆合并的 section/身份/正文约束、日回顾的材料与独立表边界、weekly journey 的 JSON/三类候选/固定证据/实质变化/不得编造/零自动写入/revision-hash 均不可由自定义正文替换。`GET /api/prompts` 同时返回运行时叠加说明、实际模型硬约束全文和模型返回后的服务端校验摘要，供 dashboard 只读展示完整分层。自动打标与记忆合并共用 dehydration 的 `max_tokens`、`temperature`、`thinking_mode`，经 `/api/config` 热更新并写入 runtime overlay；`analyze` 和 `merge` 的测试通过局部 Prompt 参数试跑，不再临时改写全局 `Dehydrator` 属性。日回顾与 weekly journey 不提供会污染正式表或候选的测试入口。
 
 ### 中文分词
 `jieba` 分词（`_split_query_tokens()`），自动切长句。内置 stopword 过滤。`precise_match_mode` 开启时从 `partial_ratio` 切换到精确子串匹配。

@@ -1611,9 +1611,6 @@ class GatewayService:
             "max_tokens",
             "temperature",
             "thinking_mode",
-            "analyze_max_tokens",
-            "analyze_temperature",
-            "analyze_thinking_mode",
         ):
             if key in payload:
                 dehy_cfg[key] = payload[key]
@@ -1636,17 +1633,6 @@ class GatewayService:
             self.dehydrator.thinking_mode = str(dehy_cfg.get("thinking_mode") or "").strip()
         self.dehydrator.max_tokens = dehy_cfg.get("max_tokens", getattr(self.dehydrator, "max_tokens", 1024))
         self.dehydrator.temperature = dehy_cfg.get("temperature", getattr(self.dehydrator, "temperature", 0.1))
-        self.dehydrator.analyze_max_tokens = dehy_cfg.get(
-            "analyze_max_tokens", getattr(self.dehydrator, "analyze_max_tokens", 256)
-        )
-        self.dehydrator.analyze_temperature = dehy_cfg.get(
-            "analyze_temperature", getattr(self.dehydrator, "analyze_temperature", 0.1)
-        )
-        self.dehydrator.analyze_thinking_mode = (
-            normalize_thinking(dehy_cfg.get("analyze_thinking_mode", ""))
-            if callable(normalize_thinking)
-            else str(dehy_cfg.get("analyze_thinking_mode") or "").strip()
-        )
         self.dehydrator.api_available = bool(self.dehydrator.api_key)
         if self.dehydrator.api_key and self.dehydrator.base_url:
             from openai import AsyncOpenAI

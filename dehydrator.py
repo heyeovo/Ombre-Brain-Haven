@@ -286,11 +286,6 @@ class Dehydrator:
         self.thinking_mode = self._normalize_thinking_mode(dehy_cfg.get("thinking_mode", ""))
         self.max_tokens = dehy_cfg.get("max_tokens", 1024)
         self.temperature = dehy_cfg.get("temperature", 0.1)
-        self.analyze_max_tokens = dehy_cfg.get("analyze_max_tokens", 256)
-        self.analyze_temperature = dehy_cfg.get("analyze_temperature", 0.1)
-        self.analyze_thinking_mode = self._normalize_thinking_mode(
-            dehy_cfg.get("analyze_thinking_mode", "")
-        )
 
         # --- API availability / 是否有可用的 API ---
         self.api_available = bool(self.api_key)
@@ -586,9 +581,8 @@ class Dehydrator:
                 {"role": "user", "content": content[:2000]},
             ],
             **self._completion_options(
-                max_tokens=self.analyze_max_tokens,
-                temperature=self.analyze_temperature,
-                thinking_mode=self.analyze_thinking_mode,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
             ),
         )
         if not response.choices:
@@ -833,20 +827,13 @@ class Dehydrator:
                 domains.append(domain)
         return domains[:2] or ["general"]
 
-    def _completion_options(
-        self,
-        *,
-        max_tokens: int,
-        temperature: float,
-        thinking_mode: str | None = None,
-    ) -> dict[str, Any]:
+    def _completion_options(self, *, max_tokens: int, temperature: float) -> dict[str, Any]:
         options: dict[str, Any] = {
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        effective_thinking_mode = self.thinking_mode if thinking_mode is None else thinking_mode
-        if effective_thinking_mode:
-            options["extra_body"] = {"thinking": {"type": effective_thinking_mode}}
+        if self.thinking_mode:
+            options["extra_body"] = {"thinking": {"type": self.thinking_mode}}
         return options
 
     def _normalize_thinking_mode(self, value: Any) -> str:

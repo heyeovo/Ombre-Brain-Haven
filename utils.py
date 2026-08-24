@@ -212,9 +212,6 @@ def load_config(config_path: str = None) -> dict:
             "thinking_mode": "",
             "max_tokens": 1024,
             "temperature": 0.1,
-            "analyze_max_tokens": 256,
-            "analyze_temperature": 0.1,
-            "analyze_thinking_mode": "",
         },
         "embedding": {
             "enabled": True,

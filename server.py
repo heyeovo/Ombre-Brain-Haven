@@ -14443,6 +14443,9 @@ async def api_config_get(request):
             "api_key_masked": _mask_key(dehy.get("api_key", "")),
             "max_tokens": dehy.get("max_tokens", 1024),
             "temperature": dehy.get("temperature", 0.1),
+            "analyze_max_tokens": dehy.get("analyze_max_tokens", 256),
+            "analyze_temperature": dehy.get("analyze_temperature", 0.1),
+            "analyze_thinking_mode": dehy.get("analyze_thinking_mode", ""),
         },
         "embedding": {
             "enabled": emb.get("enabled", False),
@@ -14772,6 +14775,16 @@ async def api_config_update(request):
             if key in d:
                 dehy[key] = d[key]
                 updated.append(f"dehydration.{key}")
+        if "analyze_max_tokens" in d:
+            dehy["analyze_max_tokens"] = _int_between(d["analyze_max_tokens"], 256, 64, 8192)
+            updated.append("dehydration.analyze_max_tokens")
+        if "analyze_temperature" in d:
+            dehy["analyze_temperature"] = _float_between(d["analyze_temperature"], 0.1, 0.0, 2.0)
+            updated.append("dehydration.analyze_temperature")
+        if "analyze_thinking_mode" in d:
+            analyze_thinking_mode = str(d["analyze_thinking_mode"] or "").strip().lower()
+            dehy["analyze_thinking_mode"] = "enabled" if analyze_thinking_mode == "enabled" else ""
+            updated.append("dehydration.analyze_thinking_mode")
         if "api_key" in d and d["api_key"]:
             dehy["api_key"] = d["api_key"]
             env_updates["OMBRE_API_KEY"] = str(d["api_key"])
@@ -14787,6 +14800,11 @@ async def api_config_update(request):
             dehydrator.thinking_mode = str(dehy.get("thinking_mode") or "").strip()
         dehydrator.max_tokens = dehy.get("max_tokens", 1024)
         dehydrator.temperature = dehy.get("temperature", 0.1)
+        dehydrator.analyze_max_tokens = dehy.get("analyze_max_tokens", 256)
+        dehydrator.analyze_temperature = dehy.get("analyze_temperature", 0.1)
+        dehydrator.analyze_thinking_mode = normalize_thinking(
+            dehy.get("analyze_thinking_mode", "")
+        ) if callable(normalize_thinking) else str(dehy.get("analyze_thinking_mode") or "").strip()
         dehydrator.api_available = bool(dehydrator.api_key)
         if hasattr(dehydrator, "client") and dehydrator.api_key:
             from openai import AsyncOpenAI
@@ -14801,6 +14819,9 @@ async def api_config_update(request):
             "thinking_mode": dehy.get("thinking_mode", ""),
             "max_tokens": dehy.get("max_tokens", 1024),
             "temperature": dehy.get("temperature", 0.1),
+            "analyze_max_tokens": dehy.get("analyze_max_tokens", 256),
+            "analyze_temperature": dehy.get("analyze_temperature", 0.1),
+            "analyze_thinking_mode": dehy.get("analyze_thinking_mode", ""),
         }
 
     # --- Embedding config ---
@@ -15437,9 +15458,17 @@ async def api_config_update(request):
             save_config = save_config or {}
             if "dehydration" in body:
                 sc_dehy = save_config.setdefault("dehydration", {})
-                for key in ("model", "base_url", "max_tokens", "temperature"):
+                for key in (
+                    "model",
+                    "base_url",
+                    "max_tokens",
+                    "temperature",
+                    "analyze_max_tokens",
+                    "analyze_temperature",
+                    "analyze_thinking_mode",
+                ):
                     if key in body["dehydration"]:
-                        sc_dehy[key] = body["dehydration"][key]
+                        sc_dehy[key] = config.get("dehydration", {}).get(key, body["dehydration"][key])
                 # Never persist api_key to yaml (use env var)
 
             if "embedding" in body:

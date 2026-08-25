@@ -1031,7 +1031,8 @@ class RawEventStore:
     def _search_fts(self, query: str, filters: str, params: list[Any], limit: int) -> list[sqlite3.Row]:
         if not self.fts_enabled or not query:
             return []
-        match = '"' + query.replace('"', '""') + '"'
+        tokens = [t for t in query.split() if t]
+        match = " OR ".join('"' + t.replace('"', '""') + '"' for t in tokens) if tokens else query
         conn = self._connect()
         try:
             return conn.execute(
@@ -1051,17 +1052,20 @@ class RawEventStore:
             conn.close()
 
     def _search_like(self, query: str, filters: str, params: list[Any], limit: int) -> list[sqlite3.Row]:
+        tokens = [t for t in query.split() if t]
+        like_clauses = " OR ".join("e.text LIKE ?" for _ in tokens) if tokens else "e.text LIKE ?"
+        like_params = [f"%{t}%" for t in tokens] if tokens else [f"%{query}%"]
         conn = self._connect()
         try:
             return conn.execute(
                 f"""
                 SELECT e.*
                 FROM raw_events e
-                WHERE e.text LIKE ? {filters}
+                WHERE ({like_clauses}) {filters}
                 ORDER BY e.created_at DESC, e.id DESC
                 LIMIT ?
                 """,
-                [f"%{query}%", *params, limit],
+                [*like_params, *params, limit],
             ).fetchall()
         finally:
             conn.close()

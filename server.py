@@ -10254,17 +10254,75 @@ async def search_chat(
     query = str(query or "").strip()
     if not query:
         return "请提供搜索关键词。"
+    safe_limit = _int_between(limit, 20, 1, 50)
+    safe_role = str(role or "").strip()
+    safe_session = str(session_id or "").strip()
+    safe_exclude = str(exclude_session or "").strip()
+    safe_since = str(since or "").strip()
+    safe_until = str(until or "").strip()
+    profile = str(getattr(persona_engine, "profile_id", "") or "default")
+
     result = gateway_state_store.search_turns(
         query=query,
-        profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
-        session_id=str(session_id or "").strip(),
-        exclude_session_id=str(exclude_session or "").strip(),
-        since=str(since or "").strip(),
-        until=str(until or "").strip(),
-        role=str(role or "").strip(),
-        limit=_int_between(limit, 20, 1, 50),
+        profile_id=profile,
+        session_id=safe_session,
+        exclude_session_id=safe_exclude,
+        since=safe_since,
+        until=safe_until,
+        role=safe_role,
+        limit=safe_limit,
     )
     items = result.get("items", [])
+
+    dedup_keys: set[str] = set()
+    for item in items:
+        u = (item.get("user_text") or "").strip()[:80]
+        a = (item.get("assistant_text") or "").strip()[:80]
+        if u:
+            dedup_keys.add(u)
+        if a:
+            dedup_keys.add(a)
+
+    if len(items) < safe_limit:
+        try:
+            raw_result = raw_event_store.search(
+                query=query,
+                limit=safe_limit - len(items),
+                session_id=safe_session,
+                since=safe_since,
+                until=safe_until,
+                role=safe_role,
+                usage_scope="all",
+            )
+            for raw_item in raw_result.get("items", []):
+                text = (raw_item.get("text") or "").strip()
+                if not text:
+                    continue
+                sid = raw_item.get("session_id") or raw_item.get("conversation_id") or ""
+                if safe_exclude and sid == safe_exclude:
+                    continue
+                if text[:80] in dedup_keys:
+                    continue
+                dedup_keys.add(text[:80])
+                r = (raw_item.get("role") or "").lower()
+                item = {
+                    "turn_id": raw_item["id"],
+                    "session_id": sid,
+                    "created_at": raw_item.get("created_at", ""),
+                    "source": raw_item.get("source", "archive"),
+                }
+                if r == "user":
+                    item["user_text"] = text[:2000]
+                elif r == "assistant":
+                    item["assistant_text"] = text[:2000]
+                else:
+                    item["user_text"] = text[:2000]
+                items.append(item)
+                if len(items) >= safe_limit:
+                    break
+        except Exception:
+            pass
+
     if not items:
         return f"没有找到包含「{query}」的聊天记录。"
     parts = []

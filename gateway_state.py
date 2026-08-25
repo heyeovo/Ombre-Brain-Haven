@@ -2210,10 +2210,12 @@ class GatewayStateStore:
 
         extra_sql, extra_params = _extra_filters()
 
+        tokens = [t for t in safe_query.split() if t]
+
         def _fts_search(conn: sqlite3.Connection) -> list[sqlite3.Row]:
             if not getattr(self, "_fts_enabled", False) or not safe_query:
                 return []
-            match = '"' + safe_query.replace('"', '""') + '"'
+            match = " OR ".join('"' + t.replace('"', '""') + '"' for t in tokens) if tokens else safe_query
             try:
                 return conn.execute(
                     f"""
@@ -2234,17 +2236,23 @@ class GatewayStateStore:
         def _like_search(conn: sqlite3.Connection) -> list[sqlite3.Row]:
             if not safe_query:
                 return []
+            like_clauses = " OR ".join(
+                "(e.user_text LIKE ? OR e.assistant_text LIKE ?)" for _ in tokens
+            )
+            like_params = []
+            for t in tokens:
+                like_params.extend([f"%{t}%", f"%{t}%"])
             return conn.execute(
                 f"""
                 SELECT e.*
                 FROM conversation_turns e
                 WHERE e.profile_id = ?
-                  AND (e.user_text LIKE ? OR e.assistant_text LIKE ?)
+                  AND ({like_clauses})
                   {extra_sql}
                 ORDER BY e.created_at DESC, e.id DESC
                 LIMIT ?
                 """,
-                [safe_profile, f"%{safe_query}%", f"%{safe_query}%", *extra_params, safe_limit],
+                [safe_profile, *like_params, *extra_params, safe_limit],
             ).fetchall()
 
         def _recent(conn: sqlite3.Connection) -> list[sqlite3.Row]:

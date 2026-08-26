@@ -13,7 +13,7 @@
 
 | 能力 | 场景 |
 |------|-----------|
-| `breath` | **每次对话最开头**调用一次（`is_session_start=True`）——先恢复自我入口、用户画像、关系画像、近期连续性和少量必要锚点。有明确话题时传 `query` 关键词检索；有明确日期时可传 `date` 或在 query 里写日期。传 `domain="feel"` 读取独立 feel；传 `domain="daily_impression"` 才读取日印象；传 `domain="journal"` 读取日记（含上锁检测）；传 `domain="journey"` 只读取轨迹目录，选中后再 `read_bucket(bucket_id)` 读全文；传 `domain="self_anchor"` 读取你自己留下的锚点。`max_tokens` 控制返回总 token 上限（默认 10000），`max_results` 控制最大返回条数（默认 20） |
+| `breath` | **每次对话最开头**调用一次（`is_session_start=True`）——先恢复自我入口、用户画像、关系画像、近期连续性和少量必要锚点。有明确话题时传 `query` 关键词检索；有明确日期时可传 `date` 或在 query 里写日期。传 `domain="pinned"` 一次读取全部钉选桶；传 `domain="feel"` 读取独立 feel；传 `domain="daily_impression"` 才读取日印象；传 `domain="journal"` 读取日记（含上锁检测）；传 `domain="journey"` 只读取轨迹目录，选中后再 `read_bucket(bucket_id)` 读全文；传 `domain="self_anchor"` 读取你自己留下的锚点。`max_tokens` 控制返回总 token 上限（默认 10000）；普通读取的 `max_results` 默认 20，`domain="pinned"` 不受该条数限制 |
 | `read_bucket` | 按 bucket_id 精确读取完整记忆；journey 会附带证据桶名称和 ID，需要核实时再读取证据桶；准备追细节、写年轮、修改或删除前先读 |
 | `read_daily_reviews` | 只读独立日回顾。用 `start_date + end_date` 查闭区间，或用 `last_days` 查截至昨天的最近若干香港日历日；多协作者时传 `persona_id`。返回当前正文、编辑状态、更新时间和缺失日期，不返回来源窗口，也不写任何记忆 |
 | `comment_bucket` | 给已有记忆追加年轮/评论；读到旧记忆后的新感受或补充，用它挂回源 bucket。`kind="feel"` 时 content 只写第一人称感受，不写分段标题 |
@@ -140,6 +140,7 @@
 - Reminder：需要时间、重复、稍后提醒或主动注入时使用 `reminder_create / reminder_list / reminder_update`；不要和 Todo 互转或混存
 
 ### 核心准则桶（pinned）
+- `breath(domain="pinned")` 一次读取所有钉选桶；内容很多时仍受 `max_tokens` 总预算限制
 - `hold(content="...", pinned=True)` 创建钉选桶——不衰减、不合并、importance 锁定 10
 - `trace(bucket_id, pinned=1)` 把已有桶钉选为核心准则
 - `trace(bucket_id, pinned=0)` 取消钉选

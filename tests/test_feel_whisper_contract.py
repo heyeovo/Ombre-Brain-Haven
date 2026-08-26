@@ -80,6 +80,7 @@ class FeelWhisperContractTest(unittest.IsolatedAsyncioTestCase):
             "parse_human_date_reference": lambda value: None,
             "_breath_query_requests_date_read": lambda value: False,
             "_is_self_anchor_domain": lambda value: False,
+            "is_self_anchor_bucket": lambda bucket: False,
             "_is_pending_followup_domain": lambda value: False,
             "_breath_query_requests_pending_followups": lambda value: False,
             "_is_daily_impression_feel_bucket": lambda bucket: "daily_impression" in bucket["metadata"].get("tags", []),
@@ -87,6 +88,7 @@ class FeelWhisperContractTest(unittest.IsolatedAsyncioTestCase):
             "strip_wikilinks": lambda value: value,
             "count_tokens_approx": len,
             "_trim_text_to_token_budget": trim_to_budget,
+            "_trim_handoff_text_to_token_budget": trim_to_budget,
             "logger": SimpleNamespace(error=lambda *args, **kwargs: None),
         }
 
@@ -201,6 +203,33 @@ class FeelWhisperContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("legacy-whisper", feel_result)
         self.assertIn("legacy-whisper", whisper_result)
         self.assertNotIn("standalone-feel", whisper_result)
+
+    async def test_breath_pinned_reads_all_pinned_buckets_without_max_results_cap(self):
+        buckets = [
+            {
+                "id": f"pinned-{index}",
+                "content": f"钉选正文 {index}",
+                "metadata": {
+                    "name": f"钉选 {index}",
+                    "pinned": True,
+                    "type": "permanent",
+                    "domain": ["生活"],
+                },
+            }
+            for index in range(25)
+        ]
+        buckets.append({
+            "id": "ordinary",
+            "content": "普通正文",
+            "metadata": {"name": "普通", "pinned": False, "type": "dynamic", "domain": ["生活"]},
+        })
+        breath = load_server_function("breath", self.breath_namespace(FakeBucketManager(buckets)))
+
+        result = await breath(domain="pinned", max_results=1, max_tokens=10000)
+
+        self.assertIn("共 25 个", result)
+        self.assertEqual(result.count("[bucket_id:pinned-"), 25)
+        self.assertNotIn("ordinary", result)
 
 
 if __name__ == "__main__":

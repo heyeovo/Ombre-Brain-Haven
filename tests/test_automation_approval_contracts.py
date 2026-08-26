@@ -98,7 +98,7 @@ class ApprovalBucketManager:
         if operation_id in operations:
             return {"status": "duplicate", "bucket_id": self.open_journey["id"]}
         operations.append(operation_id)
-        self.open_journey["content"] += "\n\n" + kwargs["content"]
+        self.open_journey["content"] = kwargs["content"]
         self.open_journey["metadata"]["journey_summary"] = kwargs["summary"]
         return {"status": "appended", "bucket_id": self.open_journey["id"]}
 
@@ -212,7 +212,7 @@ class AutomationApprovalContractsTest(unittest.IsolatedAsyncioTestCase):
                 "rationale": ["共同日常继续生长"],
                 "evidence_bucket_ids": ["evidence-1"],
                 "proposal": {
-                    "append_content": "这一周，我们继续安顿生活。",
+                    "revised_content": "当前阶段整合后，我们继续安顿生活。",
                     "summary": "继续安顿共同日常",
                     "evidence_bucket_ids": ["evidence-1"],
                 },
@@ -247,7 +247,7 @@ class AutomationApprovalContractsTest(unittest.IsolatedAsyncioTestCase):
             candidate["candidate_id"],
             expected_revision=1,
             draft={
-                "append_content": "人工编辑后的正文。",
+                "revised_content": "人工编辑后的正文。",
                 "summary": "人工编辑后的摘要",
                 "evidence_bucket_ids": ["evidence-1"],
             },
@@ -255,7 +255,7 @@ class AutomationApprovalContractsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(edited["status"], "updated")
         self.assertEqual(edited["candidate"]["revision"], 2)
         self.assertEqual(edited["candidate"]["preview"], original_preview)
-        self.assertEqual(edited["candidate"]["draft"]["append_content"], "人工编辑后的正文。")
+        self.assertEqual(edited["candidate"]["draft"]["revised_content"], "人工编辑后的正文。")
 
     async def test_reject_is_zero_write(self):
         candidate = self.make_candidate()
@@ -291,7 +291,7 @@ class AutomationApprovalContractsTest(unittest.IsolatedAsyncioTestCase):
         edited = self.executor.edit_candidate(
             candidate["candidate_id"], expected_revision=1,
             draft={
-                "append_content": "新 revision 正文",
+                "revised_content": "新 revision 正文",
                 "summary": "新 revision 摘要",
                 "evidence_bucket_ids": ["evidence-1"],
             },

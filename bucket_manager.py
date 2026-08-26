@@ -549,9 +549,9 @@ class BucketManager:
         source_bucket_ids: list[str] | None = None,
         operation_id: str = "",
     ) -> dict:
-        addition = str(content or "").strip()
-        if not addition:
-            raise ValueError("追加 journey 阶段时 content 不能为空。")
+        revised_content = str(content or "").strip()
+        if not revised_content:
+            raise ValueError("重写 journey 阶段时 content 不能为空。")
         operation_key = str(operation_id or "").strip()
         if operation_key:
             for existing_stage in await self.list_journey_stages():
@@ -572,8 +572,6 @@ class BucketManager:
             existing_source_ids
             + [str(item).strip() for item in source_bucket_ids or [] if str(item).strip()]
         ))
-        current_content = str(stage.get("content") or "").rstrip()
-        updated_content = f"{current_content}\n\n{addition}" if current_content else addition
         extra_metadata = {
             "journey_operation_ids": operation_ids,
             "journey_source_bucket_ids": merged_source_ids,
@@ -583,12 +581,12 @@ class BucketManager:
 
         updated = await self.update(
             stage["id"],
-            content=updated_content,
+            content=revised_content,
             extra_metadata=extra_metadata,
         )
         if not updated:
             raise RuntimeError(f"追加 journey 阶段失败: {stage['id']}")
-        return {"status": "appended", "bucket_id": stage["id"]}
+        return {"status": "rewritten", "bucket_id": stage["id"]}
 
     async def close_open_journey_stage(
         self,

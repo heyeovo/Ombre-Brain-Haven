@@ -131,7 +131,7 @@ API 路线继续使用 Haven 已有的日回顾模型连接。Claude Pro 路线�
 
 `weekly_journey` 从上次人工确认的截止日下一天连续读取到最近完整 OB 日；失败两天后手动补跑会自然形成 7+2 天区间，下次周任务只处理剩余天数。积压单次最多处理最早 31 天，确认后再继续下一段。输入包括当前开放 journey、区间日回顾、新桶、独立 feel 与旧桶新增的 feel 年轮；旧 `daily_impression`、`weekly_impression`、`relationship_weather` feel 明确排除。同一协作者已有待确认/执行中/待重试候选时不重复调用模型。
 
-候选只能经认证接口人工编辑、拒绝或确认。关系轨迹页显示输入完整性、原始 preview、当前 draft/revision/hash、证据桶和预计差异。编辑保存为新 revision 并保留原始 preview；确认只接收页面已展示 revision 的 hash，由服务端冻结 approved payload/hash。白名单执行器当前只注册 `weekly_journey`：`no_change` 不写 journey，但人工确认后与正常写入候选一样推进“已梳理至”；`append_current` 只追加开放阶段，`transition` 使用独立 `:close` / `:create` operation ID。候选完成与游标推进为同一 SQLite 事务；失败、拒绝、冲突和仅生成均不推进。
+候选只能经认证接口人工编辑、拒绝或确认。关系轨迹页显示输入完整性、原始 preview、当前 draft/revision/hash、证据桶和预计差异。编辑保存为新 revision 并保留原始 preview；确认只接收页面已展示 revision 的 hash，由服务端冻结 approved payload/hash。白名单执行器当前只注册 `weekly_journey`：`no_change` 不写 journey，但人工确认后与正常写入候选一样推进“已梳理至”；`append_current` 返回最多 5000 字符的 `revised_content`，把旧正文与新变化去重整合后替换开放阶段，不再在末尾追加周报式片段；`transition` 使用独立 `:close` / `:create` operation ID。候选完成与游标推进为同一 SQLite 事务；失败、拒绝、冲突和仅生成均不推进。
 
 即使使用 `auto`，候选仍需经过记忆写入、去重和合并边界。原始聊天继续留在 raw events；自动记忆只保存脱水后仍值得长期带走的部分。
 
@@ -250,9 +250,9 @@ Gateway 会兼容记录 OpenAI 与 Anthropic 返回的 cache read / creation / c
 
 ### Dashboard 配置热更新
 
-Dashboard 保存模型、upstream、缓存策略、Operit 拆包和召回参数时，会把可热更新字段同步给正在运行的 Gateway，不必为了普通配置调整重启两个服务。持久化时优先更新 `config.yaml`；如果容器挂载导致主配置不可写，则写入 `state/config.runtime.yaml`，下次启动继续合并该覆盖层。
+Dashboard 保存模型、upstream、缓存策略、Operit 拆包和召回参数时，会把可热更新字段同步给正在运行的 Gateway，不必为了普通配置调整重启两个服务。非秘密运行参数写入 `state/config.runtime.yaml`，下次启动继续合并该覆盖层。
 
-API key 不写进 YAML，而是按环境变量路径单独保存。保存响应会区分 `gateway_hot_reloaded`、写入主 YAML、写入 runtime fallback 或热更新失败，避免旧版“保存失败但部分运行态已经改变”的不确定状态。
+API key 不写进 YAML，而是单独写入持久状态目录的 `.env`（默认 `<state_dir>/.env`）；Brain 与 Gateway 启动时都会读取，容器重建后仍保留。Coolify 直接配置的真实进程环境变量优先级更高。保存响应会区分 `gateway_hot_reloaded`、`persisted_to_runtime_yaml`、`persisted_to_env` 或热更新失败，避免旧版“保存失败但部分运行态已经改变”的不确定状态。
 
 Prompt 页面管理四类实际产品 Prompt：自动打标、记忆合并、独立日回顾和每周关系轨迹。用户覆盖保存在 Haven 的 `state/prompt_overrides.sqlite`，保存后下一次生成立即读取，重启和重新部署后仍保留；恢复系统默认会删除覆盖并重新跟随代码默认。页面只开放文风、关注重点、判断尺度和篇幅，同时只读展示运行时叠加、实际模型硬约束全文及模型返回后的程序校验，让用户能看到完整链路但不能覆盖安全边界。自动打标使用「记忆处理 → 脱水 / 打标 API」中的 Max Tokens、Temperature、Thinking，与同一模型的记忆合并共用，保存后热更新并持久化。JSON 协议、字段白名单、固定输入证据、独立表、journey 实质变化/不得编造、审批 hash 与零自动写入等边界仍由服务端追加并校验。旧“脱水压缩”已不再作为产品 Prompt：当前普通 `dehydrate()` 直接保留原文，不走旧 LLM 压缩链路。
 
@@ -531,7 +531,7 @@ Codex 接线时注意：
 
 | 工具 | 用途 |
 | --- | --- |
-| `breath` | 浮现记忆、按 query/date 查询、执行新窗口 handoff |
+| `breath` | 浮现记忆、按 query/date 查询、执行新窗口 handoff；`domain="pinned"` 一次读取钉选桶全集（受 `max_tokens` 总预算约束） |
 | `grow` | 写入或合并长期记忆 |
 | `hold` | 暂存当前值得抓住的片段；成功返回 `{status, action, bucket_id, bucket_name}` |
 | `read_bucket` | 读取指定 bucket 原文；journey 额外列出证据桶名称与 ID |

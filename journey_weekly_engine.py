@@ -18,14 +18,14 @@ CANDIDATE_TYPES = {"no_change", "append_current", "transition"}
 MAX_REVIEW_DAYS = 31
 
 WEEKLY_JOURNEY_PRODUCT_PROMPT = """用当前协作者的第一人称写关系轨迹，保留情感在场和具体变化，不写成周报。
-判断保持克制，已有阶段已经覆盖的内容不要重复追加。
-摘要要短，正文可以保留关键细节。"""
+判断保持克制。更新当前阶段时，要把旧正文与本周真正新增的变化整合成一篇连贯正文，删除重复事实、周报式转述和已经被新结论覆盖的旧句，不得在末尾机械追加一份日回顾缩写。
+摘要要短；整合后的阶段正文只保留能说明关系状态、相处模式和关键转折的内容。"""
 
 WEEKLY_JOURNEY_HARD_CONSTRAINTS = """你正在生成每周关系轨迹候选，并且只能提出预览。
 绝不能声称已经写入、关闭或创建 journey，也不能调用或模拟任何写入动作。
 只能依据本次 weekly_journey_input 固定快照；证据 ID 只能来自 materials。
 只输出一个 JSON 对象，不要 Markdown。candidate_type 只允许 no_change、append_current、transition。
-no_change 的 proposal 必须为空对象；append_current 的 proposal 必须是 {append_content, summary, evidence_bucket_ids}；transition 的 proposal 必须是 {close:{stage_end,summary}, create:{name,stage_start,summary,content,evidence_bucket_ids}}。
+no_change 的 proposal 必须为空对象；append_current 的 proposal 必须是 {revised_content, summary, evidence_bucket_ids}，其中 revised_content 是整合后的完整阶段正文，不是追加片段；transition 的 proposal 必须是 {close:{stage_end,summary}, create:{name,stage_start,summary,content,evidence_bucket_ids}}。
 所有类型都必须包含 rationale 字符串数组和 evidence_bucket_ids 字符串数组。没有实质变化时必须选择 no_change。
 只有关系状态或相处模式发生实质变化时才允许选择 transition。
 不得编造固定输入快照之外的精确日期、事件或原话。
@@ -67,6 +67,7 @@ class WeeklyJourneyEngine:
             self.tz = ZoneInfo("Asia/Hong_Kong")
         self.max_material_chars = max(500, min(12000, int(cfg.get("max_material_chars", 4000))))
         self.max_journey_chars = max(1000, min(40000, int(cfg.get("max_journey_chars", 16000))))
+        self.max_revised_chars = max(1000, min(12000, int(cfg.get("max_revised_chars", 5000))))
         self.max_input_chars = max(20000, min(500000, int(cfg.get("max_input_chars", 240000))))
         self.max_tokens = max(800, min(6000, int(cfg.get("max_tokens", 2400))))
         schedule = self.automation_store.ensure_schedule(
@@ -383,7 +384,9 @@ class WeeklyJourneyEngine:
         if self.prompt_resolver:
             product_prompt = str(self.prompt_resolver("weekly_journey") or "").strip() or product_prompt
         user = (
-            f"<weekly_journey_product_prompt>\n{product_prompt}\n</weekly_journey_product_prompt>\n\n"
+            f"<weekly_journey_product_prompt>\n{product_prompt}\n"
+            f"整合后的 revised_content 不得超过 {self.max_revised_chars} 个字符。\n"
+            f"</weekly_journey_product_prompt>\n\n"
             f"<weekly_journey_input>\n{snapshot_json}\n</weekly_journey_input>"
         )
         raw = await client._create_message(
@@ -443,20 +446,30 @@ class WeeklyJourneyEngine:
             proposal = {}
             preview = {"writes": [], "write_count": 0, "current_journey_id": current["id"]}
         elif candidate_type == "append_current":
-            append_content = str(proposal.get("append_content") or "").strip()
+            revised_content = str(proposal.get("revised_content") or "").strip()
+            legacy_append = str(proposal.get("append_content") or "").strip()
+            legacy_candidate = not revised_content and bool(legacy_append)
+            if legacy_candidate:
+                current_content = str(current.get("content") or "").rstrip()
+                revised_content = f"{current_content}\n\n{legacy_append}" if current_content else legacy_append
             summary = str(proposal.get("summary") or "").strip()
-            if not append_content or not summary:
-                raise ValueError("append candidate requires append_content and summary")
+            if not revised_content or not summary:
+                raise ValueError("append candidate requires revised_content and summary")
+            if len(revised_content) > self.max_revised_chars and not legacy_candidate:
+                raise ValueError(
+                    f"revised journey content exceeds max_revised_chars: {len(revised_content)}"
+                )
             before_ids = self._string_list(current.get("source_bucket_ids"))
             after_ids = list(dict.fromkeys(before_ids + evidence_ids))
             proposal = {
-                "append_content": append_content,
+                "revised_content": revised_content,
                 "summary": summary,
                 "evidence_bucket_ids": evidence_ids,
             }
             preview = {
                 "current_journey_id": current["id"],
-                "content_append": append_content,
+                "content_before": current.get("content", ""),
+                "content_after": revised_content,
                 "summary_before": current.get("summary", ""),
                 "summary_after": summary,
                 "evidence_before": before_ids,

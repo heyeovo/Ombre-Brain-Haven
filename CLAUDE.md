@@ -73,6 +73,8 @@ OMBRE_TRANSPORT=streamable-http python server.py
 
 无源第一人称感受用 `hold(feel=True)` 创建不带 `whisper` 标签的独立 `type=feel` 桶；已有记忆的新感受用 `comment_bucket(kind="feel")` 写成年轮，`hold(feel=True, source_bucket=...)` 会拒绝并提示改用年轮。`whisper=True` 仅保留旧客户端兼容。`breath(domain="feel")` 排除日印象和 whisper，按创建时间倒序返回，并同时受 `max_results`（默认 20）与 `max_tokens`（默认 10000）限制；历史 whisper 只能经 `domain="whisper"` 显式读取。
 
+`breath(domain="pinned")` 是钉选桶专用读取入口，不受普通 `max_results` 条数限制；一次调用按 `max_tokens` 预算公平分配正文，并列出全部能够放入预算的钉选桶 ID、标题和内容。它不混入 protected、自我锚点或 journey。
+
 ### 事件时间与日期读取
 
 `hold(date=...)` 写入 `metadata.event_time`，通常为完整 ISO 时间。`breath(date=...)` 按北京时间年月日匹配，并以 `event_time` 为事实源；只有缺少 `event_time` 时才兼容旧 `metadata.date`，两者都缺失的旧桶才回退到 `created`、`updated_at` 或 `last_active`。日期结果的排序与日期标签使用同一优先级，不能因实际建桶日期误命中事件桶。启动迁移只补缺失的 `event_time`，已有值不覆盖；补值时先取旧 `date`，再取 `created`。
@@ -81,7 +83,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 
 `domain=["journey"]` 的桶属于独立 `relationship_journey` 记忆层。普通关键词、向量、日期、词法补召、开窗浮现、写入合并候选和 bucket/moment 关联扩散均排除 journey；dashboard `/api/search` 为人工管理显式放行，但普通记忆库前端会过滤 journey，独立关系轨迹页使用专用接口读取。`breath(domain="journey")` 只返回按阶段起始时间倒序排列的精简目录（桶 ID、阶段标题、起止时间、一句摘要），选择后再用 `read_bucket(bucket_id)` 读取全文。目录优先使用结构化阶段元数据，旧桶缺失时回退到事件/创建时间与正文第一条有效行。
 
-普通 MCP 写入口不能维护 journey：`hold(journey=True)`、`hold(domain="journey")`、`comment_bucket`、`delete_bucket_comment` 和 `trace` 对 journey 均返回拒绝；通用 Dashboard 新建入口也拒绝 journey。独立关系轨迹页通过认证的 `/api/journeys*` 读取与人工纠错，证据只维护阶段级 `journey_source_bucket_ids`；`read_bucket` 会附带证据桶名称与 ID。后台使用 `BucketManager.create_journey_stage()`、`append_open_journey_stage()` 和 `close_open_journey_stage()` 管理状态。新阶段写 `journey_status=open`，同一时间只允许一个开放阶段；关闭后写 `journey_status=closed` 与 `journey_end`，后台追加只接受开放阶段。可传 `operation_id` 幂等去重；旧 journey 不自动迁成开放状态。
+普通 MCP 写入口不能维护 journey：`hold(journey=True)`、`hold(domain="journey")`、`comment_bucket`、`delete_bucket_comment` 和 `trace` 对 journey 均返回拒绝；通用 Dashboard 新建入口也拒绝 journey。独立关系轨迹页通过认证的 `/api/journeys*` 读取与人工纠错，证据只维护阶段级 `journey_source_bucket_ids`；`read_bucket` 会附带证据桶名称与 ID。后台使用 `BucketManager.create_journey_stage()`、`append_open_journey_stage()` 和 `close_open_journey_stage()` 管理状态。新阶段写 `journey_status=open`，同一时间只允许一个开放阶段；关闭后写 `journey_status=closed` 与 `journey_end`。`append_open_journey_stage()` 保留兼容名称，但现在把模型给出的整合后完整正文替换进开放阶段，不再字符串追加。可传 `operation_id` 幂等去重；旧 journey 不自动迁成开放状态。
 
 ### 每周 journey 候选与人工批准
 
@@ -89,9 +91,9 @@ OMBRE_TRANSPORT=streamable-http python server.py
 
 `weekly_journey` 的星期/时分只决定触发频率，材料范围从所选协作者的 `reviewed_through_date` 下一天 04:00 连续读取到最近已经完整结束的 OB 日；积压超过 31 天时先处理最早一段，不跳过后续日期。新桶看 `metadata.created`，独立 feel 排除 whisper 以及 `daily_impression` / `weekly_impression` / `relationship_weather`，旧桶新增 feel 年轮看 `comments[].created`，最终按 bucket ID 去重。日回顾使用当前 Haven `profile_id` 与明确协作者按日期范围读取。同一协作者已有 pending/applying/failed 候选时不再次调用模型。
 
-候选只允许 `no_change`、`append_current`、`transition`，证据 ID 必须来自固定输入快照；同一 `cycle_key + input_hash` 重试回放同一 run/candidate。编辑只替换 draft 并增加 revision，原始 preview 保留；确认请求只提交 `expected_revision + approved_payload_hash`，服务端重新规范化并冻结完整 approved payload/hash，浏览器不能临时提交另一份正文。
+候选只允许 `no_change`、`append_current`、`transition`，证据 ID 必须来自固定输入快照；`append_current` 的 draft 使用 `revised_content`，表示去重、压缩并整合旧正文后的完整开放阶段正文，默认最多 5000 字符。同一 `cycle_key + input_hash` 重试回放同一 run/candidate。编辑只替换 draft 并增加 revision，原始 preview 保留；确认请求只提交 `expected_revision + approved_payload_hash`，服务端重新规范化并冻结完整 approved payload/hash，浏览器不能临时提交另一份正文。
 
-`automation_executor.py` 只注册 `weekly_journey`。首次确认前会校验候选仍 pending、已梳理截止游标、开放 journey 完整快照、批准稿 hash 和证据桶存在且非 journey；冲突保存结构化原因，不覆盖当前阶段。同一任务的持久 lease 串行化并发确认。`no_change` 零 journey 写入但人工确认后仍推进截止游标；`append_current` 只调用开放阶段追加；`transition` 以稳定的 `:close` / `:create` 派生 operation ID 两步执行。候选完成与游标推进在同一 SQLite 事务；失败、拒绝、冲突和仅生成候选均不推进。关闭成功而创建失败时保留部分结果，重试幂等回放 close 后继续 create。
+`automation_executor.py` 只注册 `weekly_journey`。首次确认前会校验候选仍 pending、已梳理截止游标、开放 journey 完整快照、批准稿 hash 和证据桶存在且非 journey；冲突保存结构化原因，不覆盖当前阶段。同一任务的持久 lease 串行化并发确认。`no_change` 零 journey 写入但人工确认后仍推进截止游标；`append_current` 用 `revised_content` 重写开放阶段；`transition` 以稳定的 `:close` / `:create` 派生 operation ID 两步执行。候选完成与游标推进在同一 SQLite 事务；失败、拒绝、冲突和仅生成候选均不推进。关闭成功而创建失败时保留部分结果，重试幂等回放 close 后继续 create。
 
 ## 配置
 
@@ -142,7 +144,7 @@ POST /auth/login  { password } → set-cookie
 GET    /api/buckets                          # 所有桶（含 noise 字段）
 GET    /api/bucket/{bucket_id}               # 单个桶（含 noise 字段）
 POST   /api/bucket                           # 新建
-PATCH  /api/bucket/{bucket_id}               # 更新（支持 noise 标记）
+PATCH  /api/bucket/{bucket_id}               # 更新（支持 noise 标记），成功返回重载后的 bucket
 DELETE /api/bucket/{bucket_id}               # 软删除 → 回收站
 POST   /api/touch/{bucket_id}?ripple=true/false     # 轻触/激活
 POST   /api/archive/{bucket_id}              # 归档
@@ -255,7 +257,7 @@ GET  /api/import/patterns                                # 模式检测
 ### 配置 & 记忆
 ```
 GET  /api/config                      # 读取模型、自动打标运行参数、召回等 Dashboard 安全配置
-POST /api/config                      # 热更新并可持久化模型、自动打标运行参数、召回等配置
+POST /api/config                      # 热更新并可持久化模型、自动打标运行参数、召回等配置；密钥写 state/.env
 GET  /api/prompts                     # 读 prompt
 POST /api/prompts                     # 按 revision 持久保存产品 Prompt，下一次调用立即生效
 POST /api/prompts/reset               # 删除用户覆盖并恢复当前代码默认

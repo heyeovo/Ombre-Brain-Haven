@@ -199,7 +199,7 @@ class JourneyLifecycleContractTest(unittest.IsolatedAsyncioTestCase):
         manager.get = get
         return manager, store
 
-    async def test_open_stage_is_unique_and_background_append_is_idempotent(self):
+    async def test_open_stage_is_unique_and_background_rewrite_is_idempotent(self):
         manager, store = self.manager_with_store()
 
         created = await manager.create_journey_stage(
@@ -216,20 +216,21 @@ class JourneyLifecycleContractTest(unittest.IsolatedAsyncioTestCase):
             )
 
         first_append = await manager.append_open_journey_stage(
-            content="本周关系状态延续。",
+            content="整合后的阶段正文：本周关系状态延续。",
             summary="仍在靠近",
             source_bucket_ids=["memory-1"],
             operation_id="weekly-append-1",
         )
         duplicate = await manager.append_open_journey_stage(
-            content="本周关系状态延续。",
+            content="整合后的阶段正文：本周关系状态延续。",
             operation_id="weekly-append-1",
         )
 
         bucket = store[created["bucket_id"]]
-        self.assertEqual(first_append["status"], "appended")
+        self.assertEqual(first_append["status"], "rewritten")
         self.assertEqual(duplicate["status"], "duplicate")
-        self.assertEqual(bucket["content"].count("本周关系状态延续。"), 1)
+        self.assertEqual(bucket["content"], "整合后的阶段正文：本周关系状态延续。")
+        self.assertNotIn("阶段初始状态", bucket["content"])
         self.assertEqual(bucket["metadata"]["journey_source_bucket_ids"], ["memory-1"])
 
     async def test_closed_stage_rejects_background_append_but_stays_in_store(self):

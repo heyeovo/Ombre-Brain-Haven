@@ -230,7 +230,7 @@ class AutomationExecutor:
             operation_id = f"{base}:append"
             duplicate = await self._find_journey_operation(operation_id)
             steps["append"] = duplicate or await self.bucket_mgr.append_open_journey_stage(
-                content=str(draft.get("append_content") or ""),
+                content=str(draft.get("revised_content") or ""),
                 summary=str(draft.get("summary") or ""),
                 source_bucket_ids=evidence_ids,
                 operation_id=operation_id,

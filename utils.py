@@ -158,9 +158,12 @@ def load_config(config_path: str = None) -> dict:
     Priority: process env > persisted env > runtime YAML > config.yaml > defaults.
     优先级：进程环境变量 > 持久密钥文件 > 运行时 YAML > config.yaml > 内置默认值。
     """
+    state_env_root = str(os.environ.get("OMBRE_STATE_DIR") or "").strip()
     env_path = os.environ.get(
         "OMBRE_ENV_PATH",
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+        os.path.join(state_env_root, ".env")
+        if state_env_root
+        else os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
     )
     _load_env_file(env_path)
 
@@ -585,6 +588,17 @@ def load_config(config_path: str = None) -> dict:
                 f"Failed to parse runtime config, ignoring / "
                 f"运行时配置解析失败，已忽略: {e}"
             )
+
+    # The dashboard writes secrets beside the persistent state volume. Load
+    # that file after YAML has established state_dir as well, so deployments
+    # without an explicit OMBRE_STATE_DIR still survive container restarts.
+    persisted_env_path = os.environ.get("OMBRE_ENV_PATH", "")
+    if not persisted_env_path:
+        persisted_state_dir = str(config.get("state_dir") or "").strip()
+        if persisted_state_dir:
+            persisted_env_path = os.path.join(persisted_state_dir, ".env")
+    if persisted_env_path and os.path.abspath(persisted_env_path) != os.path.abspath(env_path):
+        _load_env_file(persisted_env_path)
 
     # --- Environment variable overrides (highest priority) ---
     # --- 环境变量覆盖敏感/运行时配置（优先级最高）---

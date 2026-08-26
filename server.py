@@ -7642,6 +7642,7 @@ async def breath(
     session_id: str = "",
     importance_min: int = -1,
 ) -> str:
+    """读取或浮现记忆；domain="pinned" 会在一次调用中读取全部钉选桶。"""
     await decay_engine.ensure_started()
     max_results = _int_between(max_results, 20, 1, 50)
     max_tokens = _int_between(max_tokens, 10000, 0, 20000)
@@ -7684,6 +7685,53 @@ async def breath(
             max_tokens=max_tokens,
             limit=max_results,
         )
+
+    if domain_key == "pinned":
+        try:
+            all_buckets = await bucket_mgr.list_all(include_archive=False)
+            pinned_buckets = [
+                bucket for bucket in all_buckets
+                if bucket.get("metadata", {}).get("pinned")
+                and not is_self_anchor_bucket(bucket)
+                and "journey" not in {
+                    str(item).strip().lower()
+                    for item in bucket.get("metadata", {}).get("domain", []) or []
+                }
+            ]
+            pinned_buckets.sort(
+                key=lambda bucket: (
+                    str(bucket.get("metadata", {}).get("name") or ""),
+                    str(bucket.get("id") or ""),
+                )
+            )
+            if not pinned_buckets:
+                return "当前没有钉选桶。"
+
+            remaining = max_tokens
+            rows: list[str] = []
+            for index, bucket in enumerate(pinned_buckets):
+                if remaining <= 0:
+                    break
+                meta = bucket.get("metadata", {})
+                header = f"[bucket_id:{bucket.get('id', '')}] {meta.get('name') or bucket.get('id', '')}"
+                content = strip_wikilinks(str(bucket.get("content") or "")).strip()
+                entry = f"{header}\n{content}" if content else header
+                buckets_left = len(pinned_buckets) - index
+                fair_budget = max(40, remaining // max(1, buckets_left))
+                clipped = _trim_handoff_text_to_token_budget(entry, min(remaining, fair_budget))
+                if not clipped:
+                    break
+                rows.append(clipped)
+                remaining -= count_tokens_approx(clipped)
+
+            omitted = len(pinned_buckets) - len(rows)
+            title = f"=== 钉选桶（共 {len(pinned_buckets)} 个）==="
+            if omitted:
+                title += f"\n受 max_tokens 限制，后 {omitted} 个未能放入正文。"
+            return title + "\n" + "\n---\n".join(rows)
+        except Exception as e:
+            logger.error("Pinned breath failed / 钉选桶读取失败: %s", e)
+            return "读取钉选桶失败。"
 
     if _is_pending_followup_domain(domain_key) or (not domain_key and _breath_query_requests_pending_followups(query)):
         return "旧 followup 派生待办已停用；请使用 list_todos 主动查询 Todo。照顾备忘请继续使用 reminder_list。"
@@ -12574,7 +12622,14 @@ async def api_update_bucket(request):
         except Exception:
             pass
 
-    return JSONResponse({"ok": True, "updated": list(updates.keys())})
+    updated_bucket = await bucket_mgr.get(bucket_id)
+    if not updated_bucket:
+        return JSONResponse({"error": "updated bucket could not be reloaded"}, status_code=500)
+    return JSONResponse({
+        "ok": True,
+        "updated": list(updates.keys()),
+        "bucket": _bucket_read_payload(updated_bucket),
+    })
 
 @mcp.custom_route("/api/bucket/{bucket_id}", methods=["DELETE"])
 async def api_delete_bucket(request):

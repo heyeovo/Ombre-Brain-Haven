@@ -99,6 +99,7 @@
 | `OMBRE_BUCKETS_DIR` | 记忆桶文件存放目录（默认 `./buckets`；Docker Volume 挂载时务必设置） |
 | `OMBRE_STATE_DIR` | 运行状态目录（默认 `<buckets_dir>/../state`），含 embedding DB、portrait 等 |
 | `OMBRE_RUNTIME_CONFIG_PATH` | 运行时配置路径（默认 `<state_dir>/config.runtime.yaml`） |
+| `OMBRE_ENV_PATH` | Dashboard 持久密钥文件路径（默认 `<state_dir>/.env`；进程环境变量优先于该文件） |
 
 ## 传输与网络
 
@@ -169,6 +170,6 @@ Webhook 推送格式（JSON）：
 | `OMBRE_RECALL_DIAGNOSTICS_MAX_CANDIDATES` | 诊断日志最大候选数 |
 | `OMBRE_SCORING_WARMTH_BOOST` | 评分暖度加成（见 `bucket_manager.py`） |
 
-## Zeabur 部署建议
+## Dashboard 持久配置
 
-不必逐个设 env var。只设核心 4 个 + 挂载 `config.yaml` 持久化 Volume。运行时通过 Dashboard 热更新配置，回写到 `config.yaml`（挂载不可写时 fallback 到 `state/config.runtime.yaml`）。
+非秘密热更新写入 `<state_dir>/config.runtime.yaml`；Dashboard 中新输入的 API key 写入 `<state_dir>/.env`，启动时自动读取。Coolify 已直接配置的同名环境变量优先级最高，不会被持久文件覆盖。

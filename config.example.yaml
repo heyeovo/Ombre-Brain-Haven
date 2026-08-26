@@ -726,6 +726,7 @@ weekly_journey:
   timezone: "Asia/Hong_Kong"
   max_material_chars: 4000         # per bucket / feel ring content boundary
   max_journey_chars: 16000         # current open journey content boundary
+  max_revised_chars: 5000          # integrated full-stage rewrite boundary
   max_input_chars: 240000          # fail safely instead of silently dropping evidence
   max_tokens: 2400
 

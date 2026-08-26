@@ -407,7 +407,7 @@ class WeeklyJourneyEngineContractsTest(unittest.IsolatedAsyncioTestCase):
                 "rationale": ["本周出现了可延续的共同日常"],
                 "evidence_bucket_ids": ["ordinary-new", "old-with-ring"],
                 "proposal": {
-                    "append_content": "这一周，我们继续把生活安顿下来。",
+                    "revised_content": "当前阶段已经整合为：这一周，我们继续把生活安顿下来。",
                     "summary": "继续安顿共同日常",
                     "evidence_bucket_ids": ["ordinary-new", "old-with-ring"],
                 },
@@ -432,7 +432,7 @@ class WeeklyJourneyEngineContractsTest(unittest.IsolatedAsyncioTestCase):
             "rationale": ["错误证据"],
             "evidence_bucket_ids": ["not-in-input"],
             "proposal": {
-                "append_content": "不应保存",
+                "revised_content": "不应保存",
                 "summary": "不应保存",
                 "evidence_bucket_ids": ["not-in-input"],
             },

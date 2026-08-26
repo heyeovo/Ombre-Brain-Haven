@@ -803,8 +803,10 @@ class BucketManager:
             # dynamic bucket instead of leaving permanent/importance=10 residues.
             kwargs["importance"] = int(post.get("importance_before_pin", 5))
             post["type"] = str(post.get("type_before_pin") or "dynamic")
-            post.pop("importance_before_pin", None)
-            post.pop("type_before_pin", None)
+            if "importance_before_pin" in post:
+                del post["importance_before_pin"]
+            if "type_before_pin" in post:
+                del post["type_before_pin"]
 
         # --- Pinned/protected buckets keep importance locked except while unpinning. ---
         if is_protected or (was_pinned and not unpinning):

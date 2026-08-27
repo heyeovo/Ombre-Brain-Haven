@@ -134,10 +134,18 @@ Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的
 
 已确认但本次暂不实现的后续边界：配置中的称呼应“默认中性”，不能无条件永久删除。当称呼本身是明确讨论对象，例如“你还记得第一次叫我老婆吗”，需要将“老婆”恢复为目标主题；日常句首/句尾呼唤仍不作为证据。该语境区分应单独实现和验收，不与本次恢复正确雨桶混做。
 
+最终修正已由用户 commit/push/deploy，线上完整 SHA 为 `4b2ffd2eba884c6d3bdd1be07dd60a5ba48ceb48`，Coolify 已配置 `OMBRE_RECALL_IGNORED_ADDRESS_TERMS=小言,言之,小羊`。session `ob2-20260827-r1bpf2` Round 25 重放“话说 今天下雨了 小言”后用户确认结果正确：Shadow 只保留雨桶，情书桶不再进入 Shadow 会选。该轮证明称呼配置、可信主题约束和正式关键词分复用已按预期组合；历史 Round 不会自动重算。
+
+## 召回透镜当前观测缺口
+
+本轮排障多次必须打开 Gateway 原始 Debug 并在超长 JSON 中搜索 bucket ID，成本过高，且容易把正式拒绝原因误读成 Shadow 拒绝原因。召回透镜当前“被拒候选”主要展示正式 `admission_reason` 与正式分数，没有直接展示对应的 `shadow_admission_reason` / `shadow_relevance_debug`。页面还缺少部分中文映射，例如 `retrieval_alias_only` 和 evidence label `retrieval_alias`，目前只能显示“尚未收录中文说明”。
+
+已确认下一窗口产品目标：召回排障应只使用召回透镜一个页面，不再要求用户打开 Gateway Debug 或翻原始 JSON。候选卡需要明确区分正式判断与 Shadow 判断，并在可折叠详情中展示：Shadow 选择/拒绝、中文原因、清理后主题、桶命中主题、本轮忽略称呼、语义状态、直接证据与 query 故障降级状态。轮次详情应保留必要性、targetable、planner 状态和 fallback strategy。必须审计 Haven 当前所有正式/Shadow admission reason、evidence label、semantic status、planner status 和 fallback strategy，补齐中文映射；未来未知码也要显示具体内部码和可理解的兜底文案，不能只显示“尚未收录中文说明”。
+
 ## 发布后仍需继续核查
 
 1. **Embedding 内容新鲜度**：线上 318 个桶已确认没有缺失或模型/维度过期向量，因此不执行 backfill。现有检查不包含正文内容哈希；只有后续出现“桶正文已改但向量未刷新”的具体证据时，再单独审计内容新鲜度。
-2. **Semantic 查询状态**：确认新记录能区分 `scored`、`indexed_not_in_semantic_top_k`、`query_embedding_unavailable/failed`、`query_timeout/failed` 和 engine disabled；如果召回透镜现有字段不足以观察，下一窗口只讨论最小功能展示，不做视觉重构。
+2. **Semantic 查询状态**：新记录已能区分 `scored`、`indexed_not_in_semantic_top_k`、`query_embedding_unavailable/failed`、`query_timeout/failed` 和 engine disabled；下一窗口把这些已有字段完整呈现在召回透镜，不做视觉重构。
 3. **Session 去重真实契约**：用户预期“同一窗口已召回桶不会再次召回”，但当前代码默认 `skip_recent_rounds=5`，且强证据存在 bypass。发布后先用实际 session 验证；在结论明确前，不依赖“全窗口绝不重复”作为放宽 explicit 的唯一安全条件，也不在本 Phase 顺手改去重。
 4. **Planner 实际可用性**：按新记录统计 normal / not_triggered / disabled / degraded，以及 dehydration 鉴权错误；确认用户当前线上是否确有可用 dehydration 配置。Planner 不可用时 contextual 必须保持“不新增”。
 5. **Shadow relevance 泛化**：继续收集自然话题、明确过去指向、系统复盘和 keyword-only 噪声案例。重点观察 `semantic >= 0.50 + keyword >= 0.65 + specific topic` 的第一版组合证据是否放过无关桶或漏掉真正相关桶；该阈值只用于 Shadow，线上验收后再决定是否调整。
@@ -145,25 +153,23 @@ Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的
 
 ## 后续推进顺序
 
-1. 用户 commit/push 第二轮 Haven 修改并更新 Coolify `HAVEN_RELEASE_SHA`；本轮 Dashboard 无代码变化，不需要重新部署。
-2. 重放原固定案例及 `ob2-20260827-zoazvn` Round 4、6、9、16、20、21、23、24，记录新 session + Round。
+1. 下一窗口只完善 Dashboard 召回透镜的单页 Debug 信息与中文映射；不改召回算法。
+2. Dashboard 完善并部署后，继续重放原固定案例及 `ob2-20260827-zoazvn` Round 4、6、9、16、20、21、23、24，直接在召回透镜记录结论。
 3. 继续验收 necessity、候选独立审核、planner 降级不扩召回和 `semantic_status`；embedding 覆盖统计已完成，不做 backfill。
-4. Shadow 仍有稳定误判时继续在 Phase 1 调整，正式 admission 保持不变。
+4. 称呼作为明确讨论对象的语境区分另开后续窗口，不与召回透镜修改混做。
 5. 只有 Shadow 验收稳定后才进入 Phase 2，把统一 relevance/admission 渐进接入正式召回；仍不在 Phase 2 顺手处理家族聚类、关系边或额外 LLM agent。
 
-第二轮 Phase 1 代码已提交并完成线上 Shadow 测试；本次 Round 19 可配置称呼排除修正尚未 commit/push/deploy。发布时需在 Coolify 增加 `OMBRE_RECALL_IGNORED_ADDRESS_TERMS=小言,言之,小羊`，然后重放“今天下雨了 小言”；旧 Debug 不会自动重算。
-
-尚需在用户 commit、push 并按 Coolify `HAVEN_RELEASE_SHA` 发布后，除原固定 Round 9、12、25、54、57、61 外，重点重放 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24。验收 Shadow 是否删除 keyword-only 噪声、自然 contextual 是否只选高相关桶，以及候选 `semantic_status` 是否能解释原来的 0 分。历史 Debug 不会自动补算新字段。未完成线上真实验收前，不进入 Phase 2 正式 gate 切换。
+Haven Phase 1 当前修正已全部 commit/push/deploy；最新线上 SHA 和 Round 25 验收见上。下一窗口的 Dashboard 修改完成并部署后，除原固定 Round 9、12、25、54、57、61 外，重点重放 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24。验收 Shadow 是否删除 keyword-only 噪声、自然 contextual 是否只选高相关桶，以及候选 `semantic_status` 是否能解释原来的 0 分。历史 Debug 不会自动补算新字段。未完成线上真实验收前，不进入 Phase 2 正式 gate 切换。
 
 ## 下一窗口唯一范围
 
-先完成 Phase 1 线上 shadow 验收。原六个固定案例与第二轮真实反馈 Round 4、6、9、16、20、21、23、24 通过后，才进入 Phase 2：统一准入与排序。Phase 2 才讨论正式软化 axis / anchor / topic gate、替换 `non_explicit_query` 和渐进启用；不得在未验收 Phase 1 时直接修改线上 admission gate。
+只完善 `ob-dashboard2` 的召回透镜，使正式与 Shadow 的判断、原因、主题证据、语义状态和降级信息在一个页面可直接排查，并完整审计中文映射。开始前读取 Dashboard 的 `CLAUDE.md`、`DESIGN.md` 以及本 handoff；按“假设 → 验证”优先读取最小前端片段，确定方案后列准确文件清单并等待用户确认再改。不得在该窗口修改 Haven 召回算法、称呼语境判断或正式 admission gate。
 
 ## 不得扩散的边界
 
 - Phase 1 不直接切换正式召回路径，只新增可观测的 shadow 结果。
 - Phase 1 不创建家族表、关系边或自动聚类任务。
-- Phase 1 不顺手重做 Gateway 原始 Debug 页面或召回透镜视觉。
+- 下一窗口只补召回透镜诊断字段、折叠详情和中文映射，不重做整体视觉，不修改 Gateway 原始 Debug 页面。
 - 不用 `localStorage` 作为未来人工标注的唯一存储。
 - 不在未对比固定验收集前删除现有召回规则。
 

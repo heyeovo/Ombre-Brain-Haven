@@ -126,9 +126,13 @@ Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的
 
 已补 Shadow-only 安全降级：仅 `query_timeout / query_failed / query_embedding_unavailable / query_embedding_failed` 可触发；仅保留正式结果已有候选；候选还必须命中隔离称呼后的可信主题词且 `keyword >= 0.85`。因此雨桶可由“下雨 + 0.908”保留，情书桶不能靠称呼或 `0.669` 通过；additional/suppressed 候选不会因此新增，`indexed_not_in_semantic_top_k` 也不会触发。正式 3 秒超时、重试策略、正式 admission 和排序均未修改，继续收集 query timeout 频率后再决定是否单独调整可靠性。
 
-同一 session 的 Round 15 进一步确认：语义查询恢复后，雨桶与情书桶都被 Shadow 加入，因此问题不在 timeout fallback。根因是 Shadow 虽然从主题词中排除了“小言/小羊”，却仍复用了正式路径中被称呼抬高的 `keyword_score`；同时 query 词命中桶标题和复合 rare-name 可绕过可信主题要求。现已让 Shadow 在存在身份称呼时用清理后的 query 独立重算关键词分，并要求 rare-name、身份名候选和标题直接命中同时具有可信主题；只有明确桶 ID 仍可直接放行。Round 15 回归用例确认情书桶的正式关键词分可保留 `0.669` 供对比，但 Shadow 关键词分为 `0`，不能再绕过主题判断；正式召回路径保持不变。
+同一 session 的 Round 15 进一步确认：语义查询恢复后，雨桶与情书桶都被 Shadow 加入，因此问题不在 timeout fallback。根因是 Shadow 没有把“小言/小羊”稳定隔离为中性称呼，同时 query 词命中桶标题和复合 rare-name 可绕过可信主题要求。现已要求 rare-name、身份名候选和标题直接命中同时具有清理后的可信主题；只有明确桶 ID 仍可直接放行。正式召回路径保持不变。
 
-部署后新产生的 Round 19 仍选中情书桶。原始 Debug 证明不是长正文偶然命中“下雨”，而是线上持久化 `/config/config.yaml` 仍使用模板身份 `AI / User / 用户 / 对方`：`ignored_identity_terms=[]`、`topic_terms=["下雨","小言"]`、`matched_topic_terms=["小言"]`、`shadow_keyword_score=0.6694`，最终由 `shadow_semantic_keyword_agreement` 放行。为避免把个人称呼写死在代码或扩充多组身份环境变量，Coolify compose 现只透传一个逗号分隔变量 `OMBRE_RECALL_IGNORED_ADDRESS_TERMS`；Gateway 将它与已配置身份称呼合并，仅用于 Shadow 清理、主题提取和关键词重算。建议线上先设为 `小言,言之,小羊`，以后可直接追加称呼。Debug 新增 `ignored_address_terms` 和 `ignored_configured_address_terms`；正式召回不受影响。
+部署后新产生的 Round 19 仍选中情书桶。原始 Debug 证明不是长正文偶然命中“下雨”，而是线上持久化 `/config/config.yaml` 仍使用模板身份 `AI / User / 用户 / 对方`：`ignored_identity_terms=[]`、`topic_terms=["下雨","小言"]`、`matched_topic_terms=["小言"]`、`shadow_keyword_score=0.6694`，最终由 `shadow_semantic_keyword_agreement` 放行。为避免把个人称呼写死在代码或扩充多组身份环境变量，Coolify compose 现只透传一个逗号分隔变量 `OMBRE_RECALL_IGNORED_ADDRESS_TERMS`；Gateway 将它与已配置身份称呼合并，仅用于 Shadow 主题清理。建议线上先设为 `小言,言之,小羊`，以后可直接追加称呼。Debug 新增 `ignored_address_terms` 和 `ignored_configured_address_terms`；正式召回不受影响。
+
+首次上线该变量后，情书桶被正确移除，但雨桶也被 Shadow 错误移除。原因是曾用 `_calc_topic_score(query, bucket)` 对单桶重算清理后的关键词分；该函数内部 BM25 依赖候选语料，单桶分数不能与正式候选池的阈值比较。现已删除第二套单桶关键词重算：Shadow 保留正式同口径关键词分，称呼仅不能建立可信主题。固定回归为雨桶 `下雨 + semantic 0.588 + keyword 0.9083` 通过、情书桶只命中称呼而拒绝。
+
+已确认但本次暂不实现的后续边界：配置中的称呼应“默认中性”，不能无条件永久删除。当称呼本身是明确讨论对象，例如“你还记得第一次叫我老婆吗”，需要将“老婆”恢复为目标主题；日常句首/句尾呼唤仍不作为证据。该语境区分应单独实现和验收，不与本次恢复正确雨桶混做。
 
 ## 发布后仍需继续核查
 

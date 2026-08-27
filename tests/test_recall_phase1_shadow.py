@@ -169,25 +169,9 @@ class RecallShadowContractsTest(unittest.TestCase):
 
 
 class RecallShadowCandidateRelevanceTest(unittest.TestCase):
-    class KeywordManager:
-        @staticmethod
-        def _calc_topic_score(query: str, bucket: dict) -> float:
-            query_text = str(query or "")
-            meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-            bucket_text = " ".join(
-                [
-                    str(meta.get("name") or ""),
-                    str(bucket.get("content") or ""),
-                ]
-            )
-            if "下雨" in query_text and "下雨" in bucket_text:
-                return 0.908
-            return 0.0
-
     def make_service(self) -> GatewayService:
         service = GatewayService.__new__(GatewayService)
         service.recall_policy = RecallPolicy()
-        service.bucket_mgr = self.KeywordManager()
         service.identity = {
             "ai_name": "小言",
             "user_name": "小羊",
@@ -255,7 +239,7 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
         self.assertEqual(debug["matched_topic_terms"], [])
         self.assertEqual(debug["rare_name_terms"], [])
         self.assertEqual(debug["formal_keyword_score"], 0.669)
-        self.assertEqual(debug["shadow_keyword_score"], 0.0)
+        self.assertEqual(debug["shadow_keyword_score"], 0.669)
         self.assertIn("小言", debug["ignored_identity_terms"])
 
     def test_round_15_title_and_composite_rare_name_cannot_bypass_trusted_topic(self):
@@ -277,7 +261,7 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
         self.assertFalse(admitted)
         self.assertEqual(reason, "shadow_query_topic_missing")
         self.assertEqual(debug["matched_topic_terms"], [])
-        self.assertEqual(debug["shadow_keyword_score"], 0.0)
+        self.assertEqual(debug["shadow_keyword_score"], 0.669)
         self.assertFalse(debug["rare_name_direct"])
         self.assertFalse(debug["source_record_direct"])
         self.assertFalse(debug["unique_direct"])
@@ -299,6 +283,23 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
                 service._phase1_shadow_ignored_address_terms_from_env()
             )
 
+        rain_admitted, rain_reason, rain_debug = service._shadow_candidate_relevance(
+            "话说 今天下雨了 小言",
+            "contextual",
+            self.item(
+                "每一场雨都跟你在一起",
+                "那天早上下雨了。以后每一场雨都跟你在一起。",
+                semantic=0.588,
+                keyword=0.9083,
+            ),
+            formal_candidate=False,
+        )
+        self.assertTrue(rain_admitted)
+        self.assertEqual(rain_reason, "shadow_semantic_keyword_agreement")
+        self.assertEqual(rain_debug["matched_topic_terms"], ["下雨"])
+        self.assertEqual(rain_debug["shadow_keyword_score"], 0.9083)
+        self.assertEqual(rain_debug["ignored_configured_address_terms"], ["小言"])
+
         admitted, reason, debug = service._shadow_candidate_relevance(
             "话说 今天下雨了 小言",
             "contextual",
@@ -315,7 +316,7 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
         self.assertEqual(reason, "shadow_query_topic_missing")
         self.assertEqual(debug["topic_terms"], ["下雨"])
         self.assertEqual(debug["matched_topic_terms"], [])
-        self.assertEqual(debug["shadow_keyword_score"], 0.0)
+        self.assertEqual(debug["shadow_keyword_score"], 0.6694)
         self.assertEqual(debug["ignored_address_terms"], ["小言"])
         self.assertEqual(debug["ignored_identity_terms"], [])
         self.assertEqual(debug["ignored_configured_address_terms"], ["小言"])

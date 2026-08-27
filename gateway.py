@@ -14620,7 +14620,6 @@ class GatewayService:
             if self._compact_lookup_key(term) not in topic_keys
         ]
         return {
-            "sanitized_query": sanitized_query,
             "topic_terms": topic_terms,
             "raw_topic_terms": raw_topic_terms,
             "ignored_address_terms": ignored_address_terms,
@@ -14631,26 +14630,6 @@ class GatewayService:
 
     def _shadow_specific_topic_terms(self, query: str) -> list[str]:
         return self._shadow_topic_term_plan(query)["topic_terms"]
-
-    def _shadow_keyword_score(
-        self,
-        topic_term_plan: dict[str, Any],
-        bucket: dict,
-        formal_keyword_score: float,
-    ) -> float:
-        if not topic_term_plan.get("ignored_address_terms"):
-            return formal_keyword_score
-        sanitized_query = str(topic_term_plan.get("sanitized_query") or "").strip()
-        if not sanitized_query:
-            return 0.0
-        scorer = getattr(getattr(self, "bucket_mgr", None), "_calc_topic_score", None)
-        if not callable(scorer):
-            return 0.0
-        try:
-            return self._clamp(scorer(sanitized_query, bucket))
-        except Exception as exc:
-            logger.warning("Shadow keyword rescore failed: %s", exc)
-            return 0.0
 
     def _shadow_candidate_relevance(
         self,
@@ -14679,11 +14658,7 @@ class GatewayService:
         )
         formal_keyword_score = self._safe_float(item.get("keyword_score"), 0.0)
         topic_term_plan = self._shadow_topic_term_plan(query)
-        keyword_score = self._shadow_keyword_score(
-            topic_term_plan,
-            bucket,
-            formal_keyword_score,
-        )
+        keyword_score = formal_keyword_score
         topic_terms = topic_term_plan["topic_terms"]
         matched_topic_terms = [
             term

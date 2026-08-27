@@ -72,9 +72,9 @@ _select_dynamic_buckets                     gateway.py ~16509
 `phase1_recall_shadow_enabled` 默认开启，只影响 Debug 计算。正式结果仍由原路径产生；shadow 使用正式候选和被拒候选做并行投影：
 
 - Shadow 会先从原句中隔离 `identity.relationship_terms`、AI/用户名称、用户别名，以及逗号分隔的环境变量 `OMBRE_RECALL_IGNORED_ADDRESS_TERMS`，再提取可信主题词；日常称呼不能单独充当主题或 rare-name 独特证据。额外称呼列表用于线上身份配置仍为通用值或需要继续加入昵称的场景，仅作用于 Shadow relevance，不改变正式关键词拆分、搜索、评分或注入。
-- 只要原句包含被隔离的身份称呼，Shadow 会用清理后的 query 独立重算关键词分，不复用被称呼抬高的正式 `keyword_score`。rare-name、身份名候选和“query 词命中桶标题”也必须同时命中可信主题；用户明确给出桶 ID 仍属于直接证据。
-- 候选 debug 同时记录 `raw_topic_terms`、`topic_terms`、`ignored_address_terms`、`ignored_identity_terms`、`ignored_configured_address_terms`、`ignored_topic_terms`、`formal_keyword_score`、`shadow_keyword_score` 以及各直接证据是否实际生效，用于解释称呼边界产生的异常组合词为何没有参与 Shadow 放行。
-- 当 query 语义阶段返回 `query_timeout / query_failed / query_embedding_unavailable / query_embedding_failed` 时，Shadow 可用清理称呼后重算的关键词分 `>= 0.85` 且命中可信主题词的结果做保守降级；该降级只保留正式结果中已经存在的桶，不从 additional/suppressed 候选新增，因此 contextual 不会因语义故障扩大召回。`indexed_not_in_semantic_top_k` 不属于查询故障，不能触发此降级。
+- Shadow 保留正式候选池同一口径的 `keyword_score`，不再对单桶建立第二套 BM25 分数；称呼只是不允许成为 `matched_topic_terms` 或直接证据，不会给候选加分或扣分。rare-name、身份名候选和“query 词命中桶标题”必须同时命中清理后的可信主题；用户明确给出桶 ID 仍属于直接证据。
+- 候选 debug 同时记录 `raw_topic_terms`、`topic_terms`、`ignored_address_terms`、`ignored_identity_terms`、`ignored_configured_address_terms`、`ignored_topic_terms`、`formal_keyword_score`、`shadow_keyword_score` 以及各直接证据是否实际生效。当前两个 keyword 字段同值，保留命名仅为兼容已发布 Debug。
+- 当 query 语义阶段返回 `query_timeout / query_failed / query_embedding_unavailable / query_embedding_failed` 时，Shadow 可用正式关键词分 `>= 0.85` 且命中清理称呼后的可信主题词做保守降级；该降级只保留正式结果中已经存在的桶，不从 additional/suppressed 候选新增，因此 contextual 不会因语义故障扩大召回。`indexed_not_in_semantic_top_k` 不属于查询故障，不能触发此降级。
 
 - `none` 的 shadow 结果为空；
 - `explicit/contextual` 都重新审核正式候选，不再无条件继承正式 admission；

@@ -91,8 +91,8 @@ Dashboard 已新增：
 
 最新本地验证结果（2026-08-28）：
 
-- Phase 1 专项测试 17/17 通过；
-- Haven 全套测试 137/137 通过；
+- Phase 1 专项测试 18/18 通过；
+- Haven 全套测试 138/138 通过；
 - `git diff --check` 通过；
 - `py_compile recall_policy.py gateway.py embedding_engine.py tests/test_recall_phase1_shadow.py` 通过；
 - 正式 `_admit_bucket_for_recall`、排序公式、注入开关和 Dashboard 均未修改。
@@ -126,6 +126,8 @@ Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的
 
 已补 Shadow-only 安全降级：仅 `query_timeout / query_failed / query_embedding_unavailable / query_embedding_failed` 可触发；仅保留正式结果已有候选；候选还必须命中隔离称呼后的可信主题词且 `keyword >= 0.85`。因此雨桶可由“下雨 + 0.908”保留，情书桶不能靠称呼或 `0.669` 通过；additional/suppressed 候选不会因此新增，`indexed_not_in_semantic_top_k` 也不会触发。正式 3 秒超时、重试策略、正式 admission 和排序均未修改，继续收集 query timeout 频率后再决定是否单独调整可靠性。
 
+同一 session 的 Round 15 进一步确认：语义查询恢复后，雨桶与情书桶都被 Shadow 加入，因此问题不在 timeout fallback。根因是 Shadow 虽然从主题词中排除了“小言/小羊”，却仍复用了正式路径中被称呼抬高的 `keyword_score`；同时 query 词命中桶标题和复合 rare-name 可绕过可信主题要求。现已让 Shadow 在存在身份称呼时用清理后的 query 独立重算关键词分，并要求 rare-name、身份名候选和标题直接命中同时具有可信主题；只有明确桶 ID 仍可直接放行。Round 15 回归用例确认情书桶的正式关键词分可保留 `0.669` 供对比，但 Shadow 关键词分为 `0`，不能再绕过主题判断；正式召回路径保持不变。
+
 ## 发布后仍需继续核查
 
 1. **Embedding 内容新鲜度**：线上 318 个桶已确认没有缺失或模型/维度过期向量，因此不执行 backfill。现有检查不包含正文内容哈希；只有后续出现“桶正文已改但向量未刷新”的具体证据时，再单独审计内容新鲜度。
@@ -143,7 +145,7 @@ Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的
 4. Shadow 仍有稳定误判时继续在 Phase 1 调整，正式 admission 保持不变。
 5. 只有 Shadow 验收稳定后才进入 Phase 2，把统一 relevance/admission 渐进接入正式召回；仍不在 Phase 2 顺手处理家族聚类、关系边或额外 LLM agent。
 
-第二轮 Phase 1 代码已提交并完成线上 Shadow 测试；本次身份称呼隔离修正尚未 commit/push/deploy。发布后必须重放“今天下雨了 小言”，旧 Debug 不会自动重算。
+第二轮 Phase 1 代码已提交并完成线上 Shadow 测试；本次 Round 15 身份称呼证据链修正尚未 commit/push/deploy。发布后必须重放“今天下雨了 小言”，旧 Debug 不会自动重算。
 
 尚需在用户 commit、push 并按 Coolify `HAVEN_RELEASE_SHA` 发布后，除原固定 Round 9、12、25、54、57、61 外，重点重放 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24。验收 Shadow 是否删除 keyword-only 噪声、自然 contextual 是否只选高相关桶，以及候选 `semantic_status` 是否能解释原来的 0 分。历史 Debug 不会自动补算新字段。未完成线上真实验收前，不进入 Phase 2 正式 gate 切换。
 

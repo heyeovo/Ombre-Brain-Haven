@@ -14499,7 +14499,7 @@ class GatewayService:
             return "not_run"
         return "not_triggered"
 
-    def _shadow_topic_term_plan(self, query: str) -> dict[str, list[str]]:
+    def _shadow_topic_term_plan(self, query: str) -> dict[str, Any]:
         query_text = str(query or "")
         identity_terms = sorted(
             self._identity_match_terms(),
@@ -14573,6 +14573,7 @@ class GatewayService:
             if self._compact_lookup_key(term) not in topic_keys
         ]
         return {
+            "sanitized_query": sanitized_query,
             "topic_terms": topic_terms,
             "raw_topic_terms": raw_topic_terms,
             "ignored_identity_terms": ignored_identity_terms,
@@ -14581,6 +14582,26 @@ class GatewayService:
 
     def _shadow_specific_topic_terms(self, query: str) -> list[str]:
         return self._shadow_topic_term_plan(query)["topic_terms"]
+
+    def _shadow_keyword_score(
+        self,
+        topic_term_plan: dict[str, Any],
+        bucket: dict,
+        formal_keyword_score: float,
+    ) -> float:
+        if not topic_term_plan.get("ignored_identity_terms"):
+            return formal_keyword_score
+        sanitized_query = str(topic_term_plan.get("sanitized_query") or "").strip()
+        if not sanitized_query:
+            return 0.0
+        scorer = getattr(getattr(self, "bucket_mgr", None), "_calc_topic_score", None)
+        if not callable(scorer):
+            return 0.0
+        try:
+            return self._clamp(scorer(sanitized_query, bucket))
+        except Exception as exc:
+            logger.warning("Shadow keyword rescore failed: %s", exc)
+            return 0.0
 
     def _shadow_candidate_relevance(
         self,
@@ -14607,8 +14628,13 @@ class GatewayService:
             if semantic_raw is not None
             else None
         )
-        keyword_score = self._safe_float(item.get("keyword_score"), 0.0)
+        formal_keyword_score = self._safe_float(item.get("keyword_score"), 0.0)
         topic_term_plan = self._shadow_topic_term_plan(query)
+        keyword_score = self._shadow_keyword_score(
+            topic_term_plan,
+            bucket,
+            formal_keyword_score,
+        )
         topic_terms = topic_term_plan["topic_terms"]
         matched_topic_terms = [
             term
@@ -14624,11 +14650,20 @@ class GatewayService:
             if str(term or "").strip()
             and self._compact_lookup_key(term) not in identity_keys
         ]
+        explicit_bucket_id = bool(
+            bucket_id and bucket_id in self._extract_explicit_bucket_ids_from_text(query)
+        )
+        rare_name_direct = bool(rare_name_terms and has_topic)
+        identity_name_direct = bool(
+            has_topic and self._is_identity_name_candidate_bucket(query, bucket)
+        )
+        source_record_match_reason = self._source_record_explicit_bucket_match_reason(query, bucket)
+        source_record_direct = bool(has_topic and source_record_match_reason)
         unique_direct = bool(
-            (bucket_id and bucket_id in self._extract_explicit_bucket_ids_from_text(query))
-            or rare_name_terms
-            or self._is_identity_name_candidate_bucket(query, bucket)
-            or self._source_record_explicit_bucket_match_reason(query, bucket)
+            explicit_bucket_id
+            or rare_name_direct
+            or identity_name_direct
+            or source_record_direct
         )
         exact_direct = bool(
             item.get("exact_anchor_match")
@@ -14648,12 +14683,19 @@ class GatewayService:
             "semantic_status": semantic_status,
             "semantic_score": semantic_score,
             "keyword_score": keyword_score,
+            "formal_keyword_score": formal_keyword_score,
+            "shadow_keyword_score": keyword_score,
             "topic_terms": topic_terms,
             "raw_topic_terms": topic_term_plan["raw_topic_terms"],
             "ignored_identity_terms": topic_term_plan["ignored_identity_terms"],
             "ignored_topic_terms": topic_term_plan["ignored_topic_terms"],
             "matched_topic_terms": matched_topic_terms,
             "rare_name_terms": rare_name_terms,
+            "rare_name_direct": rare_name_direct,
+            "identity_name_direct": identity_name_direct,
+            "source_record_match_reason": source_record_match_reason,
+            "source_record_direct": source_record_direct,
+            "explicit_bucket_id": explicit_bucket_id,
             "unique_direct": unique_direct,
             "exact_direct": exact_direct,
             "formal_candidate": bool(formal_candidate),

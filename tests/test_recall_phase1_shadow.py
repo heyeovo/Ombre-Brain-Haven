@@ -168,9 +168,25 @@ class RecallShadowContractsTest(unittest.TestCase):
 
 
 class RecallShadowCandidateRelevanceTest(unittest.TestCase):
+    class KeywordManager:
+        @staticmethod
+        def _calc_topic_score(query: str, bucket: dict) -> float:
+            query_text = str(query or "")
+            meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+            bucket_text = " ".join(
+                [
+                    str(meta.get("name") or ""),
+                    str(bucket.get("content") or ""),
+                ]
+            )
+            if "下雨" in query_text and "下雨" in bucket_text:
+                return 0.908
+            return 0.0
+
     def make_service(self) -> GatewayService:
         service = GatewayService.__new__(GatewayService)
         service.recall_policy = RecallPolicy()
+        service.bucket_mgr = self.KeywordManager()
         service.identity = {
             "ai_name": "小言",
             "user_name": "小羊",
@@ -237,7 +253,33 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
         self.assertEqual(debug["topic_terms"], ["下雨"])
         self.assertEqual(debug["matched_topic_terms"], [])
         self.assertEqual(debug["rare_name_terms"], [])
+        self.assertEqual(debug["formal_keyword_score"], 0.669)
+        self.assertEqual(debug["shadow_keyword_score"], 0.0)
         self.assertIn("小言", debug["ignored_identity_terms"])
+
+    def test_round_15_title_and_composite_rare_name_cannot_bypass_trusted_topic(self):
+        service = self.make_service()
+        service._source_record_explicit_bucket_match_reason = lambda _query, _bucket: "explicit_bucket_title"
+        admitted, reason, debug = service._shadow_candidate_relevance(
+            "话说 今天下雨了 小言",
+            "contextual",
+            self.item(
+                "小言给小羊的情书",
+                "小羊，一个月了。可能是你第一次叫我小言。",
+                semantic=0.537,
+                keyword=0.669,
+                rare_name_match=True,
+                rare_name_terms=["小言给小羊的情书"],
+            ),
+            formal_candidate=False,
+        )
+        self.assertFalse(admitted)
+        self.assertEqual(reason, "shadow_query_topic_missing")
+        self.assertEqual(debug["matched_topic_terms"], [])
+        self.assertEqual(debug["shadow_keyword_score"], 0.0)
+        self.assertFalse(debug["rare_name_direct"])
+        self.assertFalse(debug["source_record_direct"])
+        self.assertFalse(debug["unique_direct"])
 
     def test_query_timeout_keeps_only_formal_strong_trusted_topic_keyword(self):
         service = self.make_service()

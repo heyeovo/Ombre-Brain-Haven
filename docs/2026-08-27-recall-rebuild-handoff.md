@@ -105,6 +105,32 @@ Dashboard 已新增：
 - Round 20“今天下雨了”和 Round 23“好久没约会了”应为 contextual；正确桶分别为“每一场雨都跟你在一起”（sem 0.588 / kw 0.908 / final 1.0）和“第一次正式外出约会”（sem 0.630 / kw 0.832 / final 1.0）。
 - Round 21、24 有明确过去指向，分别应召回下雨与约会相关桶。
 
+## 第二轮讨论确认的机制边界
+
+1. Query Planner 是可选的 query 整理步骤，负责生成搜索词、must terms 和扩展查询；它不是 embedding，也不是额外 recall agent。当前复用 dehydration 小模型配置（线上 Debug 曾显示 `glm-4.7-flash / model_source=dehydration`），没有可用配置、鉴权失败或超时时进入 degraded。
+2. `none / explicit / contextual` 必要性目前是本地规则判断，不调用 Planner 或其他 LLM；Round 4、9、16 的误判根因是本地 explicit/meta 边界，而不是 Planner 模型判断。
+3. `contextual` 表示“允许相关记忆自然进入候选”，不是“本轮必定召回”。“今天下雨了/好久没约会了”应允许高相关情感桶通过；同类自然话题若没有可靠候选则结果仍为空。
+4. “上次/之前/你还记得”等过去指向可以积极检索；重复召回应由 session 去重独立控制，不能靠压低 explicit/contextual 来规避。
+5. 候选相关性必须先于 `0.55` 选卡门槛。`0.55` 是正式路径对部分 direct anchor 的强制 score floor，不是真实语义分，也不能作为 admission 证据。
+6. 页面过去显示的 `semantic=0` 可能分别代表真实低分、未进 semantic Top K、缺少/过期 embedding、查询失败或 engine 未启用；大量精确 0 不能直接解释成“向量相似度真的为零”。第二轮已让新 Debug 保留 `null + semantic_status`，但没有自动 backfill。
+
+## 发布后仍需继续核查
+
+1. **Embedding 覆盖率**：统计可召回桶中 `indexed / embedding_missing / embedding_stale_model_or_dimension / embedding_invalid` 的数量和比例；抽查 Round 4、6、16 的原 semantic 0 桶。只有确认缺失或版本过期后才决定是否执行 backfill，禁止看到 0 就直接全量补跑。
+2. **Semantic 查询状态**：确认新记录能区分 `scored`、`indexed_not_in_semantic_top_k`、`query_embedding_unavailable/failed`、`query_timeout/failed` 和 engine disabled；如果召回透镜现有字段不足以观察，下一窗口只讨论最小功能展示，不做视觉重构。
+3. **Session 去重真实契约**：用户预期“同一窗口已召回桶不会再次召回”，但当前代码默认 `skip_recent_rounds=5`，且强证据存在 bypass。发布后先用实际 session 验证；在结论明确前，不依赖“全窗口绝不重复”作为放宽 explicit 的唯一安全条件，也不在本 Phase 顺手改去重。
+4. **Planner 实际可用性**：按新记录统计 normal / not_triggered / disabled / degraded，以及 dehydration 鉴权错误；确认用户当前线上是否确有可用 dehydration 配置。Planner 不可用时 contextual 必须保持“不新增”。
+5. **Shadow relevance 泛化**：继续收集自然话题、明确过去指向、系统复盘和 keyword-only 噪声案例。重点观察 `semantic >= 0.50 + keyword >= 0.65 + specific topic` 的第一版组合证据是否放过无关桶或漏掉真正相关桶；该阈值只用于 Shadow，线上验收后再决定是否调整。
+6. **缺少目标桶的明确请求**：旧 Round 25、54 若对应桶当前不存在，无法证明“明确请求不会整轮误杀”；必须另找已有真实桶的 explicit 案例替代，不把“候选不存在”误判为 gate 失败。
+
+## 后续推进顺序
+
+1. 用户 commit/push 第二轮 Haven 修改并更新 Coolify `HAVEN_RELEASE_SHA`；本轮 Dashboard 无代码变化，不需要重新部署。
+2. 重放原固定案例及 `ob2-20260827-zoazvn` Round 4、6、9、16、20、21、23、24，记录新 session + Round。
+3. 先验收 necessity、候选独立审核、planner 降级不扩召回和 `semantic_status`；再做只读 embedding 覆盖统计。
+4. Shadow 仍有稳定误判时继续在 Phase 1 调整，正式 admission 保持不变。
+5. 只有 Shadow 验收稳定后才进入 Phase 2，把统一 relevance/admission 渐进接入正式召回；仍不在 Phase 2 顺手处理家族聚类、关系边或额外 LLM agent。
+
 第二轮代码尚未 commit/push/deploy。发布后必须重放上述 Round；旧 Debug 不会自动重算。
 
 尚需在用户 commit、push 并按 Coolify `HAVEN_RELEASE_SHA` 发布后，除原固定 Round 9、12、25、54、57、61 外，重点重放 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24。验收 Shadow 是否删除 keyword-only 噪声、自然 contextual 是否只选高相关桶，以及候选 `semantic_status` 是否能解释原来的 0 分。历史 Debug 不会自动补算新字段。未完成线上真实验收前，不进入 Phase 2 正式 gate 切换。

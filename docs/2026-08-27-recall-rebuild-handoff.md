@@ -91,8 +91,8 @@ Dashboard 已新增：
 
 最新本地验证结果（2026-08-28）：
 
-- Phase 1 专项测试 15/15 通过；
-- Haven 全套测试 135/135 通过；
+- Phase 1 专项测试 17/17 通过；
+- Haven 全套测试 137/137 通过；
 - `git diff --check` 通过；
 - `py_compile recall_policy.py gateway.py embedding_engine.py tests/test_recall_phase1_shadow.py` 通过；
 - 正式 `_admit_bucket_for_recall`、排序公式、注入开关和 Dashboard 均未修改。
@@ -121,6 +121,10 @@ Dashboard 已新增：
 已确认产品规则：`言之 / 小言 / 小羊` 等配置中的高频名称和日常称呼属于对话背景，默认不作为 Shadow 主题关键词或 rare-name 独特证据。Gateway 在 Shadow 主题提取前先用边界隔离完整称呼，再重新提取可信主题；因此“下雨”可保留，而称呼及称呼边界产生的异常组合词不能帮助情书桶通过。该修正仍不改变正式拆词、搜索、评分、admission 或注入。
 
 Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的线上结果为 `Total buckets: 318 / Missing embeddings: 0`。该脚本使用当前 embedding 模型和维度检查桶向量，因此没有缺失或模型/维度过期项，不执行 backfill。召回透镜显示的 `语义 —` 主要表示关键词候选有向量但未进入本轮 semantic Top K；同轮存在其他真实语义分时，可排除整轮语义查询未运行。Dashboard 当前未展示 `semantic_status` 原文，本阶段不做视觉调整。
+
+同一 session 的 Round 12 再次发送“话说 今天下雨了 小言”时，所有候选均无语义分；原始 Debug 已确认 `semantic_status=query_timeout / semantic_score=null`。这证明存量桶向量完整不等于每轮 query 向量都能在时限内返回：Gateway 当前对 query 语义搜索的等待上限为 3 秒，本轮在该阶段超时。此次身份称呼修正没有改动语义调用链；两者只是同时出现在发布后验收中。
+
+已补 Shadow-only 安全降级：仅 `query_timeout / query_failed / query_embedding_unavailable / query_embedding_failed` 可触发；仅保留正式结果已有候选；候选还必须命中隔离称呼后的可信主题词且 `keyword >= 0.85`。因此雨桶可由“下雨 + 0.908”保留，情书桶不能靠称呼或 `0.669` 通过；additional/suppressed 候选不会因此新增，`indexed_not_in_semantic_top_k` 也不会触发。正式 3 秒超时、重试策略、正式 admission 和排序均未修改，继续收集 query timeout 频率后再决定是否单独调整可靠性。
 
 ## 发布后仍需继续核查
 

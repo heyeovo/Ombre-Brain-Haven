@@ -78,7 +78,7 @@ class RecallShadowContractsTest(unittest.TestCase):
         service = GatewayService.__new__(GatewayService)
         service.phase1_recall_shadow_enabled = True
         service.query_planner_enabled = planner_enabled
-        service._shadow_candidate_relevance = lambda _query, _necessity, item: (
+        service._shadow_candidate_relevance = lambda _query, _necessity, item, **_kwargs: (
             bool(item.get("reliable")),
             "shadow_test_reliable" if item.get("reliable") else "shadow_test_unreliable",
             {},
@@ -238,6 +238,70 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
         self.assertEqual(debug["matched_topic_terms"], [])
         self.assertEqual(debug["rare_name_terms"], [])
         self.assertIn("小言", debug["ignored_identity_terms"])
+
+    def test_query_timeout_keeps_only_formal_strong_trusted_topic_keyword(self):
+        service = self.make_service()
+        rain = self.item(
+            "每一场雨都跟你在一起",
+            "那天早上下雨了",
+            semantic=None,
+            keyword=0.908,
+            semantic_status="query_timeout",
+        )
+        admitted, reason, debug = service._shadow_candidate_relevance(
+            "话说 今天下雨了 小言",
+            "contextual",
+            rain,
+            formal_candidate=True,
+        )
+        self.assertTrue(admitted)
+        self.assertEqual(reason, "shadow_query_unavailable_formal_topic_keyword")
+        self.assertTrue(debug["query_unavailable_keyword_fallback"])
+
+        added, added_reason, _added_debug = service._shadow_candidate_relevance(
+            "话说 今天下雨了 小言",
+            "contextual",
+            rain,
+            formal_candidate=False,
+        )
+        self.assertFalse(added)
+        self.assertEqual(added_reason, "shadow_semantic_not_scored")
+
+    def test_query_timeout_does_not_keep_identity_only_or_completed_semantic_candidates(self):
+        service = self.make_service()
+        identity_only = self.item(
+            "小言写给小羊的情书",
+            "小言写给小羊的一封情书",
+            semantic=None,
+            keyword=0.908,
+            semantic_status="query_timeout",
+            rare_name_match=True,
+            rare_name_terms=["小言", "小羊"],
+        )
+        admitted, reason, _debug = service._shadow_candidate_relevance(
+            "话说 今天下雨了 小言",
+            "contextual",
+            identity_only,
+            formal_candidate=True,
+        )
+        self.assertFalse(admitted)
+        self.assertEqual(reason, "shadow_semantic_not_scored")
+
+        completed = self.item(
+            "每一场雨都跟你在一起",
+            "那天早上下雨了",
+            semantic=None,
+            keyword=0.908,
+            semantic_status="indexed_not_in_semantic_top_k",
+        )
+        admitted, reason, _debug = service._shadow_candidate_relevance(
+            "话说 今天下雨了 小言",
+            "contextual",
+            completed,
+            formal_candidate=True,
+        )
+        self.assertFalse(admitted)
+        self.assertEqual(reason, "shadow_semantic_not_scored")
 
     def test_parenthetical_gesture_cannot_replace_semantic_relevance(self):
         service = self.make_service()

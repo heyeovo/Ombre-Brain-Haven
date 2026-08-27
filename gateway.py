@@ -398,6 +398,15 @@ PROFILE_CONTEXT_SECTIONS = ("evidence_context", "context", "reflection", "feelin
 MOMENT_CHUNK_SHADOW_TARGET_CHARS = 320
 MOMENT_CHUNK_SHADOW_MAX_CHARS = 520
 MOMENT_CHUNK_SHADOW_MIN_TAIL_CHARS = 100
+SHADOW_QUERY_UNAVAILABLE_KEYWORD_MIN = 0.85
+SHADOW_QUERY_UNAVAILABLE_STATUSES = frozenset(
+    {
+        "query_timeout",
+        "query_failed",
+        "query_embedding_unavailable",
+        "query_embedding_failed",
+    }
+)
 DEFAULT_AXIS_LITE_TECHNICAL_AXIS_TERMS = (
     "esp32",
     "mpr121",
@@ -14578,6 +14587,8 @@ class GatewayService:
         query: str,
         necessity: str,
         item: dict,
+        *,
+        formal_candidate: bool = False,
     ) -> tuple[bool, str, dict[str, Any]]:
         bucket = item.get("bucket") if isinstance(item, dict) else None
         if not isinstance(bucket, dict):
@@ -14624,8 +14635,17 @@ class GatewayService:
             and has_topic
             and any(len(self._compact_lookup_key(term)) >= 4 for term in matched_topic_terms)
         )
+        semantic_status = str(item.get("semantic_status") or "legacy_unknown")
+        query_semantic_unavailable = semantic_status in SHADOW_QUERY_UNAVAILABLE_STATUSES
+        query_unavailable_keyword_fallback = bool(
+            formal_candidate
+            and semantic_raw is None
+            and query_semantic_unavailable
+            and keyword_score >= SHADOW_QUERY_UNAVAILABLE_KEYWORD_MIN
+            and has_topic
+        )
         details = {
-            "semantic_status": str(item.get("semantic_status") or "legacy_unknown"),
+            "semantic_status": semantic_status,
             "semantic_score": semantic_score,
             "keyword_score": keyword_score,
             "topic_terms": topic_terms,
@@ -14636,6 +14656,10 @@ class GatewayService:
             "rare_name_terms": rare_name_terms,
             "unique_direct": unique_direct,
             "exact_direct": exact_direct,
+            "formal_candidate": bool(formal_candidate),
+            "query_semantic_unavailable": query_semantic_unavailable,
+            "query_unavailable_keyword_min": SHADOW_QUERY_UNAVAILABLE_KEYWORD_MIN,
+            "query_unavailable_keyword_fallback": query_unavailable_keyword_fallback,
         }
 
         if unique_direct:
@@ -14648,6 +14672,8 @@ class GatewayService:
             return True, "shadow_explicit_semantic_topic", details
         if necessity == "explicit" and exact_direct:
             return True, "shadow_explicit_exact_topic", details
+        if query_unavailable_keyword_fallback:
+            return True, "shadow_query_unavailable_formal_topic_keyword", details
         if semantic_raw is None:
             return False, "shadow_semantic_not_scored", details
         if semantic_score <= 0 and keyword_score > 0:
@@ -14733,6 +14759,7 @@ class GatewayService:
                     query,
                     necessity_plan.necessity,
                     item,
+                    formal_candidate=bucket_id in formal_ids,
                 )
                 original_reason = str(item.get("admission_reason") or "suppressed")
                 if admitted:

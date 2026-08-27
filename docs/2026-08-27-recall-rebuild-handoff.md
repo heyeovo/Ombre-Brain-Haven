@@ -77,7 +77,7 @@ Dashboard 已新增：
 7. 当请求未携带上一轮消息时，Shadow 可从现有 session 对话记录或 injection Debug 读取上一条 query；不改变正式上下文路径。
 8. Debug 顶层保留 `recall_necessity_debug` 和 `recall_shadow_debug`；候选新增 `semantic_status`，区分已评分、未进 Top K、embedding 缺失/损坏/模型维度过期和查询不可用，不再把所有缺失值显示成真实 `0.0`。
 9. Dashboard 召回透镜继续显示必要性、planner 状态、正式/shadow ID、增减桶和 shadow 候选；第二轮未修改 Dashboard 或整体视觉。
-10. `tests/test_recall_phase1_shadow.py` 覆盖真实反馈语句、候选独立复审、自然 contextual、关键词单项拒绝、括号动作边界、planner 降级和 embedding 状态。
+10. `tests/test_recall_phase1_shadow.py` 覆盖真实反馈语句、候选独立复审、自然 contextual、关键词单项拒绝、括号动作边界、planner 降级、embedding 状态和身份称呼隔离。
 
 ## Phase 1 验收
 
@@ -89,10 +89,10 @@ Dashboard 已新增：
 - 召回透镜能对比正式与 shadow 结果；
 - 对应测试和 Dashboard build 均通过。
 
-第二轮本地验证结果（2026-08-28）：
+最新本地验证结果（2026-08-28）：
 
-- Phase 1 专项测试 14/14 通过；
-- Haven 全套测试 134/134 通过；
+- Phase 1 专项测试 15/15 通过；
+- Haven 全套测试 135/135 通过；
 - `git diff --check` 通过；
 - `py_compile recall_policy.py gateway.py embedding_engine.py tests/test_recall_phase1_shadow.py` 通过；
 - 正式 `_admit_bucket_for_recall`、排序公式、注入开关和 Dashboard 均未修改。
@@ -114,9 +114,17 @@ Dashboard 已新增：
 5. 候选相关性必须先于 `0.55` 选卡门槛。`0.55` 是正式路径对部分 direct anchor 的强制 score floor，不是真实语义分，也不能作为 admission 证据。
 6. 页面过去显示的 `semantic=0` 可能分别代表真实低分、未进 semantic Top K、缺少/过期 embedding、查询失败或 engine 未启用；大量精确 0 不能直接解释成“向量相似度真的为零”。第二轮已让新 Debug 保留 `null + semantic_status`，但没有自动 backfill。
 
+## 第三轮线上验收发现与修正
+
+线上 Shadow 测试 session `ob2-20260827-r1bpf2` 的自然话题“话说 今天下雨了 小言”已正确判为 `contextual`。正确桶“每一场雨都跟你在一起”为 `semantic=0.587 / keyword=0.908 / score=1.000`；边界噪声桶“小言写给小羊的情书”为 `semantic=0.539 / keyword=0.669 / score=0.866`。后者说明语义与关键词同时有中等分仍可能来自同一个泛身份背景，不能视为两份独立相关证据。
+
+已确认产品规则：`言之 / 小言 / 小羊` 等配置中的高频名称和日常称呼属于对话背景，默认不作为 Shadow 主题关键词或 rare-name 独特证据。Gateway 在 Shadow 主题提取前先用边界隔离完整称呼，再重新提取可信主题；因此“下雨”可保留，而称呼及称呼边界产生的异常组合词不能帮助情书桶通过。该修正仍不改变正式拆词、搜索、评分、admission 或注入。
+
+Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的线上结果为 `Total buckets: 318 / Missing embeddings: 0`。该脚本使用当前 embedding 模型和维度检查桶向量，因此没有缺失或模型/维度过期项，不执行 backfill。召回透镜显示的 `语义 —` 主要表示关键词候选有向量但未进入本轮 semantic Top K；同轮存在其他真实语义分时，可排除整轮语义查询未运行。Dashboard 当前未展示 `semantic_status` 原文，本阶段不做视觉调整。
+
 ## 发布后仍需继续核查
 
-1. **Embedding 覆盖率**：统计可召回桶中 `indexed / embedding_missing / embedding_stale_model_or_dimension / embedding_invalid` 的数量和比例；抽查 Round 4、6、16 的原 semantic 0 桶。只有确认缺失或版本过期后才决定是否执行 backfill，禁止看到 0 就直接全量补跑。
+1. **Embedding 内容新鲜度**：线上 318 个桶已确认没有缺失或模型/维度过期向量，因此不执行 backfill。现有检查不包含正文内容哈希；只有后续出现“桶正文已改但向量未刷新”的具体证据时，再单独审计内容新鲜度。
 2. **Semantic 查询状态**：确认新记录能区分 `scored`、`indexed_not_in_semantic_top_k`、`query_embedding_unavailable/failed`、`query_timeout/failed` 和 engine disabled；如果召回透镜现有字段不足以观察，下一窗口只讨论最小功能展示，不做视觉重构。
 3. **Session 去重真实契约**：用户预期“同一窗口已召回桶不会再次召回”，但当前代码默认 `skip_recent_rounds=5`，且强证据存在 bypass。发布后先用实际 session 验证；在结论明确前，不依赖“全窗口绝不重复”作为放宽 explicit 的唯一安全条件，也不在本 Phase 顺手改去重。
 4. **Planner 实际可用性**：按新记录统计 normal / not_triggered / disabled / degraded，以及 dehydration 鉴权错误；确认用户当前线上是否确有可用 dehydration 配置。Planner 不可用时 contextual 必须保持“不新增”。
@@ -127,11 +135,11 @@ Dashboard 已新增：
 
 1. 用户 commit/push 第二轮 Haven 修改并更新 Coolify `HAVEN_RELEASE_SHA`；本轮 Dashboard 无代码变化，不需要重新部署。
 2. 重放原固定案例及 `ob2-20260827-zoazvn` Round 4、6、9、16、20、21、23、24，记录新 session + Round。
-3. 先验收 necessity、候选独立审核、planner 降级不扩召回和 `semantic_status`；再做只读 embedding 覆盖统计。
+3. 继续验收 necessity、候选独立审核、planner 降级不扩召回和 `semantic_status`；embedding 覆盖统计已完成，不做 backfill。
 4. Shadow 仍有稳定误判时继续在 Phase 1 调整，正式 admission 保持不变。
 5. 只有 Shadow 验收稳定后才进入 Phase 2，把统一 relevance/admission 渐进接入正式召回；仍不在 Phase 2 顺手处理家族聚类、关系边或额外 LLM agent。
 
-第二轮代码尚未 commit/push/deploy。发布后必须重放上述 Round；旧 Debug 不会自动重算。
+第二轮 Phase 1 代码已提交并完成线上 Shadow 测试；本次身份称呼隔离修正尚未 commit/push/deploy。发布后必须重放“今天下雨了 小言”，旧 Debug 不会自动重算。
 
 尚需在用户 commit、push 并按 Coolify `HAVEN_RELEASE_SHA` 发布后，除原固定 Round 9、12、25、54、57、61 外，重点重放 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24。验收 Shadow 是否删除 keyword-only 噪声、自然 contextual 是否只选高相关桶，以及候选 `semantic_status` 是否能解释原来的 0 分。历史 Debug 不会自动补算新字段。未完成线上真实验收前，不进入 Phase 2 正式 gate 切换。
 

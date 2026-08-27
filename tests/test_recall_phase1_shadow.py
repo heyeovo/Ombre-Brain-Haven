@@ -171,7 +171,13 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
     def make_service(self) -> GatewayService:
         service = GatewayService.__new__(GatewayService)
         service.recall_policy = RecallPolicy()
-        service.identity = {}
+        service.identity = {
+            "ai_name": "小言",
+            "user_name": "小羊",
+            "user_display_name": "小羊",
+            "user_aliases": ["言之", "小羊"],
+            "relationship_terms": ["小言", "言之", "小羊"],
+        }
         service._is_identity_name_candidate_bucket = lambda _query, _bucket: False
         service._source_record_explicit_bucket_match_reason = lambda _query, _bucket: ""
         return service
@@ -210,6 +216,28 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
         self.assertTrue(admitted)
         self.assertEqual(reason, "shadow_semantic_keyword_agreement")
         self.assertIn("下雨", debug["matched_topic_terms"])
+        self.assertEqual(debug["ignored_identity_terms"], ["小言"])
+
+    def test_contextual_topic_rejects_emotional_bucket_supported_only_by_identity_names(self):
+        service = self.make_service()
+        admitted, reason, debug = service._shadow_candidate_relevance(
+            "话说 今天下雨了 小言",
+            "contextual",
+            self.item(
+                "小言写给小羊的情书",
+                "小言写给小羊的一封情书",
+                semantic=0.539,
+                keyword=0.669,
+                rare_name_match=True,
+                rare_name_terms=["小言", "小羊"],
+            ),
+        )
+        self.assertFalse(admitted)
+        self.assertEqual(reason, "shadow_query_topic_missing")
+        self.assertEqual(debug["topic_terms"], ["下雨"])
+        self.assertEqual(debug["matched_topic_terms"], [])
+        self.assertEqual(debug["rare_name_terms"], [])
+        self.assertIn("小言", debug["ignored_identity_terms"])
 
     def test_parenthetical_gesture_cannot_replace_semantic_relevance(self):
         service = self.make_service()

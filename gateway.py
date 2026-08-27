@@ -14490,9 +14490,27 @@ class GatewayService:
             return "not_run"
         return "not_triggered"
 
-    def _shadow_specific_topic_terms(self, query: str) -> list[str]:
-        raw_terms = list(self.recall_policy.specific_query_terms(query))
-        raw_terms.extend(self._locatable_query_terms(query))
+    def _shadow_topic_term_plan(self, query: str) -> dict[str, list[str]]:
+        query_text = str(query or "")
+        identity_terms = sorted(
+            self._identity_match_terms(),
+            key=lambda value: len(self._compact_lookup_key(value)),
+            reverse=True,
+        )
+        sanitized_query = query_text
+        ignored_identity_terms: list[str] = []
+        for identity_term in identity_terms:
+            if not identity_term:
+                continue
+            sanitized_query, count = re.subn(
+                re.escape(identity_term),
+                " ",
+                sanitized_query,
+                flags=re.IGNORECASE,
+            )
+            if count and identity_term not in ignored_identity_terms:
+                ignored_identity_terms.append(identity_term)
+
         generic_keys = {
             self._compact_lookup_key(value)
             for value in (
@@ -14518,20 +14536,42 @@ class GatewayService:
             if self._compact_lookup_key(value)
         }
         generic_keys.update(self._identity_match_terms(compact=True))
-        output: list[str] = []
-        seen: set[str] = set()
-        for term in raw_terms:
-            cleaned = str(term or "").strip()
-            key = self._compact_lookup_key(cleaned)
-            if not key or key in seen or key in generic_keys:
-                continue
-            if re.fullmatch(r"[\u4e00-\u9fff]+", key) and len(key) < 2:
-                continue
-            if re.fullmatch(r"[a-z]+", key) and len(key) < 3:
-                continue
-            seen.add(key)
-            output.append(cleaned)
-        return output[:12]
+
+        def extract_topic_terms(text: str) -> list[str]:
+            raw_terms = list(self.recall_policy.specific_query_terms(text))
+            raw_terms.extend(self._locatable_query_terms(text))
+            output: list[str] = []
+            seen: set[str] = set()
+            for term in raw_terms:
+                cleaned = str(term or "").strip()
+                key = self._compact_lookup_key(cleaned)
+                if not key or key in seen or key in generic_keys:
+                    continue
+                if re.fullmatch(r"[\u4e00-\u9fff]+", key) and len(key) < 2:
+                    continue
+                if re.fullmatch(r"[a-z]+", key) and len(key) < 3:
+                    continue
+                seen.add(key)
+                output.append(cleaned)
+            return output[:12]
+
+        raw_topic_terms = extract_topic_terms(query_text)
+        topic_terms = extract_topic_terms(sanitized_query)
+        topic_keys = {self._compact_lookup_key(term) for term in topic_terms}
+        ignored_topic_terms = [
+            term
+            for term in raw_topic_terms
+            if self._compact_lookup_key(term) not in topic_keys
+        ]
+        return {
+            "topic_terms": topic_terms,
+            "raw_topic_terms": raw_topic_terms,
+            "ignored_identity_terms": ignored_identity_terms,
+            "ignored_topic_terms": ignored_topic_terms,
+        }
+
+    def _shadow_specific_topic_terms(self, query: str) -> list[str]:
+        return self._shadow_topic_term_plan(query)["topic_terms"]
 
     def _shadow_candidate_relevance(
         self,
@@ -14557,7 +14597,8 @@ class GatewayService:
             else None
         )
         keyword_score = self._safe_float(item.get("keyword_score"), 0.0)
-        topic_terms = self._shadow_specific_topic_terms(query)
+        topic_term_plan = self._shadow_topic_term_plan(query)
+        topic_terms = topic_term_plan["topic_terms"]
         matched_topic_terms = [
             term
             for term in topic_terms
@@ -14565,9 +14606,16 @@ class GatewayService:
         ]
         has_topic = bool(matched_topic_terms)
         bucket_id = str(bucket.get("id") or "")
+        identity_keys = set(self._identity_match_terms(compact=True))
+        rare_name_terms = [
+            str(term or "").strip()
+            for term in item.get("rare_name_terms") or []
+            if str(term or "").strip()
+            and self._compact_lookup_key(term) not in identity_keys
+        ]
         unique_direct = bool(
             (bucket_id and bucket_id in self._extract_explicit_bucket_ids_from_text(query))
-            or item.get("rare_name_match")
+            or rare_name_terms
             or self._is_identity_name_candidate_bucket(query, bucket)
             or self._source_record_explicit_bucket_match_reason(query, bucket)
         )
@@ -14581,7 +14629,11 @@ class GatewayService:
             "semantic_score": semantic_score,
             "keyword_score": keyword_score,
             "topic_terms": topic_terms,
+            "raw_topic_terms": topic_term_plan["raw_topic_terms"],
+            "ignored_identity_terms": topic_term_plan["ignored_identity_terms"],
+            "ignored_topic_terms": topic_term_plan["ignored_topic_terms"],
             "matched_topic_terms": matched_topic_terms,
+            "rare_name_terms": rare_name_terms,
             "unique_direct": unique_direct,
             "exact_direct": exact_direct,
         }

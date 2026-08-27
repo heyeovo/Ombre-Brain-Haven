@@ -71,6 +71,9 @@ _select_dynamic_buckets                     gateway.py ~16509
 
 `phase1_recall_shadow_enabled` 默认开启，只影响 Debug 计算。正式结果仍由原路径产生；shadow 使用正式候选和被拒候选做并行投影：
 
+- Shadow 会先从原句中隔离 `identity.relationship_terms`、AI/用户名称和用户别名，再提取可信主题词；日常称呼不能单独充当主题或 rare-name 独特证据。隔离发生在 Shadow relevance 层，不改变正式关键词拆分、搜索、评分或注入。
+- 候选 debug 同时记录 `raw_topic_terms`、`topic_terms`、`ignored_identity_terms` 和 `ignored_topic_terms`，用于解释称呼边界产生的异常组合词为何没有参与 Shadow 放行。
+
 - `none` 的 shadow 结果为空；
 - `explicit/contextual` 都重新审核正式候选，不再无条件继承正式 admission；
 - 候选必须有具体 query topic，并由强语义、语义+关键词一致或唯一名称/明确实体等直接证据支持；普通 keyword-only、括号动作短语和元数据加分不能独立证明相关；
@@ -177,7 +180,7 @@ must_groups (recall_policy.py:1087):
 
 - **Debug 面板**: `https://ygao2jdgxlqzxfoasmjpvxcf.23.95.136.46.sslip.io/gateway/debug`
 - **Debug API**: `GET /gateway/api/debug/injections?session_id=xxx&include_payload=1&limit=20`，认证: `Authorization: Bearer HONOO`
-- 每个候选桶的 debug 包含: `score`, `semantic_score`, `semantic_status`, `keyword_score`, `admission_reason`, `evidence_labels`。`semantic_score=null` 时看 `semantic_status`：可区分 `indexed_not_in_semantic_top_k`、`embedding_missing`、`embedding_stale_model_or_dimension`、engine disabled、query timeout/failed；不再把所有“未计算/未返回”伪装成 `0.0`。
+- 每个候选桶的 debug 包含: `score`, `semantic_score`, `semantic_status`, `keyword_score`, `admission_reason`, `evidence_labels`。`semantic_score=null`（召回透镜显示 `—`）时看 `semantic_status`：可区分 `indexed_not_in_semantic_top_k`、`embedding_missing`、`embedding_stale_model_or_dimension`、engine disabled、query timeout/failed；`—` 不等于真实语义零分，也不直接说明桶缺少向量。
 - 被拒绝的桶在 `suppressed_bucket_candidates` 里，带 `admission_reason`
 - hook_recall 展开卡片显示: `search_query`, `residue_terms`, `candidates` 计数
 - payload 中 `memory_sentinel_debug.searchable_residue_terms` 包含提取的搜索词列表

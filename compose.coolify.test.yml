@@ -23,6 +23,7 @@ services:
       OMBRE_EMBEDDING_API_KEY: ${OMBRE_EMBEDDING_API_KEY:-}
       OMBRE_GATEWAY_TOKEN: ${OMBRE_GATEWAY_TOKEN:-}
       OMBRE_GATEWAY_UPSTREAM_API_KEY: ${OMBRE_GATEWAY_UPSTREAM_API_KEY:-}
+      OMBRE_RECALL_IGNORED_ADDRESS_TERMS: ${OMBRE_RECALL_IGNORED_ADDRESS_TERMS:-}
     volumes:
       - /srv/ob-data/haven-test/buckets:/data
       - /srv/ob-data/haven-test/state:/state

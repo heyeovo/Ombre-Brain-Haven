@@ -91,8 +91,8 @@ Dashboard 已新增：
 
 最新本地验证结果（2026-08-28）：
 
-- Phase 1 专项测试 18/18 通过；
-- Haven 全套测试 138/138 通过；
+- Phase 1 专项测试 19/19 通过；
+- Haven 全套测试 139/139 通过；
 - `git diff --check` 通过；
 - `py_compile recall_policy.py gateway.py embedding_engine.py tests/test_recall_phase1_shadow.py` 通过；
 - 正式 `_admit_bucket_for_recall`、排序公式、注入开关和 Dashboard 均未修改。
@@ -128,6 +128,8 @@ Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的
 
 同一 session 的 Round 15 进一步确认：语义查询恢复后，雨桶与情书桶都被 Shadow 加入，因此问题不在 timeout fallback。根因是 Shadow 虽然从主题词中排除了“小言/小羊”，却仍复用了正式路径中被称呼抬高的 `keyword_score`；同时 query 词命中桶标题和复合 rare-name 可绕过可信主题要求。现已让 Shadow 在存在身份称呼时用清理后的 query 独立重算关键词分，并要求 rare-name、身份名候选和标题直接命中同时具有可信主题；只有明确桶 ID 仍可直接放行。Round 15 回归用例确认情书桶的正式关键词分可保留 `0.669` 供对比，但 Shadow 关键词分为 `0`，不能再绕过主题判断；正式召回路径保持不变。
 
+部署后新产生的 Round 19 仍选中情书桶。原始 Debug 证明不是长正文偶然命中“下雨”，而是线上持久化 `/config/config.yaml` 仍使用模板身份 `AI / User / 用户 / 对方`：`ignored_identity_terms=[]`、`topic_terms=["下雨","小言"]`、`matched_topic_terms=["小言"]`、`shadow_keyword_score=0.6694`，最终由 `shadow_semantic_keyword_agreement` 放行。为避免把个人称呼写死在代码或扩充多组身份环境变量，Coolify compose 现只透传一个逗号分隔变量 `OMBRE_RECALL_IGNORED_ADDRESS_TERMS`；Gateway 将它与已配置身份称呼合并，仅用于 Shadow 清理、主题提取和关键词重算。建议线上先设为 `小言,言之,小羊`，以后可直接追加称呼。Debug 新增 `ignored_address_terms` 和 `ignored_configured_address_terms`；正式召回不受影响。
+
 ## 发布后仍需继续核查
 
 1. **Embedding 内容新鲜度**：线上 318 个桶已确认没有缺失或模型/维度过期向量，因此不执行 backfill。现有检查不包含正文内容哈希；只有后续出现“桶正文已改但向量未刷新”的具体证据时，再单独审计内容新鲜度。
@@ -145,7 +147,7 @@ Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的
 4. Shadow 仍有稳定误判时继续在 Phase 1 调整，正式 admission 保持不变。
 5. 只有 Shadow 验收稳定后才进入 Phase 2，把统一 relevance/admission 渐进接入正式召回；仍不在 Phase 2 顺手处理家族聚类、关系边或额外 LLM agent。
 
-第二轮 Phase 1 代码已提交并完成线上 Shadow 测试；本次 Round 15 身份称呼证据链修正尚未 commit/push/deploy。发布后必须重放“今天下雨了 小言”，旧 Debug 不会自动重算。
+第二轮 Phase 1 代码已提交并完成线上 Shadow 测试；本次 Round 19 可配置称呼排除修正尚未 commit/push/deploy。发布时需在 Coolify 增加 `OMBRE_RECALL_IGNORED_ADDRESS_TERMS=小言,言之,小羊`，然后重放“今天下雨了 小言”；旧 Debug 不会自动重算。
 
 尚需在用户 commit、push 并按 Coolify `HAVEN_RELEASE_SHA` 发布后，除原固定 Round 9、12、25、54、57、61 外，重点重放 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24。验收 Shadow 是否删除 keyword-only 噪声、自然 contextual 是否只选高相关桶，以及候选 `semantic_status` 是否能解释原来的 0 分。历史 Debug 不会自动补算新字段。未完成线上真实验收前，不进入 Phase 2 正式 gate 切换。
 

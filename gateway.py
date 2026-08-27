@@ -803,6 +803,9 @@ class GatewayService:
             self.gateway_cfg.get("phase1_recall_shadow_enabled"),
             True,
         )
+        self.phase1_shadow_ignored_address_terms = (
+            self._phase1_shadow_ignored_address_terms_from_env()
+        )
         (
             self.query_planner_model,
             self.query_planner_uses_dehydrator,
@@ -14499,26 +14502,66 @@ class GatewayService:
             return "not_run"
         return "not_triggered"
 
+    @staticmethod
+    def _phase1_shadow_ignored_address_terms_from_env() -> tuple[str, ...]:
+        raw = str(os.environ.get("OMBRE_RECALL_IGNORED_ADDRESS_TERMS", "") or "")
+        terms: list[str] = []
+        seen: set[str] = set()
+        for value in re.split(r"[,，\n]+", raw):
+            term = str(value or "").strip()
+            key = term.lower()
+            if not term or key in seen:
+                continue
+            seen.add(key)
+            terms.append(term)
+        return tuple(terms)
+
     def _shadow_topic_term_plan(self, query: str) -> dict[str, Any]:
         query_text = str(query or "")
-        identity_terms = sorted(
-            self._identity_match_terms(),
+        identity_terms = tuple(self._identity_match_terms())
+        configured_address_terms = tuple(
+            getattr(self, "phase1_shadow_ignored_address_terms", ()) or ()
+        )
+        address_terms = sorted(
+            dict.fromkeys((*identity_terms, *configured_address_terms)),
             key=lambda value: len(self._compact_lookup_key(value)),
             reverse=True,
         )
         sanitized_query = query_text
-        ignored_identity_terms: list[str] = []
-        for identity_term in identity_terms:
-            if not identity_term:
+        ignored_address_terms: list[str] = []
+        for address_term in address_terms:
+            if not address_term:
                 continue
             sanitized_query, count = re.subn(
-                re.escape(identity_term),
+                re.escape(address_term),
                 " ",
                 sanitized_query,
                 flags=re.IGNORECASE,
             )
-            if count and identity_term not in ignored_identity_terms:
-                ignored_identity_terms.append(identity_term)
+            if count and address_term not in ignored_address_terms:
+                ignored_address_terms.append(address_term)
+
+        identity_keys = {
+            self._compact_lookup_key(value)
+            for value in identity_terms
+            if self._compact_lookup_key(value)
+        }
+        configured_address_keys = {
+            self._compact_lookup_key(value)
+            for value in configured_address_terms
+            if self._compact_lookup_key(value)
+        }
+        ignored_identity_terms = [
+            term
+            for term in ignored_address_terms
+            if self._compact_lookup_key(term) in identity_keys
+        ]
+        ignored_configured_address_terms = [
+            term
+            for term in ignored_address_terms
+            if self._compact_lookup_key(term) in configured_address_keys
+            and self._compact_lookup_key(term) not in identity_keys
+        ]
 
         generic_keys = {
             self._compact_lookup_key(value)
@@ -14544,7 +14587,11 @@ class GatewayService:
             )
             if self._compact_lookup_key(value)
         }
-        generic_keys.update(self._identity_match_terms(compact=True))
+        generic_keys.update(
+            self._compact_lookup_key(value)
+            for value in address_terms
+            if self._compact_lookup_key(value)
+        )
 
         def extract_topic_terms(text: str) -> list[str]:
             raw_terms = list(self.recall_policy.specific_query_terms(text))
@@ -14576,7 +14623,9 @@ class GatewayService:
             "sanitized_query": sanitized_query,
             "topic_terms": topic_terms,
             "raw_topic_terms": raw_topic_terms,
+            "ignored_address_terms": ignored_address_terms,
             "ignored_identity_terms": ignored_identity_terms,
+            "ignored_configured_address_terms": ignored_configured_address_terms,
             "ignored_topic_terms": ignored_topic_terms,
         }
 
@@ -14589,7 +14638,7 @@ class GatewayService:
         bucket: dict,
         formal_keyword_score: float,
     ) -> float:
-        if not topic_term_plan.get("ignored_identity_terms"):
+        if not topic_term_plan.get("ignored_address_terms"):
             return formal_keyword_score
         sanitized_query = str(topic_term_plan.get("sanitized_query") or "").strip()
         if not sanitized_query:
@@ -14687,7 +14736,11 @@ class GatewayService:
             "shadow_keyword_score": keyword_score,
             "topic_terms": topic_terms,
             "raw_topic_terms": topic_term_plan["raw_topic_terms"],
+            "ignored_address_terms": topic_term_plan["ignored_address_terms"],
             "ignored_identity_terms": topic_term_plan["ignored_identity_terms"],
+            "ignored_configured_address_terms": topic_term_plan[
+                "ignored_configured_address_terms"
+            ],
             "ignored_topic_terms": topic_term_plan["ignored_topic_terms"],
             "matched_topic_terms": matched_topic_terms,
             "rare_name_terms": rare_name_terms,

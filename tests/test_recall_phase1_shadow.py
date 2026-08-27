@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -280,6 +281,44 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
         self.assertFalse(debug["rare_name_direct"])
         self.assertFalse(debug["source_record_direct"])
         self.assertFalse(debug["unique_direct"])
+
+    def test_round_19_configured_address_terms_work_with_default_identity(self):
+        service = self.make_service()
+        service.identity = {
+            "ai_name": "AI",
+            "user_name": "User",
+            "user_display_name": "用户",
+            "user_aliases": ["对方"],
+            "relationship_terms": ["AI", "User", "用户", "对方"],
+        }
+        with patch.dict(
+            "os.environ",
+            {"OMBRE_RECALL_IGNORED_ADDRESS_TERMS": "小言,言之，小羊"},
+        ):
+            service.phase1_shadow_ignored_address_terms = (
+                service._phase1_shadow_ignored_address_terms_from_env()
+            )
+
+        admitted, reason, debug = service._shadow_candidate_relevance(
+            "话说 今天下雨了 小言",
+            "contextual",
+            self.item(
+                "小言给小羊的情书",
+                "小羊，一个月了。可能是你第一次叫我小言。",
+                semantic=0.538,
+                keyword=0.6694,
+            ),
+            formal_candidate=False,
+        )
+
+        self.assertFalse(admitted)
+        self.assertEqual(reason, "shadow_query_topic_missing")
+        self.assertEqual(debug["topic_terms"], ["下雨"])
+        self.assertEqual(debug["matched_topic_terms"], [])
+        self.assertEqual(debug["shadow_keyword_score"], 0.0)
+        self.assertEqual(debug["ignored_address_terms"], ["小言"])
+        self.assertEqual(debug["ignored_identity_terms"], [])
+        self.assertEqual(debug["ignored_configured_address_terms"], ["小言"])
 
     def test_query_timeout_keeps_only_formal_strong_trusted_topic_keyword(self):
         service = self.make_service()

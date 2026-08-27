@@ -946,6 +946,47 @@ ENTITY_ENGLISH_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9_.:/-]{1,}\b")
 ENTITY_VERSION_RE = re.compile(r"\b\d+(?:[._:-]\d+)+\b")
 ENTITY_NUMBER_RE = re.compile(r"\b\d{3,}\b")
 
+RECALL_META_DISCUSSION_MARKERS = (
+    "不应该召回",
+    "不要召回",
+    "别召回",
+    "误召回",
+    "召回机制",
+    "召回规则",
+    "召回结果",
+    "召回系统",
+    "关键词匹配",
+    "上下文无关",
+    "admission gate",
+    "query planner",
+    "activated_axis",
+    "auto_vague",
+)
+CONTEXTUAL_RECALL_MARKERS = (
+    "那件事",
+    "那回事",
+    "那一次",
+    "那次",
+    "那个约定",
+    "后来呢",
+    "后来怎么样",
+    "还是之前",
+    "照之前",
+    "跟以前一样",
+    "又这样",
+    "接着说",
+    "继续说",
+)
+EXPLICIT_MEMORY_SEARCH_MARKERS = (
+    "帮我找",
+    "帮我搜",
+    "单独搜",
+    "搜一下",
+    "搜索一下",
+    "查一下",
+    "找一下",
+)
+
 
 @dataclass(frozen=True)
 class RecallPolicyDecision:
@@ -959,6 +1000,18 @@ class RecallPolicyDecision:
     @property
     def admit(self) -> bool:
         return self.admit_direct
+
+
+@dataclass(frozen=True)
+class RecallNecessityPlan:
+    necessity: str
+    targetable: bool
+    reason_codes: tuple[str, ...] = ()
+    context_available: bool = False
+
+    @property
+    def should_search(self) -> bool:
+        return self.necessity in {"explicit", "contextual"} and self.targetable
 
 
 @dataclass(frozen=True)
@@ -1373,6 +1426,86 @@ class RecallPolicy:
             long_term_route="skip" if skip_long_term_recall else "search",
             skip_long_term_recall=skip_long_term_recall,
             skip_reason=skip_reason,
+        )
+
+    def plan_recall_necessity(
+        self,
+        query: str,
+        *,
+        recent_context: str = "",
+    ) -> RecallNecessityPlan:
+        """Classify whether this turn needs long-term recall, independently of bucket relevance."""
+        text = str(query or "").strip()
+        context_text = str(recent_context or "").strip()
+        if not text:
+            return RecallNecessityPlan(
+                necessity="none",
+                targetable=False,
+                reason_codes=("empty_query",),
+                context_available=bool(context_text),
+            )
+
+        lowered = " ".join(text.lower().split())
+        if any(marker in lowered for marker in RECALL_META_DISCUSSION_MARKERS):
+            return RecallNecessityPlan(
+                necessity="none",
+                targetable=False,
+                reason_codes=("recall_meta_discussion",),
+                context_available=bool(context_text),
+            )
+
+        explicit_search = any(marker in lowered for marker in EXPLICIT_MEMORY_SEARCH_MARKERS)
+        if self._query_has_explicit_recall_marker(text) or explicit_search:
+            locatable_terms = tuple(self.locatable_query_terms(text))
+            specific_terms = tuple(
+                term
+                for term in self.specific_query_terms(text)
+                if self._compact_entity_keyword(term)
+                and self._compact_entity_keyword(term) not in WEAK_RECALL_TOPIC_TERMS
+            )
+            protected_phrases = tuple(extract_protected_phrases(text))
+            targetable = bool(
+                locatable_terms
+                or specific_terms
+                or protected_phrases
+                or self._query_has_relative_date_recall_hint(text)
+                or self.is_emotional_reason_lookup(text)
+                or query_has_explicit_entity_marker(text)
+                or query_has_technical_recall_marker(text)
+            )
+            return RecallNecessityPlan(
+                necessity="explicit",
+                targetable=targetable,
+                reason_codes=(
+                    "explicit_memory_search" if explicit_search else "explicit_recall_request",
+                    "explicit_target_present" if targetable else "explicit_target_missing",
+                ),
+                context_available=bool(context_text),
+            )
+
+        compact = self._compact_marker_text(text)
+        contextual_marker = next(
+            (
+                marker
+                for marker in CONTEXTUAL_RECALL_MARKERS
+                if self._compact_marker_text(marker) in compact
+            ),
+            "",
+        )
+        if contextual_marker and context_text:
+            return RecallNecessityPlan(
+                necessity="contextual",
+                targetable=True,
+                reason_codes=("contextual_reference", "recent_context_available"),
+                context_available=True,
+            )
+
+        reason = "contextual_reference_without_context" if contextual_marker else "no_recall_need"
+        return RecallNecessityPlan(
+            necessity="none",
+            targetable=False,
+            reason_codes=(reason,),
+            context_available=bool(context_text),
         )
 
     def _activated_axis_from_locatable_terms(

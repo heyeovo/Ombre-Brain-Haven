@@ -84,6 +84,8 @@ AI 对这段经历的理解、关系侧学习或以后应怎样做。
 
 `bucket` 模式可用于对照测试：它跳过 moment 图刷新和扩散，但仍执行可靠性门控。
 
+Gateway 还会并行记录 Phase 1 召回 shadow：先把本轮分成 `none`、`explicit` 或 `contextual`，再比较正式结果与新规则结果。明确且有目标的回忆请求在 shadow 中不会被错误 vague / axis / anchor 整轮否决；非明确请求在 query planner 降级时不会扩大召回。该路径只写入 injection Debug 的 `recall_necessity_debug` 与 `recall_shadow_debug`，标记 `affects_recall=false`，不改变当前 admission gate 或实际注入。可用 `gateway.phase1_recall_shadow_enabled` 整体关闭。
+
 ### 4. Word Map Lite
 
 Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提示。它不是事实真源，也不能独立证明召回命中。停用词和过泛词会在进入锚点或词图提示前被过滤。
@@ -578,6 +580,7 @@ VPS 的 Backblaze B2 加密备份范围、计划、恢复步骤和验收记录�
 3. 图扩散只在可靠 seed 后出现，且只给摘要。
 4. 明确日期 / 原句问题不会被附近日期替代。
 5. `/api/debug/injections` 中的最终可见注入符合预期。
+6. `recall_shadow_debug` 的正式桶 ID 与实际注入一致，且 shadow 差异不反向影响正式结果。
 
 ## 已知边界
 

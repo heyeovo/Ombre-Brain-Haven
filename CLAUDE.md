@@ -54,7 +54,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `raw_events.py` | 隔离的原文 SQLite、显式原文检索、运行时/历史档案 scope、历史窗口目录与按时间分页读取、消息与导入幂等、私密白名单聊天档案分块归档 |
 | `raw_archive_import.py` | Claude 官方与 Kelivo 导出的流式白名单适配、预览审计、跨来源疑似重复、可见聊天＋推理档案打包及确认式上传 CLI；工具和附件内容不入 Haven |
 | `repair_raw_archive_thinking.py` | 历史档案正文/thinking 一次性幂等修复；默认 dry-run，只更新正文或 thinking 确有差异的消息；`--apply` 使用整批事务从 Haven 私密归档回填并重建正文哈希/FTS，异常时整批回滚 |
-| `recall_policy.py` | 召回策略（vague 闸、相对日期、分词整词判断） |
+| `recall_policy.py` | 召回策略（none/explicit/contextual 必要性、vague 闸、相对日期、分词整词判断） |
 | `reflection_engine.py` | 反思/日印象引擎 |
 | `daily_review_engine.py` | 默认每日 04:30 按协作者生成第一人称日回顾；D 日材料固定为 D 日 04:00–D+1 日 04:00，安全字符预算内直接使用全部可见正文，超预算才按工作窗口压缩较早轮次并保留每窗最近原文；连续性参考仍为 D-2、D-1 两条日回顾，可由逐任务 router 选择 API 或 Pro，结果不进记忆桶 |
 | `persona_engine.py` / `portrait_engine.py` | 用户画像（persona 状态 + 画像生成） |
@@ -283,6 +283,10 @@ GET /api/debug/injections             # 注入调试（见 README「Gateway 注�
 ---
 
 ## 关键实现细节
+
+### 召回必要性 Shadow
+
+`recall_policy.py` 的 `RecallNecessityPlan` 在候选桶相关性之前独立判断 `none / explicit / contextual`，并用 `targetable` 防止“你还记得吗”这类无目标请求扩大检索。`gateway.py` 保留原 admission gate 和正式注入，只在 `phase1_recall_shadow_enabled=true` 时并行生成 `recall_necessity_debug` 与 `recall_shadow_debug`。明确回忆可在 shadow 中软化错误 vague / axis / anchor；非明确请求在 planner degraded 时不得新增桶。两个 Debug 均标记 `affects_recall=false`。
 
 ### 噪声系统
 噪声 = `resolved=true AND importance=1`。标记时写入 `importance_before_noise` 备份；撤销时自动恢复。`search()` 默认排除，`include_noise=true` 可包含。各 API 响应含 `"noise": bool` 字段。

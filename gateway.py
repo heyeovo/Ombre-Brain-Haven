@@ -96,7 +96,12 @@ from query_terms import (
     identity_address_terms,
 )
 from recall_eval import RECALL_EVAL_BLOCKED_SECTIONS, RECALL_EVAL_DEFAULT_CASES
-from recall_policy import QueryAnchorPlan, RecallPolicy, diffusion_seed_topic_term_has_specific_residue
+from recall_policy import (
+    QueryAnchorPlan,
+    RecallNecessityPlan,
+    RecallPolicy,
+    diffusion_seed_topic_term_has_specific_residue,
+)
 from memory_nodes import MemoryNodeStore
 from persona_engine import PersonaStateEngine
 from persona_event_selection import (
@@ -784,6 +789,10 @@ class GatewayService:
             os.environ.get("OMBRE_QUERY_PLANNER_ENABLED") if "OMBRE_QUERY_PLANNER_ENABLED" in os.environ
             else self.gateway_cfg.get("query_planner_enabled"),
             False,
+        )
+        self.phase1_recall_shadow_enabled = self._bool_config_value(
+            self.gateway_cfg.get("phase1_recall_shadow_enabled"),
+            True,
         )
         (
             self.query_planner_model,
@@ -2464,6 +2473,7 @@ class GatewayService:
             cards, recalled_ids, debug_payload, date_recall_text = await self._hook_recall_fast_cards(
                 query,
                 session_id,
+                recent_context_query=self._extract_previous_user_query(messages, query),
                 max_cards=max_cards,
                 max_chars=max_chars,
                 include_diffused=include_diffused,
@@ -3770,6 +3780,7 @@ class GatewayService:
 
         stage_started_at = time.perf_counter()
         current_user_query = self._extract_current_turn_user_query(messages)
+        previous_user_query = self._extract_previous_user_query(messages, current_user_query)
         is_new_user_turn = bool(current_user_query)
         has_handoff_context = self._messages_contain_handoff_context(messages)
         is_session_start = self.state_store.get_last_success_at(session_id) is None
@@ -3834,6 +3845,20 @@ class GatewayService:
         persona_state: dict[str, Any] | None = None
         injected_ids: list[str] | None = None
         query_planner_debug: dict[str, Any] = self._query_planner_debug_base(current_user_query)
+        initial_necessity_plan = self.recall_policy.plan_recall_necessity(
+            current_user_query,
+            recent_context=previous_user_query,
+        )
+        query_planner_debug["recall_necessity_debug"] = self._recall_necessity_debug(
+            initial_necessity_plan
+        )
+        query_planner_debug["recall_shadow_debug"] = self._build_recall_shadow_debug(
+            current_user_query,
+            initial_necessity_plan,
+            [],
+            [],
+            query_planner_debug,
+        )
         memory_sentinel_debug: dict[str, Any] = self._memory_sentinel_debug_base(current_user_query)
         domain_sentinel_debug: dict[str, Any] = self._domain_sentinel_rule_plan(current_user_query)
         skip_broad_dynamic_recall = False
@@ -3976,6 +4001,7 @@ class GatewayService:
                             memory_sentinel_debug,
                         ),
                         include_query_planner_debug=True,
+                        recent_context_query=previous_user_query,
                     )
                     mark_step("dynamic_recall_bucket_select", stage_started_at)
                     stage_started_at = time.perf_counter()
@@ -4031,6 +4057,7 @@ class GatewayService:
                             memory_sentinel_debug,
                         ),
                         include_query_planner_debug=True,
+                        recent_context_query=previous_user_query,
                     )
                     mark_step("dynamic_recall_graph_select", stage_started_at)
             else:
@@ -7895,6 +7922,27 @@ class GatewayService:
             continue
         return ""
 
+    def _extract_previous_user_query(
+        self,
+        messages: list[dict[str, Any]],
+        current_query: str = "",
+    ) -> str:
+        seen_current = False
+        current_key = " ".join(str(current_query or "").split())
+        for message in reversed(messages):
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = self._coerce_message_text(message.get("content"))
+            cleaned = self._strip_external_context_from_user_text(content)
+            if not cleaned:
+                continue
+            cleaned_key = " ".join(cleaned.split())
+            if not seen_current and (not current_key or cleaned_key == current_key):
+                seen_current = True
+                continue
+            return cleaned
+        return ""
+
     def _messages_contain_handoff_context(self, messages: list[dict[str, Any]]) -> bool:
         for message in messages:
             if not isinstance(message, dict):
@@ -10663,12 +10711,25 @@ class GatewayService:
         all_moments: list[dict] | None = None,
         search_query: str = "",
         include_query_planner_debug: bool = False,
+        recent_context_query: str = "",
     ) -> tuple[list[dict], list[dict], list[dict], list[dict]] | tuple[
         list[dict], list[dict], list[dict], list[dict], dict[str, Any]
     ]:
         query_planner_debug = self._query_planner_debug_base(query)
+        necessity_plan = self.recall_policy.plan_recall_necessity(
+            query,
+            recent_context=recent_context_query,
+        )
+        query_planner_debug["recall_necessity_debug"] = self._recall_necessity_debug(necessity_plan)
         timing_debug = query_planner_debug.setdefault("timing_ms", {})
         if not query or self.inject_max_cards <= 0:
+            query_planner_debug["recall_shadow_debug"] = self._build_recall_shadow_debug(
+                query,
+                necessity_plan,
+                [],
+                [],
+                query_planner_debug,
+            )
             return self._empty_moment_selection(
                 include_query_planner_debug=include_query_planner_debug,
                 query_planner_debug=query_planner_debug,
@@ -10678,6 +10739,23 @@ class GatewayService:
             and not self._has_named_exact_anchor_candidate(query, all_buckets)
         ):
             query_planner_debug["skip_reason"] = "auto_vague_query"
+            if self.phase1_recall_shadow_enabled and necessity_plan.should_search:
+                _, _, query_planner_debug = await self._select_dynamic_buckets(
+                    query,
+                    session_id,
+                    all_buckets,
+                    search_query=(search_query or self._normalized_recall_query(query) or query),
+                    include_query_planner_debug=True,
+                    recent_context_query=recent_context_query,
+                )
+            else:
+                query_planner_debug["recall_shadow_debug"] = self._build_recall_shadow_debug(
+                    query,
+                    necessity_plan,
+                    [],
+                    [],
+                    query_planner_debug,
+                )
             return self._empty_moment_selection(
                 include_query_planner_debug=include_query_planner_debug,
                 query_planner_debug=query_planner_debug,
@@ -10719,6 +10797,7 @@ class GatewayService:
             all_buckets,
             search_query=search_query,
             include_query_planner_debug=True,
+            recent_context_query=recent_context_query,
         )
         timing_debug = query_planner_debug.setdefault("timing_ms", {})
         self._add_timing_ms(timing_debug, "moment.select_dynamic_buckets", stage_started_at)
@@ -14339,6 +14418,178 @@ class GatewayService:
             "timing_ms": {},
         }
 
+    @staticmethod
+    def _recall_necessity_debug(plan: RecallNecessityPlan) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "necessity": plan.necessity,
+            "targetable": bool(plan.targetable),
+            "should_search": bool(plan.should_search),
+            "reason_codes": list(plan.reason_codes),
+            "context_available": bool(plan.context_available),
+            "affects_recall": False,
+        }
+
+    def _planner_shadow_status(self, planner_debug: dict[str, Any]) -> str:
+        if not self.query_planner_enabled:
+            return "disabled"
+        if list(planner_debug.get("errors") or []):
+            return "degraded"
+        if planner_debug.get("triggered"):
+            return "normal"
+        if str(planner_debug.get("skip_reason") or "") in {
+            "auto_vague_query",
+            "empty_query",
+            "max_cards_zero",
+        }:
+            return "not_run"
+        return "not_triggered"
+
+    def _build_recall_shadow_debug(
+        self,
+        query: str,
+        necessity_plan: RecallNecessityPlan,
+        formal_items: list[dict],
+        suppressed_items: list[dict],
+        planner_debug: dict[str, Any],
+        additional_candidate_items: list[dict] | None = None,
+    ) -> dict[str, Any]:
+        formal_items = [item for item in formal_items or [] if isinstance(item, dict)]
+        suppressed_items = [item for item in suppressed_items or [] if isinstance(item, dict)]
+        additional_candidate_items = [
+            item for item in (additional_candidate_items or []) if isinstance(item, dict)
+        ]
+        formal_bucket_ids = [
+            str((item.get("bucket") or {}).get("id") or "")
+            for item in formal_items
+            if (item.get("bucket") or {}).get("id")
+        ]
+        planner_status = self._planner_shadow_status(planner_debug)
+        debug: dict[str, Any] = {
+            "version": 1,
+            "enabled": bool(self.phase1_recall_shadow_enabled),
+            "affects_recall": False,
+            "planner_status": planner_status,
+            "necessity": necessity_plan.necessity,
+            "targetable": bool(necessity_plan.targetable),
+            "fallback_strategy": "",
+            "formal_bucket_ids": formal_bucket_ids,
+            "shadow_bucket_ids": [],
+            "added_bucket_ids": [],
+            "removed_bucket_ids": [],
+            "selected_candidates": [],
+            "rejected_candidates": [],
+        }
+        if not self.phase1_recall_shadow_enabled:
+            debug["fallback_strategy"] = "shadow_disabled"
+            return debug
+
+        shadow_pool: list[dict] = []
+        rejected_rows: list[dict[str, Any]] = []
+        if necessity_plan.necessity == "none":
+            debug["fallback_strategy"] = "necessity_none"
+        elif not necessity_plan.targetable:
+            debug["fallback_strategy"] = "explicit_target_missing"
+        elif necessity_plan.necessity == "contextual":
+            debug["fallback_strategy"] = (
+                "conservative_no_expansion"
+                if planner_status == "degraded"
+                else "contextual_formal_only"
+            )
+            shadow_pool = [dict(item) for item in formal_items]
+        else:
+            debug["fallback_strategy"] = (
+                "explicit_direct_without_planner_gates"
+                if planner_status in {"degraded", "not_run"}
+                else "explicit_soft_query_gates"
+            )
+            shadow_pool = [dict(item) for item in formal_items]
+            softened_reasons = {
+                "auto_vague_query_without_topic",
+                "activated_axis_mismatch",
+                "anchor_must_group_missing",
+                "discriminative_anchor_missing",
+            }
+            if planner_status == "degraded":
+                softened_reasons.add("planner_must_terms_missing")
+            existing_ids = {
+                str((item.get("bucket") or {}).get("id") or "")
+                for item in shadow_pool
+            }
+            for raw_item in [*additional_candidate_items, *suppressed_items]:
+                item = dict(raw_item)
+                bucket_id = str((item.get("bucket") or {}).get("id") or "")
+                original_reason = str(item.get("admission_reason") or "suppressed")
+                reliable_signal = self._bucket_has_reliable_recall_signal(query, item)
+                if (
+                    bucket_id
+                    and bucket_id not in existing_ids
+                    and (
+                        bool(item.get("shadow_candidate_admitted"))
+                        or original_reason in softened_reasons
+                    )
+                    and reliable_signal
+                ):
+                    item["shadow_original_admission_reason"] = original_reason
+                    item["shadow_softened_reasons"] = (
+                        [] if item.get("shadow_candidate_admitted") else [original_reason]
+                    )
+                    item["admission_reason"] = (
+                        "shadow_direct_candidate"
+                        if item.get("shadow_candidate_admitted")
+                        else "shadow_explicit_soft_gate"
+                    )
+                    item.pop("blocked_reason", None)
+                    shadow_pool.append(item)
+                    existing_ids.add(bucket_id)
+                    continue
+                row = self._format_suppressed_bucket_debug(item, query=query, status="shadow_rejected")
+                row["shadow_admission_reason"] = (
+                    "shadow_insufficient_positive_evidence"
+                    if original_reason in softened_reasons and not reliable_signal
+                    else original_reason
+                )
+                rejected_rows.append(row)
+
+        shadow_items = self._pick_dynamic_cards(shadow_pool, query=query) if shadow_pool else []
+        shadow_bucket_ids = [
+            str((item.get("bucket") or {}).get("id") or "")
+            for item in shadow_items
+            if (item.get("bucket") or {}).get("id")
+        ]
+        selected_rows: list[dict[str, Any]] = []
+        for item in shadow_items:
+            row = self._format_suppressed_bucket_debug(item, query=query, status="shadow_selected")
+            row["formal_admission_reason"] = str(
+                item.get("shadow_original_admission_reason")
+                or item.get("admission_reason")
+                or "admitted_bucket"
+            )
+            row["shadow_admission_reason"] = str(item.get("admission_reason") or "shadow_selected")
+            row["shadow_softened_reasons"] = list(item.get("shadow_softened_reasons") or [])
+            selected_rows.append(row)
+        debug["shadow_bucket_ids"] = shadow_bucket_ids
+        debug["added_bucket_ids"] = [item for item in shadow_bucket_ids if item not in formal_bucket_ids]
+        debug["removed_bucket_ids"] = [item for item in formal_bucket_ids if item not in shadow_bucket_ids]
+        debug["selected_candidates"] = selected_rows[:20]
+        debug["rejected_candidates"] = rejected_rows[:20]
+        return debug
+
+    @staticmethod
+    def _recall_shadow_with_formal_ids(
+        shadow_debug: dict[str, Any] | None,
+        formal_bucket_ids: list[str],
+    ) -> dict[str, Any]:
+        debug = dict(shadow_debug or {})
+        if not debug:
+            return debug
+        formal_ids = list(dict.fromkeys(str(item) for item in formal_bucket_ids if str(item or "").strip()))
+        shadow_ids = list(debug.get("shadow_bucket_ids") or [])
+        debug["formal_bucket_ids"] = formal_ids
+        debug["added_bucket_ids"] = [item for item in shadow_ids if item not in formal_ids]
+        debug["removed_bucket_ids"] = [item for item in formal_ids if item not in shadow_ids]
+        return debug
+
     def _structural_activation_debug_base(self, query: str) -> dict[str, Any]:
         enabled = self._word_map_hint_available()
         normalized_query = self._normalized_recall_query(query) if enabled else ""
@@ -16562,10 +16813,23 @@ class GatewayService:
         allow_query_planner: bool = True,
         allow_semantic_session_dedupe: bool = True,
         allow_rerank: bool = True,
+        recent_context_query: str = "",
     ) -> tuple[list[dict], list[dict]] | tuple[list[dict], list[dict], dict[str, Any]]:
         planner_debug = self._query_planner_debug_base(query)
+        necessity_plan = self.recall_policy.plan_recall_necessity(
+            query,
+            recent_context=recent_context_query,
+        )
+        planner_debug["recall_necessity_debug"] = self._recall_necessity_debug(necessity_plan)
         timing_debug = planner_debug.setdefault("timing_ms", {})
         if not query or self.inject_max_cards <= 0:
+            planner_debug["recall_shadow_debug"] = self._build_recall_shadow_debug(
+                query,
+                necessity_plan,
+                [],
+                [],
+                planner_debug,
+            )
             if include_query_planner_debug:
                 return [], [], planner_debug
             return [], []
@@ -16575,6 +16839,36 @@ class GatewayService:
             and not self._has_named_exact_anchor_candidate(query, all_buckets)
         ):
             planner_debug["skip_reason"] = "auto_vague_query"
+            shadow_admitted: list[dict] = []
+            shadow_suppressed: list[dict] = []
+            if self.phase1_recall_shadow_enabled and necessity_plan.should_search:
+                shadow_admitted, shadow_suppressed = await self._dynamic_bucket_candidate_items(
+                    query,
+                    session_id,
+                    all_buckets,
+                    search_query=(
+                        str(search_query or "").strip()
+                        or self._normalized_recall_query(query)
+                        or query
+                    ),
+                    allow_semantic=allow_semantic,
+                    allow_semantic_session_dedupe=allow_semantic_session_dedupe,
+                    allow_rerank=allow_rerank,
+                    timing_debug=timing_debug,
+                    timing_prefix="shadow_direct",
+                )
+                shadow_admitted = [
+                    {**item, "shadow_candidate_admitted": True}
+                    for item in shadow_admitted
+                ]
+            planner_debug["recall_shadow_debug"] = self._build_recall_shadow_debug(
+                query,
+                necessity_plan,
+                [],
+                shadow_suppressed,
+                planner_debug,
+                additional_candidate_items=shadow_admitted,
+            )
             if include_query_planner_debug:
                 return [], [], planner_debug
             return [], []
@@ -16810,6 +17104,13 @@ class GatewayService:
             query,
             structural_activation_items,
             planner_debug["final_bucket_ids"],
+        )
+        planner_debug["recall_shadow_debug"] = self._build_recall_shadow_debug(
+            query,
+            necessity_plan,
+            selected_items,
+            suppressed_candidates,
+            planner_debug,
         )
         selected_buckets = [
             self._bucket_with_recall_signal(item)
@@ -19813,6 +20114,10 @@ class GatewayService:
             targeted_bucket_ids=targeted_bucket_ids,
             dream_source_bucket_ids=dream_source_bucket_ids,
         )
+        recall_shadow_debug = self._recall_shadow_with_formal_ids(
+            (query_planner_debug or {}).get("recall_shadow_debug"),
+            recalled_bucket_ids,
+        )
         if compact_debug:
             structural_activation_debug = self._compact_structural_activation_debug(
                 query_planner_debug,
@@ -19853,6 +20158,12 @@ class GatewayService:
             "active_reminders_injected": bool(str(active_reminders or "").strip()),
             "active_reminder_ids": active_reminder_ids,
             "query_planner_debug": query_planner_debug or self._query_planner_debug_base(query),
+            "recall_necessity_debug": (
+                (query_planner_debug or {}).get("recall_necessity_debug") or {}
+            ),
+            "recall_shadow_debug": (
+                recall_shadow_debug
+            ),
             "structural_activation_debug": structural_activation_debug,
             "moment_chunk_shadow_debug": moment_chunk_shadow_debug,
             "memory_sentinel_debug": memory_sentinel_debug or self._memory_sentinel_debug_base(query),
@@ -19898,6 +20209,7 @@ class GatewayService:
         query: str,
         session_id: str,
         *,
+        recent_context_query: str = "",
         max_cards: int,
         max_chars: int,
         include_diffused: bool,
@@ -19911,6 +20223,20 @@ class GatewayService:
         memory_sentinel_debug = self._memory_sentinel_debug_base(query)
         memory_sentinel_debug["searchable_residue_terms"] = self._memory_sentinel_searchable_residue_terms(query)
         query_planner_debug = self._query_planner_debug_base(query)
+        initial_necessity_plan = self.recall_policy.plan_recall_necessity(
+            query,
+            recent_context=recent_context_query,
+        )
+        query_planner_debug["recall_necessity_debug"] = self._recall_necessity_debug(
+            initial_necessity_plan
+        )
+        query_planner_debug["recall_shadow_debug"] = self._build_recall_shadow_debug(
+            query,
+            initial_necessity_plan,
+            [],
+            [],
+            query_planner_debug,
+        )
         domain_sentinel_debug = await self._route_domain_sentinel(query)
 
         # date_recall 走独立通道：不受桶检索的准入闸影响，也不替换桶检索的结果。
@@ -19933,6 +20259,23 @@ class GatewayService:
             recalled_ids: list[str],
             debug: dict[str, Any],
         ) -> tuple[list[dict[str, Any]], list[str], dict[str, Any], str]:
+            phase1_debug = debug.get("query_planner_debug")
+            if not isinstance(phase1_debug, dict):
+                phase1_debug = query_planner_debug
+            debug["recall_necessity_debug"] = dict(
+                phase1_debug.get("recall_necessity_debug") or {}
+            )
+            formal_bucket_ids = list(debug.get("recalled_bucket_ids") or [])
+            if not formal_bucket_ids:
+                formal_bucket_ids = [
+                    str(row.get("bucket_id") or "")
+                    for row in (debug.get("recalled_bucket_debug") or [])
+                    if isinstance(row, dict) and row.get("bucket_id")
+                ]
+            debug["recall_shadow_debug"] = self._recall_shadow_with_formal_ids(
+                phase1_debug.get("recall_shadow_debug"),
+                formal_bucket_ids,
+            )
             debug["date_recall"] = date_recall_text
             debug["date_recall_debug"] = date_recall_debug
             debug["date_recall_requested"] = date_recall_requested
@@ -20009,6 +20352,7 @@ class GatewayService:
             allow_query_planner=allow_query_planner,
             allow_semantic_session_dedupe=allow_semantic_session_dedupe,
             allow_rerank=allow_rerank,
+            recent_context_query=recent_context_query,
         )
         selected_buckets = self._with_explicit_source_record_buckets(
             query,

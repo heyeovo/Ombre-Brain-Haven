@@ -7,7 +7,8 @@
 - 已确认未来计划加入家族聚类；Haven 虽有关系边机制，但桶之间目前基本没有可用于召回的真实关系。
 - 已完成总体方案：`docs/recall-rebuild-plan.md`。
 - Phase 0 召回透镜最小版已在 Dashboard 实现并通过本地真实数据验收。
-- Haven 代码、线上配置和正式召回行为均未改变。
+- Phase 1 已完成本地代码实施：召回必要性、planner 降级 shadow、Debug 对比和召回透镜展示均已接通。
+- 正式 admission gate、排序和线上注入行为仍未改变；Phase 1 只记录 `affects_recall=false` 的 shadow 结果。
 
 ## 已确认的产品决定
 
@@ -63,21 +64,18 @@ Dashboard 已新增：
 
 本地 `.env.local` 仍指向旧的 `foryan.zeabur.app`；本次验收只在临时开发进程中覆盖为当前 VPS Gateway，没有修改本地或线上配置。正式 Dashboard 以生产 `HAVEN_GATEWAY_URL` 为准。
 
-## 下一窗口唯一范围：Phase 1 召回必要性与 planner 降级
+## Phase 1 已完成：召回必要性与 planner 降级 Shadow
 
-下一窗口先讨论并设计 shadow 结果，不直接切换正式召回路径。
+已实现：
 
-建议步骤：
-
-1. 先读：
-   - `Ombre-Brain-Haven/docs/recall-rebuild-plan.md`
-   - `Ombre-Brain-Haven/docs/recall-pipeline.md`
-   - `Ombre-Brain-Haven/docs/2026-08-27-recall-rebuild-handoff.md`
-2. 定点检查 recall necessity、query planner 降级和 admission gate 的当前连接位置。
-3. 先定义 `none / explicit / contextual` 的产品判定和 Debug 输出，不先定具体分数阈值。
-4. 设计 planner 不可用时的 shadow 降级结果：明确回忆请求继续检索，非明确请求保守注入，低质量 axis 不执行硬否决。
-5. 将新旧结果同时写入 Debug，但正式召回仍走旧路径。
-6. 在召回透镜中对比 shadow 与正式结果，使用固定六案例验收。
+1. `recall_policy.py` 新增独立 `RecallNecessityPlan`：`none / explicit / contextual`，并用 `targetable` 防止无目标明确请求全库撒网。
+2. 召回机制讨论、当前状态和普通闲聊优先判 `none`；明确“记得/上次/搜一下”等请求判 `explicit`；有上一用户上下文的明确接续指代可判 `contextual`。
+3. `gateway.py` 新增 `phase1_recall_shadow_enabled`，默认开启，关闭即可停止 Phase 1 shadow 计算。
+4. 明确且有目标的请求在 shadow 中可软化错误 vague、axis、must-group 和 discriminative anchor；planner degraded 时同时软化 planner must terms，但仍要求现有可靠正向证据。
+5. `none` 的 shadow 为空；`contextual` 在 planner degraded 时只保留正式结果，不新增桶。
+6. Debug 顶层新增 `recall_necessity_debug` 和 `recall_shadow_debug`；正式桶、shadow 桶、增减桶和候选原因可直接比较。
+7. Dashboard 召回透镜已显示必要性、planner 状态、正式/shadow ID、增减桶和 shadow 候选；未调整整体视觉。
+8. 新增 `tests/test_recall_phase1_shadow.py`，覆盖固定六类意图、无目标明确请求、contextual 上下文边界、降级不扩召回和正式对象不被 shadow 修改。
 
 ## Phase 1 验收
 
@@ -88,6 +86,20 @@ Dashboard 已新增：
 - Round 9、12、57 的非明确请求不能因 planner 降级而扩大召回；
 - 召回透镜能对比正式与 shadow 结果；
 - 对应测试和 Dashboard build 均通过。
+
+本地验证结果：
+
+- Phase 1 专项测试 7/7 通过；
+- Haven 全套测试 127/127 通过；
+- Dashboard `npm run build` 通过；
+- `git diff --check` 通过；
+- 正式 `_admit_bucket_for_recall`、排序公式和注入开关均未修改。
+
+尚需在用户 commit、push 并按 Coolify `HAVEN_RELEASE_SHA` 发布后，用线上 session 或 recall eval 对 Round 9、12、25、54、57、61 做真实桶结果验收。历史 Debug 不会自动补算新字段，因此旧 48 轮仍显示为“尚无 Phase 1 shadow 数据”；需要用同一查询重放或观察发布后的新记录。未完成线上真实验收前，不进入 Phase 2 正式 gate 切换。
+
+## 下一窗口唯一范围
+
+先完成 Phase 1 线上 shadow 验收。六个固定案例通过后，才进入 Phase 2：统一准入与排序。Phase 2 才讨论正式软化 axis / anchor / topic gate、替换 `non_explicit_query` 和渐进启用；不得在未验收 Phase 1 时直接修改线上 admission gate。
 
 ## 不得扩散的边界
 

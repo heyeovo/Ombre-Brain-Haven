@@ -398,6 +398,7 @@ gateway:
   portrait_memory_budget: 360
   portrait_memory_max_sources: 8
   portrait_memory_include_anchors: false # true optionally adds ordinary anchors; never includes pinned/protected/self_anchor
+  phase1_recall_shadow_enabled: true # compare necessity/planner fallback decisions in Debug; never changes injected memory
   query_planner_enabled: true  # extra LLM call: split long/low-confidence messages into short recall queries
   query_planner_model: ""      # empty = use dehydration.model via dehydration API
   query_planner_min_chars: 16  # also catches short emotional reason lookups like "今天为什么激动哭"

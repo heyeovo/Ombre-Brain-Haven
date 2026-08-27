@@ -61,6 +61,27 @@ _select_dynamic_buckets                     gateway.py ~16509
   -> _try_semantic_rescue                   语义救援（被抑制的桶二次机会）
 ```
 
+## Phase 1：召回必要性与 Shadow
+
+正式 admission gate、排序和注入结果目前保持不变。Gateway 在候选相关性判断之外，先独立生成轮级 `RecallNecessityPlan`：
+
+- `none`：当前消息不需要长期记忆；召回机制讨论、即时状态和普通闲聊不会因为碰巧命中候选而改变必要性。
+- `explicit`：用户明确要求回忆或搜索；另用 `targetable` 区分是否给出了可定位目标，无目标的明确请求不会全库撒网。
+- `contextual`：当前消息含明确接续指代且存在上一条有效用户上下文；第一版只保守记录，不在 planner 降级时扩大结果。
+
+`phase1_recall_shadow_enabled` 默认开启，只影响 Debug 计算。正式结果仍由原路径产生；shadow 使用正式候选和被拒候选做并行投影：
+
+- `none` 的 shadow 结果为空；
+- `explicit + targetable` 可将错误 vague、axis、must-group、discriminative anchor 降为软证据；planner degraded 时也软化 `planner_must_terms_missing`，但候选仍必须有现有可靠正向证据；
+- `contextual` 在 planner degraded 时不得新增正式结果之外的桶；
+- domain、状态、profile/session 隔离、会话硬排除和语义去重等硬边界不变。
+
+Debug 顶层新增：
+
+- `recall_necessity_debug`：必要性、是否可定位、理由码和上下文是否可用；
+- `recall_shadow_debug`：planner 状态、降级策略、正式/shadow 桶 ID、增减桶和 shadow 候选；
+- 两者都带 `affects_recall=false`，召回透镜可据此对比，但不会改变实际注入。
+
 ## 关键配置参数
 
 | 参数 | 默认值 | 说明 |
@@ -75,6 +96,7 @@ _select_dynamic_buckets                     gateway.py ~16509
 | `cooldown_hours` | — | 同桶冷却时间 |
 | `semantic_session_dedupe_threshold` | `0.90` | 会话语义去重阈值 |
 | `_RECALL_EXCLUDED_DOMAINS` | `journey, journal` | 动态召回排除的域 |
+| `phase1_recall_shadow_enabled` | `true` | 记录必要性和 shadow 对比；不改变正式注入 |
 
 ## Admission Gate 详细路径
 

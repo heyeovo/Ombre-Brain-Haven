@@ -49,7 +49,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `bucket_manager.py` | 桶 CRUD、搜索、评分、回收站、命中统计、分词 |
 | `dehydrator.py` | LLM 脱水、合并、打标；三类调用共用可热更新的 dehydration token、temperature、thinking 参数（含 `_last_merge_usage` 成本追踪） |
 | `decay_engine.py` | 衰减引擎，只计算排序 score；不自动 resolved、digested 或 archive |
-| `embedding_engine.py` | 向量嵌入 + 相似度搜索 |
+| `embedding_engine.py` | 向量嵌入 + 相似度搜索；可区分当前模型可用、缺失、损坏及模型/维度过期的桶向量状态 |
 | `import_memory.py` | 对话历史导入引擎（含成本追踪） |
 | `raw_events.py` | 隔离的原文 SQLite、显式原文检索、运行时/历史档案 scope、历史窗口目录与按时间分页读取、消息与导入幂等、私密白名单聊天档案分块归档 |
 | `raw_archive_import.py` | Claude 官方与 Kelivo 导出的流式白名单适配、预览审计、跨来源疑似重复、可见聊天＋推理档案打包及确认式上传 CLI；工具和附件内容不入 Haven |
@@ -286,7 +286,7 @@ GET /api/debug/injections             # 注入调试（见 README「Gateway 注�
 
 ### 召回必要性 Shadow
 
-`recall_policy.py` 的 `RecallNecessityPlan` 在候选桶相关性之前独立判断 `none / explicit / contextual`，并用 `targetable` 防止“你还记得吗”这类无目标请求扩大检索。`gateway.py` 保留原 admission gate 和正式注入，只在 `phase1_recall_shadow_enabled=true` 时并行生成 `recall_necessity_debug` 与 `recall_shadow_debug`。明确回忆可在 shadow 中软化错误 vague / axis / anchor；非明确请求在 planner degraded 时不得新增桶。两个 Debug 均标记 `affects_recall=false`。
+`recall_policy.py` 的 `RecallNecessityPlan` 在候选桶相关性之前独立判断 `none / explicit / contextual`，并用 `targetable` 防止“你还记得吗”这类无目标请求扩大检索。召回否定/复盘和 Shadow 测试语境优先为 `none`；明确过去指向为 `explicit`；无触发词但有具体自然话题也可为 `contextual`。`gateway.py` 保留原 admission gate、排序和正式注入，只在 `phase1_recall_shadow_enabled=true` 时对正式/被拒候选统一执行 shadow relevance：具体话题须得到语义或唯一直接证据支持，普通 keyword-only 候选不能靠 `first_card_min_score=0.55` 证明相关。Planner degraded 时 contextual 可删除正式噪声但不得新增桶。候选 `semantic_status` 区分 scored、未进 Top K、embedding 缺失/过期和查询不可用；两个 Debug 均标记 `affects_recall=false`。
 
 ### 噪声系统
 噪声 = `resolved=true AND importance=1`。标记时写入 `importance_before_noise` 备份；撤销时自动恢复。`search()` 默认排除，`include_noise=true` 可包含。各 API 响应含 `"noise": bool` 字段。

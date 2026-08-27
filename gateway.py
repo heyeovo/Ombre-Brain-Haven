@@ -3847,7 +3847,10 @@ class GatewayService:
         query_planner_debug: dict[str, Any] = self._query_planner_debug_base(current_user_query)
         initial_necessity_plan = self.recall_policy.plan_recall_necessity(
             current_user_query,
-            recent_context=previous_user_query,
+            recent_context=(
+                previous_user_query
+                or self._shadow_previous_user_query(session_id, current_user_query)
+            ),
         )
         query_planner_debug["recall_necessity_debug"] = self._recall_necessity_debug(
             initial_necessity_plan
@@ -7943,6 +7946,45 @@ class GatewayService:
             return cleaned
         return ""
 
+    def _shadow_previous_user_query(
+        self,
+        session_id: str,
+        current_query: str = "",
+    ) -> str:
+        """Best-effort previous turn for shadow classification; never changes formal recall."""
+        safe_session_id = str(session_id or "").strip()
+        if not safe_session_id:
+            return ""
+        current_key = " ".join(str(current_query or "").split())
+        try:
+            turns = self.state_store.list_conversation_turns_by_session(
+                profile_id=self._conversation_profile_id,
+                session_id=safe_session_id,
+                limit=3,
+            )
+        except Exception:
+            turns = []
+        for turn in reversed(turns or []):
+            text = self._strip_external_context_from_user_text(str(turn.get("user_text") or ""))
+            key = " ".join(text.split())
+            if text and key != current_key:
+                return text
+        try:
+            rows = self.state_store.list_injection_debug(
+                session_id=safe_session_id,
+                limit=3,
+                include_context=False,
+            )
+        except Exception:
+            rows = []
+        for row in rows or []:
+            payload = row.get("payload") if isinstance(row, dict) else None
+            text = str((payload or {}).get("query_preview") or "").strip()
+            key = " ".join(text.split())
+            if text and key != current_key:
+                return text
+        return ""
+
     def _messages_contain_handoff_context(self, messages: list[dict[str, Any]]) -> bool:
         for message in messages:
             if not isinstance(message, dict):
@@ -10718,7 +10760,10 @@ class GatewayService:
         query_planner_debug = self._query_planner_debug_base(query)
         necessity_plan = self.recall_policy.plan_recall_necessity(
             query,
-            recent_context=recent_context_query,
+            recent_context=(
+                recent_context_query
+                or self._shadow_previous_user_query(session_id, query)
+            ),
         )
         query_planner_debug["recall_necessity_debug"] = self._recall_necessity_debug(necessity_plan)
         timing_debug = query_planner_debug.setdefault("timing_ms", {})
@@ -14445,6 +14490,120 @@ class GatewayService:
             return "not_run"
         return "not_triggered"
 
+    def _shadow_specific_topic_terms(self, query: str) -> list[str]:
+        raw_terms = list(self.recall_policy.specific_query_terms(query))
+        raw_terms.extend(self._locatable_query_terms(query))
+        generic_keys = {
+            self._compact_lookup_key(value)
+            for value in (
+                *GENERIC_KEYWORD_MATCH_TERMS,
+                *GENERIC_LEXICAL_STOPWORDS,
+                *QUERY_PLANNER_GENERIC_TERMS,
+                *MEMORY_SENTINEL_RESIDUE_STOP_TERMS,
+                "话说",
+                "现在",
+                "今天",
+                "已经",
+                "好几次",
+                "时候",
+                "这些",
+                "那个桶",
+                "召回",
+                "记忆",
+                "检索",
+                "shadow",
+                "测试",
+                "正式结果",
+            )
+            if self._compact_lookup_key(value)
+        }
+        generic_keys.update(self._identity_match_terms(compact=True))
+        output: list[str] = []
+        seen: set[str] = set()
+        for term in raw_terms:
+            cleaned = str(term or "").strip()
+            key = self._compact_lookup_key(cleaned)
+            if not key or key in seen or key in generic_keys:
+                continue
+            if re.fullmatch(r"[\u4e00-\u9fff]+", key) and len(key) < 2:
+                continue
+            if re.fullmatch(r"[a-z]+", key) and len(key) < 3:
+                continue
+            seen.add(key)
+            output.append(cleaned)
+        return output[:12]
+
+    def _shadow_candidate_relevance(
+        self,
+        query: str,
+        necessity: str,
+        item: dict,
+    ) -> tuple[bool, str, dict[str, Any]]:
+        bucket = item.get("bucket") if isinstance(item, dict) else None
+        if not isinstance(bucket, dict):
+            return False, "shadow_invalid_candidate", {}
+        original_reason = str(item.get("admission_reason") or "")
+        if original_reason in {
+            "session_hard_exclude",
+            "journey_domain_excluded",
+            "journal_domain_excluded",
+        }:
+            return False, "shadow_hard_exclusion", {"original_reason": original_reason}
+
+        semantic_raw = item.get("semantic_score")
+        semantic_score = (
+            self._safe_float(semantic_raw, 0.0)
+            if semantic_raw is not None
+            else None
+        )
+        keyword_score = self._safe_float(item.get("keyword_score"), 0.0)
+        topic_terms = self._shadow_specific_topic_terms(query)
+        matched_topic_terms = [
+            term
+            for term in topic_terms
+            if self._bucket_matches_any_planner_term(bucket, [term])
+        ]
+        has_topic = bool(matched_topic_terms)
+        bucket_id = str(bucket.get("id") or "")
+        unique_direct = bool(
+            (bucket_id and bucket_id in self._extract_explicit_bucket_ids_from_text(query))
+            or item.get("rare_name_match")
+            or self._is_identity_name_candidate_bucket(query, bucket)
+            or self._source_record_explicit_bucket_match_reason(query, bucket)
+        )
+        exact_direct = bool(
+            item.get("exact_anchor_match")
+            and has_topic
+            and any(len(self._compact_lookup_key(term)) >= 4 for term in matched_topic_terms)
+        )
+        details = {
+            "semantic_status": str(item.get("semantic_status") or "legacy_unknown"),
+            "semantic_score": semantic_score,
+            "keyword_score": keyword_score,
+            "topic_terms": topic_terms,
+            "matched_topic_terms": matched_topic_terms,
+            "unique_direct": unique_direct,
+            "exact_direct": exact_direct,
+        }
+
+        if unique_direct:
+            return True, "shadow_unique_direct_evidence", details
+        if semantic_score is not None and semantic_score >= self.recall_policy.semantic_threshold and has_topic:
+            return True, "shadow_strong_semantic_topic", details
+        if semantic_score is not None and semantic_score >= 0.50 and keyword_score >= 0.65 and has_topic:
+            return True, "shadow_semantic_keyword_agreement", details
+        if necessity == "explicit" and semantic_score is not None and semantic_score >= 0.50 and has_topic:
+            return True, "shadow_explicit_semantic_topic", details
+        if necessity == "explicit" and exact_direct:
+            return True, "shadow_explicit_exact_topic", details
+        if semantic_raw is None:
+            return False, "shadow_semantic_not_scored", details
+        if semantic_score <= 0 and keyword_score > 0:
+            return False, "shadow_keyword_only_without_unique_anchor", details
+        if not has_topic:
+            return False, "shadow_query_topic_missing", details
+        return False, "shadow_insufficient_relevance", details
+
     def _build_recall_shadow_debug(
         self,
         query: str,
@@ -14490,65 +14649,52 @@ class GatewayService:
             debug["fallback_strategy"] = "necessity_none"
         elif not necessity_plan.targetable:
             debug["fallback_strategy"] = "explicit_target_missing"
-        elif necessity_plan.necessity == "contextual":
+        else:
+            conservative_contextual = bool(
+                necessity_plan.necessity == "contextual"
+                and planner_status in {"degraded", "disabled", "not_run"}
+            )
             debug["fallback_strategy"] = (
                 "conservative_no_expansion"
-                if planner_status == "degraded"
-                else "contextual_formal_only"
+                if conservative_contextual
+                else "contextual_strict_relevance"
+                if necessity_plan.necessity == "contextual"
+                else "explicit_strict_relevance_with_planner_fallback"
             )
-            shadow_pool = [dict(item) for item in formal_items]
-        else:
-            debug["fallback_strategy"] = (
-                "explicit_direct_without_planner_gates"
-                if planner_status in {"degraded", "not_run"}
-                else "explicit_soft_query_gates"
-            )
-            shadow_pool = [dict(item) for item in formal_items]
-            softened_reasons = {
-                "auto_vague_query_without_topic",
-                "activated_axis_mismatch",
-                "anchor_must_group_missing",
-                "discriminative_anchor_missing",
-            }
-            if planner_status == "degraded":
-                softened_reasons.add("planner_must_terms_missing")
-            existing_ids = {
+            formal_ids = {
                 str((item.get("bucket") or {}).get("id") or "")
-                for item in shadow_pool
+                for item in formal_items
+                if (item.get("bucket") or {}).get("id")
             }
-            for raw_item in [*additional_candidate_items, *suppressed_items]:
+            candidates = [*formal_items]
+            if not conservative_contextual:
+                candidates.extend(additional_candidate_items)
+                candidates.extend(suppressed_items)
+            seen_ids: set[str] = set()
+            for raw_item in candidates:
                 item = dict(raw_item)
                 bucket_id = str((item.get("bucket") or {}).get("id") or "")
+                if not bucket_id or bucket_id in seen_ids:
+                    continue
+                seen_ids.add(bucket_id)
+                admitted, shadow_reason, relevance_debug = self._shadow_candidate_relevance(
+                    query,
+                    necessity_plan.necessity,
+                    item,
+                )
                 original_reason = str(item.get("admission_reason") or "suppressed")
-                reliable_signal = self._bucket_has_reliable_recall_signal(query, item)
-                if (
-                    bucket_id
-                    and bucket_id not in existing_ids
-                    and (
-                        bool(item.get("shadow_candidate_admitted"))
-                        or original_reason in softened_reasons
-                    )
-                    and reliable_signal
-                ):
+                if admitted:
                     item["shadow_original_admission_reason"] = original_reason
-                    item["shadow_softened_reasons"] = (
-                        [] if item.get("shadow_candidate_admitted") else [original_reason]
-                    )
-                    item["admission_reason"] = (
-                        "shadow_direct_candidate"
-                        if item.get("shadow_candidate_admitted")
-                        else "shadow_explicit_soft_gate"
-                    )
+                    item["shadow_relevance_debug"] = relevance_debug
+                    item["admission_reason"] = shadow_reason
                     item.pop("blocked_reason", None)
                     shadow_pool.append(item)
-                    existing_ids.add(bucket_id)
                     continue
                 row = self._format_suppressed_bucket_debug(item, query=query, status="shadow_rejected")
-                row["shadow_admission_reason"] = (
-                    "shadow_insufficient_positive_evidence"
-                    if original_reason in softened_reasons and not reliable_signal
-                    else original_reason
-                )
+                row["formal_admission_reason"] = original_reason
+                row["shadow_admission_reason"] = shadow_reason
+                row["shadow_relevance_debug"] = relevance_debug
+                row["was_formal_candidate"] = bucket_id in formal_ids
                 rejected_rows.append(row)
 
         shadow_items = self._pick_dynamic_cards(shadow_pool, query=query) if shadow_pool else []
@@ -14567,6 +14713,7 @@ class GatewayService:
             )
             row["shadow_admission_reason"] = str(item.get("admission_reason") or "shadow_selected")
             row["shadow_softened_reasons"] = list(item.get("shadow_softened_reasons") or [])
+            row["shadow_relevance_debug"] = dict(item.get("shadow_relevance_debug") or {})
             selected_rows.append(row)
         debug["shadow_bucket_ids"] = shadow_bucket_ids
         debug["added_bucket_ids"] = [item for item in shadow_bucket_ids if item not in formal_bucket_ids]
@@ -16454,9 +16601,13 @@ class GatewayService:
         stage_started_at = time.perf_counter()
         if allow_semantic:
             semantic_query = self._identity_name_semantic_query(raw_query) or raw_query
-            semantic_scores = await self._get_semantic_candidates(semantic_query, set(semantic_bucket_map))
+            semantic_scores, semantic_search_status = await self._get_semantic_candidates_with_status(
+                semantic_query,
+                set(semantic_bucket_map),
+            )
         else:
             semantic_scores = {}
+            semantic_search_status = "disabled_for_request"
         mark("semantic_candidates", stage_started_at)
         bucket_map = dict(eligible_map)
         for bucket_id in semantic_scores:
@@ -16516,6 +16667,15 @@ class GatewayService:
         if not candidate_ids:
             return [], []
 
+        embedding_statuses: dict[str, str] = {}
+        if allow_semantic and getattr(self.embedding_engine, "enabled", False):
+            status_reader = getattr(self.embedding_engine, "get_embedding_statuses", None)
+            if callable(status_reader):
+                try:
+                    embedding_statuses = status_reader(list(candidate_ids))
+                except Exception as exc:
+                    logger.warning("Gateway embedding coverage lookup failed: %s", exc)
+
         stage_started_at = time.perf_counter()
         semantic_norms = self._normalized_score_map(semantic_scores)
         keyword_basis = {
@@ -16547,7 +16707,8 @@ class GatewayService:
             meta = bucket.get("metadata", {})
             freshness_score = self._clamp(self.bucket_mgr._calc_time_score(meta))
             importance_score = self._clamp(float(meta.get("importance", 5)) / 10.0)
-            semantic_score = self._clamp(semantic_scores.get(bucket_id, 0.0))
+            raw_semantic_score = semantic_scores.get(bucket_id)
+            semantic_score = self._clamp(raw_semantic_score or 0.0)
             keyword_score = self._clamp(keyword_scores.get(bucket_id, 0.0))
             exact_score = self._clamp(exact_scores.get(bucket_id, 0.0))
             word_map_score = self._clamp(word_map_scores.get(bucket_id, 0.0))
@@ -16661,7 +16822,18 @@ class GatewayService:
                 {
                     "bucket": bucket,
                     "score": final_score,
-                    "semantic_score": semantic_score,
+                    "semantic_score": (
+                        semantic_score if raw_semantic_score is not None else None
+                    ),
+                    "semantic_status": (
+                        "scored"
+                        if raw_semantic_score is not None
+                        else semantic_search_status
+                        if semantic_search_status not in {"completed", "completed_no_results"}
+                        else "indexed_not_in_semantic_top_k"
+                        if embedding_statuses.get(bucket_id) == "indexed"
+                        else embedding_statuses.get(bucket_id, "embedding_status_unknown")
+                    ),
                     "keyword_score": keyword_score,
                     "exact_anchor_score": exact_score,
                     "exact_anchor_match": exact_match,
@@ -16818,7 +16990,10 @@ class GatewayService:
         planner_debug = self._query_planner_debug_base(query)
         necessity_plan = self.recall_policy.plan_recall_necessity(
             query,
-            recent_context=recent_context_query,
+            recent_context=(
+                recent_context_query
+                or self._shadow_previous_user_query(session_id, query)
+            ),
         )
         planner_debug["recall_necessity_debug"] = self._recall_necessity_debug(necessity_plan)
         timing_debug = planner_debug.setdefault("timing_ms", {})
@@ -18344,32 +18519,52 @@ class GatewayService:
         scored.sort(key=lambda item: item[1], reverse=True)
         return {bucket_id: score for bucket_id, score in scored[: self.dynamic_top_k]}
 
-    async def _get_semantic_candidates(self, query: str, eligible_ids: set[str]) -> dict[str, float]:
+    async def _get_semantic_candidates_with_status(
+        self,
+        query: str,
+        eligible_ids: set[str],
+    ) -> tuple[dict[str, float], str]:
         if not getattr(self.embedding_engine, "enabled", False):
-            return {}
+            return {}, "engine_disabled"
 
         try:
-            search = self.embedding_engine.search_similar(query, top_k=self.semantic_candidate_top_k)
-            if self.embedding_query_timeout_seconds > 0:
-                results = await asyncio.wait_for(search, timeout=self.embedding_query_timeout_seconds)
+            search_with_status = getattr(self.embedding_engine, "search_similar_with_status", None)
+            if callable(search_with_status):
+                search = search_with_status(query, top_k=self.semantic_candidate_top_k)
             else:
-                results = await search
+                search = self.embedding_engine.search_similar(query, top_k=self.semantic_candidate_top_k)
+            if self.embedding_query_timeout_seconds > 0:
+                raw_result = await asyncio.wait_for(search, timeout=self.embedding_query_timeout_seconds)
+            else:
+                raw_result = await search
+            if (
+                isinstance(raw_result, tuple)
+                and len(raw_result) == 2
+                and isinstance(raw_result[1], str)
+            ):
+                results, search_status = raw_result
+            else:
+                results, search_status = raw_result, "completed"
         except asyncio.TimeoutError:
             logger.warning(
                 "Gateway embedding semantic search timed out | query_chars=%s timeout_seconds=%.2f",
                 len(str(query or "")),
                 self.embedding_query_timeout_seconds,
             )
-            return {}
+            return {}, "query_timeout"
         except Exception as exc:
             logger.warning("Gateway embedding semantic search failed: %s", exc)
-            return {}
+            return {}, "query_failed"
         semantic_scores = {}
         for bucket_id, similarity in results:
             if bucket_id not in eligible_ids:
                 continue
             semantic_scores[bucket_id] = self._clamp(similarity)
-        return semantic_scores
+        return semantic_scores, search_status
+
+    async def _get_semantic_candidates(self, query: str, eligible_ids: set[str]) -> dict[str, float]:
+        scores, _status = await self._get_semantic_candidates_with_status(query, eligible_ids)
+        return scores
 
     def _word_map_hint_available(self) -> bool:
         return (
@@ -19468,7 +19663,12 @@ class GatewayService:
             "evidence_labels": list(item.get("evidence_labels") or []),
             "hard_evidence_labels": list(item.get("hard_evidence_labels") or []),
             "score": self._safe_float(item.get("score"), 0.0),
-            "semantic_score": self._safe_float(item.get("semantic_score"), 0.0),
+            "semantic_score": (
+                self._safe_float(item.get("semantic_score"), 0.0)
+                if item.get("semantic_score") is not None
+                else None
+            ),
+            "semantic_status": str(item.get("semantic_status") or "legacy_unknown"),
             "keyword_score": self._safe_float(item.get("keyword_score"), 0.0),
             "fusion_mode": str(item.get("fusion_mode") or ""),
             "fusion_score": self._safe_float(item.get("fusion_score"), 0.0),
@@ -19848,7 +20048,12 @@ class GatewayService:
             "evidence_labels": list(item.get("evidence_labels") or []),
             "hard_evidence_labels": list(item.get("hard_evidence_labels") or []),
             "score": self._safe_float(item.get("score"), 0.0),
-            "semantic_score": self._safe_float(item.get("semantic_score"), 0.0),
+            "semantic_score": (
+                self._safe_float(item.get("semantic_score"), 0.0)
+                if item.get("semantic_score") is not None
+                else None
+            ),
+            "semantic_status": str(item.get("semantic_status") or "legacy_unknown"),
             "keyword_score": self._safe_float(item.get("keyword_score"), 0.0),
             "rerank_score": (
                 self._safe_float(item.get("rerank_score"), 0.0)
@@ -20225,7 +20430,10 @@ class GatewayService:
         query_planner_debug = self._query_planner_debug_base(query)
         initial_necessity_plan = self.recall_policy.plan_recall_necessity(
             query,
-            recent_context=recent_context_query,
+            recent_context=(
+                recent_context_query
+                or self._shadow_previous_user_query(session_id, query)
+            ),
         )
         query_planner_debug["recall_necessity_debug"] = self._recall_necessity_debug(
             initial_necessity_plan

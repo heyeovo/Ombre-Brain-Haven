@@ -84,7 +84,7 @@ AI 对这段经历的理解、关系侧学习或以后应怎样做。
 
 `bucket` 模式可用于对照测试：它跳过 moment 图刷新和扩散，但仍执行可靠性门控。
 
-Gateway 还会并行记录 Phase 1 召回 shadow：先把本轮分成 `none`、`explicit` 或 `contextual`，再比较正式结果与新规则结果。明确且有目标的回忆请求在 shadow 中不会被错误 vague / axis / anchor 整轮否决；非明确请求在 query planner 降级时不会扩大召回。该路径只写入 injection Debug 的 `recall_necessity_debug` 与 `recall_shadow_debug`，标记 `affects_recall=false`，不改变当前 admission gate 或实际注入。可用 `gateway.phase1_recall_shadow_enabled` 整体关闭。
+Gateway 还会并行记录 Phase 1 召回 shadow：先把本轮分成 `none`、`explicit` 或 `contextual`，再独立审核正式与被拒候选。否定/复盘召回和系统测试语境归为 `none`；“上次/之前/你还记得”等明确过去指向归为 `explicit`；没有触发词但有具体自然话题的消息可归为 `contextual`，由候选证据决定是否值得自然召回。Shadow 要求具体话题与语义证据一致，普通关键词单独命中不能靠 `0.55` 选卡门槛证明相关，唯一名称等直接证据例外；非明确请求在 query planner 降级时不会新增桶。候选 Debug 另用 `semantic_status` 区分真实已评分、未进向量 Top K、缺失/过期 embedding 和查询不可用。该路径只写入 injection Debug 的 `recall_necessity_debug` 与 `recall_shadow_debug`，标记 `affects_recall=false`，不改变当前 admission gate、排序或实际注入。可用 `gateway.phase1_recall_shadow_enabled` 整体关闭。
 
 ### 4. Word Map Lite
 

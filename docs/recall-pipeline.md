@@ -65,15 +65,18 @@ _select_dynamic_buckets                     gateway.py ~16509
 
 正式 admission gate、排序和注入结果目前保持不变。Gateway 在候选相关性判断之外，先独立生成轮级 `RecallNecessityPlan`：
 
-- `none`：当前消息不需要长期记忆；召回机制讨论、即时状态和普通闲聊不会因为碰巧命中候选而改变必要性。
-- `explicit`：用户明确要求回忆或搜索；另用 `targetable` 区分是否给出了可定位目标，无目标的明确请求不会全库撒网。
-- `contextual`：当前消息含明确接续指代且存在上一条有效用户上下文；第一版只保守记录，不在 planner 降级时扩大结果。
+- `none`：召回否定/复盘、系统/Shadow 测试语境或纯低信号闲聊，不会因为出现“召回/记忆”等系统词而变成明确请求。
+- `explicit`：用户明确指向共同过去或要求搜索，例如“上次/之前/你还记得/帮我搜”；另用 `targetable` 区分是否给出了可定位目标。
+- `contextual`：没有回忆触发词，但当前消息含可定位的自然话题；或含接续指代且能从请求历史或现有 session 记录取得上一用户上下文。它表示“允许自然召回”，不是“必定注入”。
 
 `phase1_recall_shadow_enabled` 默认开启，只影响 Debug 计算。正式结果仍由原路径产生；shadow 使用正式候选和被拒候选做并行投影：
 
 - `none` 的 shadow 结果为空；
-- `explicit + targetable` 可将错误 vague、axis、must-group、discriminative anchor 降为软证据；planner degraded 时也软化 `planner_must_terms_missing`，但候选仍必须有现有可靠正向证据；
-- `contextual` 在 planner degraded 时不得新增正式结果之外的桶；
+- `explicit/contextual` 都重新审核正式候选，不再无条件继承正式 admission；
+- 候选必须有具体 query topic，并由强语义、语义+关键词一致或唯一名称/明确实体等直接证据支持；普通 keyword-only、括号动作短语和元数据加分不能独立证明相关；
+- `first_card_min_score=0.55` 只在相关性通过后参与选卡，不能把缺少相关证据的桶抬成合格候选；
+- `contextual` 仅在 planner 正常或无需触发时可从被拒池新增高相关候选；planner disabled/degraded/not-run 时可删除正式噪声，但不得新增桶；
+- `explicit` 在 planner 降级时仍可走严格直接证据，不再因 vague / axis / anchor 整轮误杀；
 - domain、状态、profile/session 隔离、会话硬排除和语义去重等硬边界不变。
 
 Debug 顶层新增：
@@ -174,7 +177,7 @@ must_groups (recall_policy.py:1087):
 
 - **Debug 面板**: `https://ygao2jdgxlqzxfoasmjpvxcf.23.95.136.46.sslip.io/gateway/debug`
 - **Debug API**: `GET /gateway/api/debug/injections?session_id=xxx&include_payload=1&limit=20`，认证: `Authorization: Bearer HONOO`
-- 每个候选桶的 debug 包含: `score`, `semantic_score`, `keyword_score`, `admission_reason`, `evidence_labels`
+- 每个候选桶的 debug 包含: `score`, `semantic_score`, `semantic_status`, `keyword_score`, `admission_reason`, `evidence_labels`。`semantic_score=null` 时看 `semantic_status`：可区分 `indexed_not_in_semantic_top_k`、`embedding_missing`、`embedding_stale_model_or_dimension`、engine disabled、query timeout/failed；不再把所有“未计算/未返回”伪装成 `0.0`。
 - 被拒绝的桶在 `suppressed_bucket_candidates` 里，带 `admission_reason`
 - hook_recall 展开卡片显示: `search_query`, `residue_terms`, `candidates` 计数
 - payload 中 `memory_sentinel_debug.searchable_residue_terms` 包含提取的搜索词列表

@@ -961,6 +961,17 @@ RECALL_META_DISCUSSION_MARKERS = (
     "query planner",
     "activated_axis",
     "auto_vague",
+    "shadow测试",
+    "shadow 测试",
+    "shadow召回",
+    "shadow 召回",
+    "正式召回",
+    "召回对比",
+    "对比召回",
+    "召回的桶",
+    "召回这些",
+    "召回那个桶",
+    "召回哪些桶",
 )
 CONTEXTUAL_RECALL_MARKERS = (
     "那件事",
@@ -985,6 +996,23 @@ EXPLICIT_MEMORY_SEARCH_MARKERS = (
     "搜索一下",
     "查一下",
     "找一下",
+)
+AMBIGUOUS_EXPLICIT_MEMORY_MARKERS = frozenset(
+    {
+        "回忆",
+        "记忆",
+        "召回",
+        "检索",
+        "recall",
+        "memory",
+    }
+)
+RECALL_META_NEGATION_RE = re.compile(
+    r"(?:不|没|没有|并不|未|无需|不用|不该|不应).{0,10}"
+    r"(?:预期|希望|想|要|需要|应该|应当)?.{0,6}(?:召回|回忆|检索|搜索记忆)"
+)
+RECALL_META_REVIEW_RE = re.compile(
+    r"(?:召回|检索|记忆注入).{0,12}(?:错|不对|无关|问题|结果|桶|测试|对比)"
 )
 
 
@@ -1446,7 +1474,7 @@ class RecallPolicy:
             )
 
         lowered = " ".join(text.lower().split())
-        if any(marker in lowered for marker in RECALL_META_DISCUSSION_MARKERS):
+        if self._query_is_recall_meta_discussion(lowered):
             return RecallNecessityPlan(
                 necessity="none",
                 targetable=False,
@@ -1455,7 +1483,8 @@ class RecallPolicy:
             )
 
         explicit_search = any(marker in lowered for marker in EXPLICIT_MEMORY_SEARCH_MARKERS)
-        if self._query_has_explicit_recall_marker(text) or explicit_search:
+        explicit_recall = self._query_has_explicit_recall_request(text)
+        if explicit_recall or explicit_search:
             locatable_terms = tuple(self.locatable_query_terms(text))
             specific_terms = tuple(
                 term
@@ -1499,6 +1528,27 @@ class RecallPolicy:
                 reason_codes=("contextual_reference", "recent_context_available"),
                 context_available=True,
             )
+        if contextual_marker:
+            return RecallNecessityPlan(
+                necessity="none",
+                targetable=False,
+                reason_codes=("contextual_reference_without_context",),
+                context_available=False,
+            )
+
+        specific_terms = tuple(
+            term
+            for term in self.specific_query_terms(text)
+            if self._compact_entity_keyword(term)
+            and self._compact_entity_keyword(term) not in WEAK_RECALL_TOPIC_TERMS
+        )
+        if specific_terms and not self._query_is_low_signal_recall_turn(text):
+            return RecallNecessityPlan(
+                necessity="contextual",
+                targetable=True,
+                reason_codes=("natural_contextual_topic",),
+                context_available=bool(context_text),
+            )
 
         reason = "contextual_reference_without_context" if contextual_marker else "no_recall_need"
         return RecallNecessityPlan(
@@ -1507,6 +1557,46 @@ class RecallPolicy:
             reason_codes=(reason,),
             context_available=bool(context_text),
         )
+
+    @staticmethod
+    def _query_is_recall_meta_discussion(query: str) -> bool:
+        text = " ".join(str(query or "").lower().split())
+        if not text:
+            return False
+        return bool(
+            any(marker in text for marker in RECALL_META_DISCUSSION_MARKERS)
+            or RECALL_META_NEGATION_RE.search(text)
+            or RECALL_META_REVIEW_RE.search(text)
+        )
+
+    def _query_has_explicit_recall_request(self, query: str) -> bool:
+        text = str(query or "").strip().lower()
+        if not text:
+            return False
+        markers = tuple(
+            str(marker or "").strip().lower()
+            for marker in query_intent_terms("memory_sentinel.explicit_recall_markers")
+            if str(marker or "").strip()
+        )
+        if any(marker in text for marker in markers if marker not in AMBIGUOUS_EXPLICIT_MEMORY_MARKERS):
+            return True
+        return bool(
+            re.search(
+                r"(?:帮我|替我|给我|能不能|可以|请|想|要).{0,8}"
+                r"(?:回忆|检索|搜索|查找|找找|想想).{0,8}(?:一下|以前|之前|记忆|那次|那件事)?",
+                text,
+            )
+            or re.search(r"(?:回忆|检索|搜索|查找|想想)(?:一下|以前|之前|那次|那件事)", text)
+        )
+
+    def _query_is_low_signal_recall_turn(self, query: str) -> bool:
+        text = str(query or "").strip().lower()
+        compact = self._compact_marker_text(text)
+        if not compact:
+            return True
+        if re.fullmatch(r"(?:o[vw]o|owo|www+|哈+|哈哈哈*|嗯+|唔+|哦+|好+|行+|可以+)", compact):
+            return True
+        return self._is_short_casual_only_query(text)
 
     def _activated_axis_from_locatable_terms(
         self,

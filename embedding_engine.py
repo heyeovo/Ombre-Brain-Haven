@@ -187,22 +187,71 @@ class EmbeddingEngine:
                 output[str(bucket_id)] = embedding
         return output
 
+    def get_embedding_statuses(self, bucket_ids: list[str]) -> dict[str, str]:
+        """Report whether requested buckets have a usable vector for the active model."""
+        unique_ids = list(
+            dict.fromkeys(
+                str(item or "").strip()
+                for item in bucket_ids
+                if str(item or "").strip()
+            )
+        )
+        if not unique_ids:
+            return {}
+        placeholders = ",".join("?" for _ in unique_ids)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            rows = conn.execute(
+                f"SELECT bucket_id, embedding, model, dimension FROM embeddings WHERE bucket_id IN ({placeholders})",
+                unique_ids,
+            ).fetchall()
+        finally:
+            conn.close()
+
+        by_id = {str(row[0]): row for row in rows}
+        statuses: dict[str, str] = {}
+        for bucket_id in unique_ids:
+            row = by_id.get(bucket_id)
+            if row is None:
+                statuses[bucket_id] = "embedding_missing"
+                continue
+            try:
+                embedding = json.loads(row[1])
+            except (json.JSONDecodeError, TypeError):
+                statuses[bucket_id] = "embedding_invalid"
+                continue
+            statuses[bucket_id] = (
+                "indexed"
+                if self._row_matches_current_model(row[2], row[3], embedding)
+                else "embedding_stale_model_or_dimension"
+            )
+        return statuses
+
     async def search_similar(self, query: str, top_k: int = 10) -> list[tuple[str, float]]:
         """
         Search for buckets similar to query text.
         Returns list of (bucket_id, similarity_score) sorted by score desc.
         搜索与查询文本相似的桶。返回 (bucket_id, 相似度分数) 列表。
         """
+        results, _status = await self.search_similar_with_status(query, top_k=top_k)
+        return results
+
+    async def search_similar_with_status(
+        self,
+        query: str,
+        top_k: int = 10,
+    ) -> tuple[list[tuple[str, float]], str]:
+        """Search with a diagnostic status so an absent score is not reported as zero."""
         if not self.enabled:
-            return []
+            return [], "engine_disabled"
 
         try:
             query_embedding = await self._generate_embedding(query, kind="query")
             if not query_embedding:
-                return []
+                return [], "query_embedding_unavailable"
         except Exception as e:
             logger.warning(f"Query embedding failed: {e}")
-            return []
+            return [], "query_embedding_failed"
 
         # Load all embeddings from SQLite
         conn = sqlite3.connect(self.db_path)
@@ -210,7 +259,7 @@ class EmbeddingEngine:
         conn.close()
 
         if not rows:
-            return []
+            return [], "index_empty"
 
         # Calculate cosine similarity
         results = []
@@ -225,7 +274,9 @@ class EmbeddingEngine:
                 continue
 
         results.sort(key=lambda x: x[1], reverse=True)
-        return results[:top_k]
+        if not results:
+            return [], "no_current_model_embeddings"
+        return results[:top_k], "completed"
 
     def _prepare_embedding_input(self, text: str, *, kind: str) -> str:
         raw = str(text or "")

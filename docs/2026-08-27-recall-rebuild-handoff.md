@@ -7,7 +7,7 @@
 - 已确认未来计划加入家族聚类；Haven 虽有关系边机制，但桶之间目前基本没有可用于召回的真实关系。
 - 已完成总体方案：`docs/recall-rebuild-plan.md`。
 - Phase 0 召回透镜最小版已在 Dashboard 实现并通过本地真实数据验收。
-- Phase 1 已完成本地代码实施：召回必要性、planner 降级 shadow、Debug 对比和召回透镜展示均已接通。
+- Phase 1 已完成第二轮本地修正：召回必要性、候选独立 relevance、planner 降级 shadow、语义状态 Debug 和召回透镜对比均已接通。
 - 正式 admission gate、排序和线上注入行为仍未改变；Phase 1 只记录 `affects_recall=false` 的 shadow 结果。
 
 ## 已确认的产品决定
@@ -68,14 +68,16 @@ Dashboard 已新增：
 
 已实现：
 
-1. `recall_policy.py` 新增独立 `RecallNecessityPlan`：`none / explicit / contextual`，并用 `targetable` 防止无目标明确请求全库撒网。
-2. 召回机制讨论、当前状态和普通闲聊优先判 `none`；明确“记得/上次/搜一下”等请求判 `explicit`；有上一用户上下文的明确接续指代可判 `contextual`。
+1. `recall_policy.py` 使用独立 `RecallNecessityPlan`：`none / explicit / contextual`，并用 `targetable` 防止无目标明确请求全库撒网。
+2. 召回否定/复盘、系统术语和 Shadow 测试语境优先判 `none`；明确“记得/上次/之前/搜一下”等过去指向判 `explicit`；无触发词但有具体自然话题，或有可用上一用户上下文的接续指代判 `contextual`。
 3. `gateway.py` 新增 `phase1_recall_shadow_enabled`，默认开启，关闭即可停止 Phase 1 shadow 计算。
-4. 明确且有目标的请求在 shadow 中可软化错误 vague、axis、must-group 和 discriminative anchor；planner degraded 时同时软化 planner must terms，但仍要求现有可靠正向证据。
-5. `none` 的 shadow 为空；`contextual` 在 planner degraded 时只保留正式结果，不新增桶。
-6. Debug 顶层新增 `recall_necessity_debug` 和 `recall_shadow_debug`；正式桶、shadow 桶、增减桶和候选原因可直接比较。
-7. Dashboard 召回透镜已显示必要性、planner 状态、正式/shadow ID、增减桶和 shadow 候选；未调整整体视觉。
-8. 新增 `tests/test_recall_phase1_shadow.py`，覆盖固定六类意图、无目标明确请求、contextual 上下文边界、降级不扩召回和正式对象不被 shadow 修改。
+4. Shadow 对正式和被拒候选统一执行独立 relevance，不再因为候选已被正式 admission 放行就直接继承。
+5. 普通关键词单独命中、括号动作短语或元数据加分不能证明相关；具体话题须有强语义、语义+关键词一致或唯一名称/明确实体支持，`0.55` 只在相关性通过后参与选卡。
+6. `none` 的 shadow 为空；`contextual` 在 planner disabled/degraded/not-run 时可以删除正式噪声，但不得新增桶；planner 正常或无需触发时可加入严格相关候选。
+7. 当请求未携带上一轮消息时，Shadow 可从现有 session 对话记录或 injection Debug 读取上一条 query；不改变正式上下文路径。
+8. Debug 顶层保留 `recall_necessity_debug` 和 `recall_shadow_debug`；候选新增 `semantic_status`，区分已评分、未进 Top K、embedding 缺失/损坏/模型维度过期和查询不可用，不再把所有缺失值显示成真实 `0.0`。
+9. Dashboard 召回透镜继续显示必要性、planner 状态、正式/shadow ID、增减桶和 shadow 候选；第二轮未修改 Dashboard 或整体视觉。
+10. `tests/test_recall_phase1_shadow.py` 覆盖真实反馈语句、候选独立复审、自然 contextual、关键词单项拒绝、括号动作边界、planner 降级和 embedding 状态。
 
 ## Phase 1 验收
 
@@ -87,19 +89,29 @@ Dashboard 已新增：
 - 召回透镜能对比正式与 shadow 结果；
 - 对应测试和 Dashboard build 均通过。
 
-本地验证结果：
+第二轮本地验证结果（2026-08-28）：
 
-- Phase 1 专项测试 7/7 通过；
-- Haven 全套测试 127/127 通过；
-- Dashboard `npm run build` 通过；
+- Phase 1 专项测试 14/14 通过；
+- Haven 全套测试 134/134 通过；
 - `git diff --check` 通过；
-- 正式 `_admit_bucket_for_recall`、排序公式和注入开关均未修改。
+- `py_compile recall_policy.py gateway.py embedding_engine.py tests/test_recall_phase1_shadow.py` 通过；
+- 正式 `_admit_bucket_for_recall`、排序公式、注入开关和 Dashboard 均未修改。
 
-尚需在用户 commit、push 并按 Coolify `HAVEN_RELEASE_SHA` 发布后，用线上 session 或 recall eval 对 Round 9、12、25、54、57、61 做真实桶结果验收。历史 Debug 不会自动补算新字段，因此旧 48 轮仍显示为“尚无 Phase 1 shadow 数据”；需要用同一查询重放或观察发布后的新记录。未完成线上真实验收前，不进入 Phase 2 正式 gate 切换。
+第二轮线上反馈样本来自 session `ob2-20260827-zoazvn`：
+
+- Round 4、9、16 暴露“讨论/批评召回却被判 explicit”；Round 4 的正式与 shadow 均保留两个 `semantic=0, keyword=1` 噪声桶。
+- Round 6 的 Shadow 只是因 necessity 拦截而清空，未证明候选 relevance 有效；两个正式桶同为 `semantic=0, keyword=1`。
+- Round 16 的两个无关桶被 protected phrase / distinctive anchor 强制抬到 `0.55`；`（捂脸）` 被误当成精确短语证据。
+- Round 20“今天下雨了”和 Round 23“好久没约会了”应为 contextual；正确桶分别为“每一场雨都跟你在一起”（sem 0.588 / kw 0.908 / final 1.0）和“第一次正式外出约会”（sem 0.630 / kw 0.832 / final 1.0）。
+- Round 21、24 有明确过去指向，分别应召回下雨与约会相关桶。
+
+第二轮代码尚未 commit/push/deploy。发布后必须重放上述 Round；旧 Debug 不会自动重算。
+
+尚需在用户 commit、push 并按 Coolify `HAVEN_RELEASE_SHA` 发布后，除原固定 Round 9、12、25、54、57、61 外，重点重放 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24。验收 Shadow 是否删除 keyword-only 噪声、自然 contextual 是否只选高相关桶，以及候选 `semantic_status` 是否能解释原来的 0 分。历史 Debug 不会自动补算新字段。未完成线上真实验收前，不进入 Phase 2 正式 gate 切换。
 
 ## 下一窗口唯一范围
 
-先完成 Phase 1 线上 shadow 验收。六个固定案例通过后，才进入 Phase 2：统一准入与排序。Phase 2 才讨论正式软化 axis / anchor / topic gate、替换 `non_explicit_query` 和渐进启用；不得在未验收 Phase 1 时直接修改线上 admission gate。
+先完成 Phase 1 线上 shadow 验收。原六个固定案例与第二轮真实反馈 Round 4、6、9、16、20、21、23、24 通过后，才进入 Phase 2：统一准入与排序。Phase 2 才讨论正式软化 axis / anchor / topic gate、替换 `non_explicit_query` 和渐进启用；不得在未验收 Phase 1 时直接修改线上 admission gate。
 
 ## 不得扩散的边界
 

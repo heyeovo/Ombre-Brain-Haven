@@ -25,10 +25,29 @@ class RecallNecessityContractsTest(unittest.TestCase):
     def setUp(self):
         self.policy = RecallPolicy()
 
-    def assert_plan(self, query: str, necessity: str, targetable: bool, *, context: str = ""):
+    def assert_plan(
+        self,
+        query: str,
+        necessity: str,
+        targetable: bool,
+        *,
+        context: str = "",
+        reason_codes: tuple[str, ...] | None = None,
+    ):
         plan = self.policy.plan_recall_necessity(query, recent_context=context)
         self.assertEqual(plan.necessity, necessity)
         self.assertEqual(plan.targetable, targetable)
+        if reason_codes is not None:
+            self.assertEqual(plan.reason_codes, reason_codes)
+
+    def test_recall_test_observation_with_search_negation_takes_priority(self):
+        self.assert_plan(
+            "小言~这个是今天第一个测试记忆召回的窗口。我会发几个消息，然后在观测台看召回情况。"
+            "你随意回复就好，不用搜东西~",
+            "none",
+            False,
+            reason_codes=("recall_test_observation_search_negated",),
+        )
 
     def test_fixed_round_intents_keep_casual_and_meta_turns_at_none(self):
         self.assert_plan("ovo", "none", False)
@@ -57,6 +76,7 @@ class RecallNecessityContractsTest(unittest.TestCase):
     def test_fixed_round_intents_keep_explicit_recall_searchable(self):
         self.assert_plan("你记得上次我干活没告诉你、你生气那次吗", "explicit", True)
         self.assert_plan("你还记得一点半见后来成为习惯吗", "explicit", True)
+        self.assert_plan("你还记得我们第一次测试记忆召回的窗口吗", "explicit", True)
         self.assert_plan("帮我单独搜一下邻居", "explicit", True)
         self.assert_plan("现在没有了。你还记得上次我们讨论下雨吗", "explicit", True)
         self.assert_plan("都是。上次约会都是三个月前了", "explicit", True)
@@ -114,6 +134,30 @@ class RecallShadowContractsTest(unittest.TestCase):
         self.assertEqual(debug["shadow_bucket_ids"], [])
         self.assertEqual(debug["removed_bucket_ids"], ["wrong-bucket"])
         self.assertEqual(formal[0], original)
+
+    def test_recall_test_observation_none_skips_shadow_candidate_review(self):
+        service = self.make_service()
+
+        def unexpected_relevance_review(*_args, **_kwargs):
+            self.fail("necessity=none must not review Shadow candidates")
+
+        service._shadow_candidate_relevance = unexpected_relevance_review
+        query = (
+            "小言~这个是今天第一个测试记忆召回的窗口。我会发几个消息，然后在观测台看召回情况。"
+            "你随意回复就好，不用搜东西~"
+        )
+        plan = RecallPolicy().plan_recall_necessity(query)
+        debug = service._build_recall_shadow_debug(
+            query,
+            plan,
+            [self.item("surface-word-noise", "non_explicit_query")],
+            [],
+            {"errors": [], "triggered": False},
+        )
+        self.assertEqual(debug["fallback_strategy"], "necessity_none")
+        self.assertEqual(debug["shadow_bucket_ids"], [])
+        self.assertEqual(debug["selected_candidates"], [])
+        self.assertEqual(debug["rejected_candidates"], [])
 
     def test_degraded_explicit_softens_axis_but_keeps_positive_evidence_requirement(self):
         service = self.make_service()

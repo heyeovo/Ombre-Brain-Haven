@@ -1014,6 +1014,16 @@ RECALL_META_NEGATION_RE = re.compile(
 RECALL_META_REVIEW_RE = re.compile(
     r"(?:召回|检索|记忆注入).{0,12}(?:错|不对|无关|问题|结果|桶|测试|对比)"
 )
+RECALL_TEST_INTENT_RE = re.compile(
+    r"(?:(?:测试|试验|test).{0,12}(?:记忆)?召回|(?:记忆)?召回.{0,12}(?:测试|试验|test))"
+)
+RECALL_OBSERVATION_INTENT_RE = re.compile(
+    r"(?:(?:观测|观察|查看|看看|看).{0,12}(?:召回|检索)(?:情况|结果)?|"
+    r"(?:召回|检索).{0,12}(?:观测|观察|情况|结果))"
+)
+RECALL_SEARCH_NEGATION_RE = re.compile(
+    r"(?:不用|无需|不需要|别|不要).{0,8}(?:搜|搜索|查|检索|回忆|召回)"
+)
 
 
 @dataclass(frozen=True)
@@ -1474,6 +1484,13 @@ class RecallPolicy:
             )
 
         lowered = " ".join(text.lower().split())
+        if self._query_is_recall_test_observation_with_search_negation(lowered):
+            return RecallNecessityPlan(
+                necessity="none",
+                targetable=False,
+                reason_codes=("recall_test_observation_search_negated",),
+                context_available=bool(context_text),
+            )
         if self._query_is_recall_meta_discussion(lowered):
             return RecallNecessityPlan(
                 necessity="none",
@@ -1556,6 +1573,17 @@ class RecallPolicy:
             targetable=False,
             reason_codes=(reason,),
             context_available=bool(context_text),
+        )
+
+    @staticmethod
+    def _query_is_recall_test_observation_with_search_negation(query: str) -> bool:
+        text = " ".join(str(query or "").lower().split())
+        if not text:
+            return False
+        return bool(
+            RECALL_TEST_INTENT_RE.search(text)
+            and RECALL_OBSERVATION_INTENT_RE.search(text)
+            and RECALL_SEARCH_NEGATION_RE.search(text)
         )
 
     @staticmethod

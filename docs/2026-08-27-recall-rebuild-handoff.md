@@ -153,6 +153,15 @@ Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的
 
 后续线上 smoke session `ob2-20260828-i4tso3` 暴露新的 necessity 边界：首轮“这是测试记忆召回的窗口……在观测台看召回情况……不用搜东西”仍被判为 `contextual / natural_contextual_topic`，正式与 Shadow 都因“第一个/窗口”等表面主题保留候选。这是明确错误：召回测试语境、观测召回和否定搜索指令应以高优先级判 `none`，不能继续进入自然话题判断；修复方向应是意图组合与优先级，不是把“第一个/窗口”加入普通停用词。同 session 的“现在其实还是会召回一些不相关的桶”正确判 `none` 并未进入候选阶段。“就是要趁周末快点收尾”与“pro之后第一个周末一起干活”主题确实相关，但用户未期待主动召回，记录为“相关但未必值得此刻翻出”的灰区，不直接视为候选 relevance 错误。
 
+## Phase 1 组合意图优先级修复（2026-08-29 本地完成）
+
+- `recall_policy.py` 新增高优先级组合意图：同一轮同时表达召回测试、召回观测和“不用搜/不用回忆”时，在 meta、explicit 与 `natural_contextual_topic` 之前返回 `none / targetable=false`，原因码为 `recall_test_observation_search_negated`。
+- 三类信号必须同时成立；没有否定搜索与观测目的时，“你还记得我们第一次测试记忆召回的窗口吗”仍为 `explicit / targetable=true`。没有把“第一个、窗口、测试”等普通词加入全局停用表。
+- Gateway 原有 `necessity=none` 快速路径保持不变：不调用 `_shadow_candidate_relevance`，Shadow selected/rejected 均为空；正式 admission、排序、注入、relevance 阈值和 recall utility 均未修改。
+- `tests/test_recall_phase1_shadow.py` 已加入失败 session 原句、独立原因码、Shadow 不进入候选审核和真正过去事件不误杀的回归。
+- 本地验证：Phase 1 专项测试 21/21 通过；Haven 全套测试 142/142 通过；`py_compile recall_policy.py gateway.py embedding_engine.py tests/test_recall_phase1_shadow.py` 通过；`git diff --check` 通过。
+- 当前改动尚未 commit/push/deploy。此前线上版本仍为 `4b2ffd2eba884c6d3bdd1be07dd60a5ba48ceb48`；由用户提交后按 Coolify 完整 SHA 流程发布，再用新 session 重放失败原句，历史 Debug 不会重算。
+
 ## 发布后仍需继续核查
 
 1. **Embedding 内容新鲜度**：线上 318 个桶已确认没有缺失或模型/维度过期向量，因此不执行 backfill。现有检查不包含正文内容哈希；只有后续出现“桶正文已改但向量未刷新”的具体证据时，再单独审计内容新鲜度。
@@ -166,17 +175,17 @@ Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的
 ## 后续推进顺序
 
 1. Dashboard 召回透镜的单页 Debug 信息、中文映射、部署及 `ob2-20260827-r1bpf2` Round 25 / Round 12 第一组真实验收均已完成。
-2. Phase 1 下一步先修复“测试召回 / 观测召回 / 不用搜东西”组合没有高优先级判 `none` 的明确 necessity 缺口；采用意图组合与优先级，不把“第一个/窗口”等普通词加入屏蔽表。
+2. Phase 1 “测试召回 / 观测召回 / 不用搜东西”组合意图优先判 `none` 的本地修复和回归已完成；下一步是用户 commit/push、按完整 SHA 部署并用新 session 重放失败原句。
 3. 继续用固定案例验收 necessity、候选独立审核、planner 降级不扩召回和 `semantic_status`；embedding 覆盖统计已完成，不做 backfill。
 4. 单独研究“主动召回价值”与“候选相关性”的分离方案，并把“周末快点收尾”作为灰区基线；未形成可靠契约前不直接切正式 contextual。
 5. 称呼作为明确讨论对象的语境区分另开后续窗口，不与上述 necessity / utility 问题混做。
 6. 只有 Shadow 验收稳定后才进入 Phase 2，把统一 relevance/admission 渐进接入正式召回；仍不在 Phase 2 顺手处理家族聚类、关系边或额外 LLM agent。
 
-Haven Phase 1 当前修正已全部 commit/push/deploy；最新线上 SHA 和 Round 25 验收见上。下一窗口的 Dashboard 修改完成并部署后，除原固定 Round 9、12、25、54、57、61 外，重点重放 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24。验收 Shadow 是否删除 keyword-only 噪声、自然 contextual 是否只选高相关桶，以及候选 `semantic_status` 是否能解释原来的 0 分。历史 Debug 不会自动补算新字段。未完成线上真实验收前，不进入 Phase 2 正式 gate 切换。
+此前 Haven Phase 1 修正已 commit/push/deploy，线上 SHA 和 Round 25 验收见上；2026-08-29 的组合意图优先级修复仍只在本地，待用户提交与发布。发布后先用新 session 重放 `ob2-20260828-i4tso3` 首轮原句，并继续用原固定 Round 9、12、25、54、57、61 与 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24 验收。历史 Debug 不会自动补算新字段。未完成线上真实验收前，不进入 Phase 2 正式 gate 切换。
 
 ## 下一窗口唯一范围
 
-召回透镜第一组线上验收已完成。下一窗口若继续本议题，唯一实施范围是 Phase 1 necessity 的明确错误：让“测试召回 / 观测召回 / 不用搜或回忆”等组合意图优先判 `none`，并以 `ob2-20260828-i4tso3` 首轮和已正确拦截的召回讨论轮次做回归；不要把普通内容词加入停用表。主动召回价值 / recall utility 先研究并形成产品契约，不与这次定点修复混做；称呼语境、家族聚类及正式 admission 仍排除。完成 necessity 修复和固定验收后，再单独讨论 utility，二者稳定前不进入 Phase 2 正式切换。
+Phase 1 组合意图优先级已在本地完成，当前只剩用户 commit/push、Coolify 完整 SHA 发布和新 session 线上重放，不再扩大实现范围。线上验收通过后，若继续本议题，下一独立研究窗口只讨论主动召回价值 / recall utility 的产品契约，不与称呼语境、候选阈值、家族聚类、正式 admission 或额外 LLM agent 混做；utility 稳定前不进入 Phase 2 正式切换。
 
 ## 不得扩散的边界
 

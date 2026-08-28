@@ -147,7 +147,11 @@ Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的
 - 未知内部码的标题会直接显示具体码，并按 Shadow、Planner、语义或一般召回规则提供可理解兜底，不再只显示“尚未收录中文说明”。
 - 新增 `tests/recall-reason-copy.test.ts` 固定审计码表、retrieval alias、`query_timeout`、planner/fallback 和未知码兜底。
 
-本地验证：新增测试 5/5 通过；目标文件 ESLint 通过；`npm run build` 通过。完整 `npm test` 为 186 passed / 1 skipped / 2 failed，两个失败分别位于既有 automation proposal 字段契约和 selfhost runtime message 断言，与召回透镜改动文件无关，未越界处理。浏览器本地页可启动，但未代填 Dashboard 登录口令，因此 Round 25、语义超时轮次及未知码展示仍需用户 commit/push/deploy 后在已登录页面做最终真实数据验收。
+本地验证：新增测试 5/5 通过；目标文件 ESLint 通过；`npm run build` 通过。完整 `npm test` 为 186 passed / 1 skipped / 2 failed，两个失败分别位于既有 automation proposal 字段契约和 selfhost runtime message 断言，与召回透镜改动文件无关，未越界处理。
+
+部署后用户已在召回透镜完成第一组真实数据验收：`ob2-20260827-r1bpf2` Round 25 中，雨桶正式因 `semantic_only` 拒绝、Shadow 因 `shadow_semantic_keyword_agreement` 选择，`topic_terms/matched_topic_terms=下雨`、`ignored_address_terms=小言`；情书桶正式因 `retrieval_alias_only` 拒绝、Shadow 因 `shadow_query_topic_missing` 拒绝，清理后主题为“下雨”、桶未命中可信主题、直接证据均为否。Round 12 已直接显示“查询语义超时（query_timeout）”；该历史记录未保存后续新增的两个 query fallback 布尔字段，页面正确显示“未记录”，不误写成否。情书桶评分证据中的 `retrieval_alias` 已准确显示“命中稳定检索别名”，并说明别名不能单独决定正式注入。第一组固定验收已可完全在召回透镜完成，无需打开 Gateway Debug 或复制 JSON。
+
+后续线上 smoke session `ob2-20260828-i4tso3` 暴露新的 necessity 边界：首轮“这是测试记忆召回的窗口……在观测台看召回情况……不用搜东西”仍被判为 `contextual / natural_contextual_topic`，正式与 Shadow 都因“第一个/窗口”等表面主题保留候选。这是明确错误：召回测试语境、观测召回和否定搜索指令应以高优先级判 `none`，不能继续进入自然话题判断；修复方向应是意图组合与优先级，不是把“第一个/窗口”加入普通停用词。同 session 的“现在其实还是会召回一些不相关的桶”正确判 `none` 并未进入候选阶段。“就是要趁周末快点收尾”与“pro之后第一个周末一起干活”主题确实相关，但用户未期待主动召回，记录为“相关但未必值得此刻翻出”的灰区，不直接视为候选 relevance 错误。
 
 ## 发布后仍需继续核查
 
@@ -157,20 +161,22 @@ Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的
 4. **Planner 实际可用性**：按新记录统计 normal / not_triggered / disabled / degraded，以及 dehydration 鉴权错误；确认用户当前线上是否确有可用 dehydration 配置。Planner 不可用时 contextual 必须保持“不新增”。
 5. **Shadow relevance 泛化**：继续收集自然话题、明确过去指向、系统复盘和 keyword-only 噪声案例。重点观察 `semantic >= 0.50 + keyword >= 0.65 + specific topic` 的第一版组合证据是否放过无关桶或漏掉真正相关桶；该阈值只用于 Shadow，线上验收后再决定是否调整。
 6. **缺少目标桶的明确请求**：旧 Round 25、54 若对应桶当前不存在，无法证明“明确请求不会整轮误杀”；必须另找已有真实桶的 explicit 案例替代，不把“候选不存在”误判为 gate 失败。
+7. **主动召回价值与纯相关性分离**：当前 `natural_contextual_topic` 主要回答“这句话有没有可检索的具体自然话题”，Shadow relevance 主要回答“候选是否与话题相关”；两者都没有完整回答“这段旧记忆现在出现，是否会为本轮回复增加足够独特的价值”。“周末快点收尾”案例说明，找到相关桶不等于值得主动注入。后续应单独研究 recall utility / contribution：记忆是否解决指代、延续共同事件、提供当前回复不可替代的信息或显著改善关系连续性；仅有词面/语义相关但不改变回复时默认不主动翻出。该问题比候选检索更难，先作为明确后续研究项，不在本轮用宽泛屏蔽词或单个阈值草率实现；在它稳定前，不把当前 contextual Shadow 直接整体切为正式召回。
 
 ## 后续推进顺序
 
-1. Dashboard 召回透镜的单页 Debug 信息与中文映射已在本地完成；由用户 commit/push 并按 Dashboard 现有 Coolify 流程部署后做真实页面验收。
-2. 部署后先用 `ob2-20260827-r1bpf2` Round 25 验证雨桶 Shadow 选择、情书桶 Shadow 拒绝及双方主题证据，再核对 Round 12 的 `query_timeout`；随后继续重放原固定案例及 `ob2-20260827-zoazvn` Round 4、6、9、16、20、21、23、24，直接在召回透镜记录结论。
-3. 继续验收 necessity、候选独立审核、planner 降级不扩召回和 `semantic_status`；embedding 覆盖统计已完成，不做 backfill。
-4. 称呼作为明确讨论对象的语境区分另开后续窗口，不与召回透镜修改混做。
-5. 只有 Shadow 验收稳定后才进入 Phase 2，把统一 relevance/admission 渐进接入正式召回；仍不在 Phase 2 顺手处理家族聚类、关系边或额外 LLM agent。
+1. Dashboard 召回透镜的单页 Debug 信息、中文映射、部署及 `ob2-20260827-r1bpf2` Round 25 / Round 12 第一组真实验收均已完成。
+2. Phase 1 下一步先修复“测试召回 / 观测召回 / 不用搜东西”组合没有高优先级判 `none` 的明确 necessity 缺口；采用意图组合与优先级，不把“第一个/窗口”等普通词加入屏蔽表。
+3. 继续用固定案例验收 necessity、候选独立审核、planner 降级不扩召回和 `semantic_status`；embedding 覆盖统计已完成，不做 backfill。
+4. 单独研究“主动召回价值”与“候选相关性”的分离方案，并把“周末快点收尾”作为灰区基线；未形成可靠契约前不直接切正式 contextual。
+5. 称呼作为明确讨论对象的语境区分另开后续窗口，不与上述 necessity / utility 问题混做。
+6. 只有 Shadow 验收稳定后才进入 Phase 2，把统一 relevance/admission 渐进接入正式召回；仍不在 Phase 2 顺手处理家族聚类、关系边或额外 LLM agent。
 
 Haven Phase 1 当前修正已全部 commit/push/deploy；最新线上 SHA 和 Round 25 验收见上。下一窗口的 Dashboard 修改完成并部署后，除原固定 Round 9、12、25、54、57、61 外，重点重放 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24。验收 Shadow 是否删除 keyword-only 噪声、自然 contextual 是否只选高相关桶，以及候选 `semantic_status` 是否能解释原来的 0 分。历史 Debug 不会自动补算新字段。未完成线上真实验收前，不进入 Phase 2 正式 gate 切换。
 
 ## 下一窗口唯一范围
 
-召回透镜代码已本地完成。下一窗口若继续本议题，只做 Dashboard 部署后的真实页面验收：先检查 `ob2-20260827-r1bpf2` Round 25 和 Round 12，确认不打开 Gateway Debug 也能解释 Shadow 选择/拒绝、主题证据和 `query_timeout`；再按上述固定轮次继续验收。若发现纯展示缺口，只修 `ob-dashboard2/app/recall-lens/`；不得扩散到 Haven 召回算法、称呼语境判断、正式 admission gate 或 Gateway 原始 Debug。
+召回透镜第一组线上验收已完成。下一窗口若继续本议题，唯一实施范围是 Phase 1 necessity 的明确错误：让“测试召回 / 观测召回 / 不用搜或回忆”等组合意图优先判 `none`，并以 `ob2-20260828-i4tso3` 首轮和已正确拦截的召回讨论轮次做回归；不要把普通内容词加入停用表。主动召回价值 / recall utility 先研究并形成产品契约，不与这次定点修复混做；称呼语境、家族聚类及正式 admission 仍排除。完成 necessity 修复和固定验收后，再单独讨论 utility，二者稳定前不进入 Phase 2 正式切换。
 
 ## 不得扩散的边界
 

@@ -265,6 +265,7 @@ class GatewayStateContractsTest(unittest.TestCase):
         self.assertEqual(state["persona_id"], "lyra")
         self.assertEqual(state["cc_seen_round_id"], 3)
         self.assertEqual(state["local_engine_preference"], "cc")
+        self.assertEqual(state["handoff_snapshot"], {})
         restarted = GatewayStateStore(str(db_path))
         self.assertEqual(
             restarted.get_conversation_session_state(
@@ -515,6 +516,43 @@ class GatewayStateContractsTest(unittest.TestCase):
         )
         self.assertTrue(disabled["daily_review_snapshot_initialized"])
         self.assertEqual(disabled["daily_review_snapshot"], [])
+
+    def test_handoff_snapshot_is_fixed_persistent_and_profile_isolated(self):
+        store = self.make_store()
+        original = {
+            "version": 1,
+            "content": "<window_handoff_snapshot>固定背景</window_handoff_snapshot>",
+            "stats": {"estimated_tokens": 42},
+        }
+        state = store.patch_conversation_session_state(
+            profile_id="default",
+            session_id="handoff-session",
+            persona_id="ombre",
+            updates={"handoff_snapshot": original},
+        )
+        self.assertEqual(state["handoff_snapshot"], original)
+
+        frozen = store.patch_conversation_session_state(
+            profile_id="default",
+            session_id="handoff-session",
+            persona_id="ombre",
+            updates={"handoff_snapshot": {"version": 1, "content": "changed"}},
+        )
+        self.assertEqual(frozen["handoff_snapshot"], original)
+
+        restarted = GatewayStateStore(str(self.root / "gateway_state.db"))
+        self.assertEqual(
+            restarted.get_conversation_session_state(
+                profile_id="default", session_id="handoff-session"
+            )["handoff_snapshot"],
+            original,
+        )
+        self.assertEqual(
+            restarted.get_conversation_session_state(
+                profile_id="another-profile", session_id="handoff-session"
+            ),
+            {},
+        )
 
     def test_manual_daily_review_is_protected_from_automatic_overwrite(self):
         store = self.make_store()

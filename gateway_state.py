@@ -219,6 +219,7 @@ class GatewayStateStore:
                 daily_review_enabled INTEGER NOT NULL DEFAULT 1,
                 daily_review_snapshot_json TEXT NOT NULL DEFAULT '[]',
                 daily_review_snapshot_initialized INTEGER NOT NULL DEFAULT 0,
+                handoff_snapshot_json TEXT NOT NULL DEFAULT '{}',
                 cc_seen_round_id INTEGER NOT NULL DEFAULT 0,
                 state_version INTEGER NOT NULL DEFAULT 0,
                 deleted_at TEXT,
@@ -306,6 +307,7 @@ class GatewayStateStore:
                 "daily_review_enabled": "INTEGER NOT NULL DEFAULT 1",
                 "daily_review_snapshot_json": "TEXT NOT NULL DEFAULT '[]'",
                 "daily_review_snapshot_initialized": "INTEGER NOT NULL DEFAULT 0",
+                "handoff_snapshot_json": "TEXT NOT NULL DEFAULT '{}'",
                 "cc_seen_round_id": "INTEGER NOT NULL DEFAULT 0",
                 "state_version": "INTEGER NOT NULL DEFAULT 0",
             },
@@ -2809,7 +2811,7 @@ class GatewayStateStore:
                    local_engine_preference, selfhost_overrides_json, cc_overrides_json,
                    cc_lanes_json, prompt_module_overrides_json,
                    mode, daily_review_enabled, daily_review_snapshot_json,
-                   daily_review_snapshot_initialized,
+                   daily_review_snapshot_initialized, handoff_snapshot_json,
                    cc_seen_round_id, state_version, deleted_at, updated_at
             FROM conversation_sessions
             WHERE profile_id = ? AND session_id = ?
@@ -2846,6 +2848,7 @@ class GatewayStateStore:
                 if isinstance(item, dict)
             ],
             "daily_review_snapshot_initialized": bool(row["daily_review_snapshot_initialized"]),
+            "handoff_snapshot": self._json_object(row["handoff_snapshot_json"]),
             "cc_seen_round_id": int(row["cc_seen_round_id"] or 0),
             "state_version": int(row["state_version"] or 0),
             "deleted_at": row["deleted_at"],
@@ -2874,7 +2877,7 @@ class GatewayStateStore:
             raise ValueError("effective_engine is runtime-only and cannot be persisted")
         allowed = {
             "local_engine_preference", "selfhost_overrides", "cc_overrides", "prompt_module_overrides",
-            "mode", "daily_review_enabled", "initialize_daily_review_snapshot",
+            "mode", "daily_review_enabled", "initialize_daily_review_snapshot", "handoff_snapshot",
         }
         unknown = sorted(set(updates) - allowed)
         if unknown:
@@ -2932,6 +2935,15 @@ class GatewayStateStore:
                 raise ValueError("mode must be chat or work")
         daily_review_enabled = bool(updates.get("daily_review_enabled")) if "daily_review_enabled" in updates else None
         initialize_daily_review_snapshot = bool(updates.get("initialize_daily_review_snapshot"))
+        handoff_snapshot: dict[str, Any] | None = None
+        if "handoff_snapshot" in updates:
+            raw_handoff_snapshot = updates.get("handoff_snapshot")
+            if not isinstance(raw_handoff_snapshot, dict):
+                raise ValueError("handoff_snapshot must be an object")
+            encoded_handoff_snapshot = json.dumps(raw_handoff_snapshot, ensure_ascii=False)
+            if len(encoded_handoff_snapshot.encode("utf-8")) > 2_000_000:
+                raise ValueError("handoff_snapshot is too large")
+            handoff_snapshot = dict(raw_handoff_snapshot)
 
         updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         conn = self._connect()
@@ -2942,7 +2954,7 @@ class GatewayStateStore:
                 SELECT persona_id, local_engine_preference, selfhost_overrides_json, cc_overrides_json,
                        prompt_module_overrides_json, mode, daily_review_enabled,
                        daily_review_snapshot_json, daily_review_snapshot_initialized,
-                       state_version
+                       handoff_snapshot_json, state_version
                 FROM conversation_sessions
                 WHERE profile_id = ? AND session_id = ?
                 """,
@@ -2966,6 +2978,7 @@ class GatewayStateStore:
                 current_daily_review_enabled = bool(row["daily_review_enabled"])
                 current_daily_review_snapshot = self._json_array(row["daily_review_snapshot_json"])
                 current_daily_review_initialized = bool(row["daily_review_snapshot_initialized"])
+                current_handoff_snapshot = self._json_object(row["handoff_snapshot_json"])
             else:
                 current_version = 0
                 if expected_state_version not in (None, 0):
@@ -2978,6 +2991,7 @@ class GatewayStateStore:
                 current_daily_review_enabled = True
                 current_daily_review_snapshot = []
                 current_daily_review_initialized = False
+                current_handoff_snapshot = {}
 
             next_preference = preference or current_preference
             next_overrides = overrides if overrides is not None else current_overrides
@@ -2996,6 +3010,11 @@ class GatewayStateStore:
                     conn, profile_id=safe_profile_id, persona_id=safe_persona_id,
                 ) if next_daily_review_enabled else []
                 next_daily_review_initialized = True
+            # Handoff 是窗口创建时的固定快照。首条请求/幂等重试可以重复提交，
+            # 但窗口建立后不得用后续请求覆盖当时选定的背景。
+            next_handoff_snapshot = current_handoff_snapshot
+            if handoff_snapshot is not None and not current_handoff_snapshot:
+                next_handoff_snapshot = handoff_snapshot
             next_version = current_version + 1
             conn.execute(
                 """
@@ -3003,9 +3022,9 @@ class GatewayStateStore:
                 (profile_id, session_id, persona_id, title, local_engine_preference,
                  selfhost_overrides_json, cc_overrides_json, prompt_module_overrides_json, mode,
                  daily_review_enabled, daily_review_snapshot_json, daily_review_snapshot_initialized,
-                 cc_seen_round_id, state_version,
+                 handoff_snapshot_json, cc_seen_round_id, state_version,
                  deleted_at, updated_at)
-                VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?)
+                VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?)
                 ON CONFLICT(profile_id, session_id) DO UPDATE SET
                     local_engine_preference = excluded.local_engine_preference,
                     selfhost_overrides_json = excluded.selfhost_overrides_json,
@@ -3015,6 +3034,7 @@ class GatewayStateStore:
                     daily_review_enabled = excluded.daily_review_enabled,
                     daily_review_snapshot_json = excluded.daily_review_snapshot_json,
                     daily_review_snapshot_initialized = excluded.daily_review_snapshot_initialized,
+                    handoff_snapshot_json = excluded.handoff_snapshot_json,
                     state_version = excluded.state_version,
                     updated_at = excluded.updated_at
                 """,
@@ -3030,6 +3050,7 @@ class GatewayStateStore:
                     1 if next_daily_review_enabled else 0,
                     json.dumps(next_daily_review_snapshot, ensure_ascii=False),
                     1 if next_daily_review_initialized else 0,
+                    json.dumps(next_handoff_snapshot, ensure_ascii=False),
                     next_version,
                     updated_at,
                 ),

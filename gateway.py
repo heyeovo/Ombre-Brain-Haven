@@ -3468,6 +3468,7 @@ class GatewayService:
             "mode",
             "daily_review_enabled",
             "initialize_daily_review_snapshot",
+            "handoff_snapshot",
             "effective_engine",
         }
         updates = {key: body[key] for key in state_keys if key in body}

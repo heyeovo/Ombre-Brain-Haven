@@ -136,11 +136,18 @@ Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的
 
 最终修正已由用户 commit/push/deploy，线上完整 SHA 为 `4b2ffd2eba884c6d3bdd1be07dd60a5ba48ceb48`，Coolify 已配置 `OMBRE_RECALL_IGNORED_ADDRESS_TERMS=小言,言之,小羊`。session `ob2-20260827-r1bpf2` Round 25 重放“话说 今天下雨了 小言”后用户确认结果正确：Shadow 只保留雨桶，情书桶不再进入 Shadow 会选。该轮证明称呼配置、可信主题约束和正式关键词分复用已按预期组合；历史 Round 不会自动重算。
 
-## 召回透镜当前观测缺口
+## 召回透镜完善状态（2026-08-28 Dashboard 本地完成）
 
-本轮排障多次必须打开 Gateway 原始 Debug 并在超长 JSON 中搜索 bucket ID，成本过高，且容易把正式拒绝原因误读成 Shadow 拒绝原因。召回透镜当前“被拒候选”主要展示正式 `admission_reason` 与正式分数，没有直接展示对应的 `shadow_admission_reason` / `shadow_relevance_debug`。页面还缺少部分中文映射，例如 `retrieval_alias_only` 和 evidence label `retrieval_alias`，目前只能显示“尚未收录中文说明”。
+`ob-dashboard2` 已在本地完成单页 Debug 信息补齐，未修改 Haven、召回算法、API route 或 Gateway 原始 Debug：
 
-已确认下一窗口产品目标：召回排障应只使用召回透镜一个页面，不再要求用户打开 Gateway Debug 或翻原始 JSON。候选卡需要明确区分正式判断与 Shadow 判断，并在可折叠详情中展示：Shadow 选择/拒绝、中文原因、清理后主题、桶命中主题、本轮忽略称呼、语义状态、直接证据与 query 故障降级状态。轮次详情应保留必要性、targetable、planner 状态和 fallback strategy。必须审计 Haven 当前所有正式/Shadow admission reason、evidence label、semantic status、planner status 和 fallback strategy，补齐中文映射；未来未知码也要显示具体内部码和可理解的兜底文案，不能只显示“尚未收录中文说明”。
+- `app/recall-lens/page.tsx` 已按 bucket ID 对齐正式候选、Shadow selected 和 Shadow rejected，不再用 `shadow_admission_reason` 是否存在推断选择状态；候选卡明确分开显示正式判断与 Shadow 判断。
+- 候选卡直接显示 `semantic_status` 中文说明与原始码；现有折叠详情已接入 `topic_terms`、`matched_topic_terms`、各类 ignored terms、直接证据和 query 语义故障降级字段。
+- 轮次层已显示 necessity 原因、targetable、context available、planner status、fallback strategy，以及正式/Shadow 结果和新增/移除。
+- `app/recall-lens/recallReasonCopy.ts` 已审计并补齐当前正式/Shadow admission reason、evidence label、semantic status、planner status、fallback strategy 和动态 Planner 错误；`retrieval_alias_only` / `retrieval_alias` 已有准确中文说明。
+- 未知内部码的标题会直接显示具体码，并按 Shadow、Planner、语义或一般召回规则提供可理解兜底，不再只显示“尚未收录中文说明”。
+- 新增 `tests/recall-reason-copy.test.ts` 固定审计码表、retrieval alias、`query_timeout`、planner/fallback 和未知码兜底。
+
+本地验证：新增测试 5/5 通过；目标文件 ESLint 通过；`npm run build` 通过。完整 `npm test` 为 186 passed / 1 skipped / 2 failed，两个失败分别位于既有 automation proposal 字段契约和 selfhost runtime message 断言，与召回透镜改动文件无关，未越界处理。浏览器本地页可启动，但未代填 Dashboard 登录口令，因此 Round 25、语义超时轮次及未知码展示仍需用户 commit/push/deploy 后在已登录页面做最终真实数据验收。
 
 ## 发布后仍需继续核查
 
@@ -153,8 +160,8 @@ Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的
 
 ## 后续推进顺序
 
-1. 下一窗口只完善 Dashboard 召回透镜的单页 Debug 信息与中文映射；不改召回算法。
-2. Dashboard 完善并部署后，继续重放原固定案例及 `ob2-20260827-zoazvn` Round 4、6、9、16、20、21、23、24，直接在召回透镜记录结论。
+1. Dashboard 召回透镜的单页 Debug 信息与中文映射已在本地完成；由用户 commit/push 并按 Dashboard 现有 Coolify 流程部署后做真实页面验收。
+2. 部署后先用 `ob2-20260827-r1bpf2` Round 25 验证雨桶 Shadow 选择、情书桶 Shadow 拒绝及双方主题证据，再核对 Round 12 的 `query_timeout`；随后继续重放原固定案例及 `ob2-20260827-zoazvn` Round 4、6、9、16、20、21、23、24，直接在召回透镜记录结论。
 3. 继续验收 necessity、候选独立审核、planner 降级不扩召回和 `semantic_status`；embedding 覆盖统计已完成，不做 backfill。
 4. 称呼作为明确讨论对象的语境区分另开后续窗口，不与召回透镜修改混做。
 5. 只有 Shadow 验收稳定后才进入 Phase 2，把统一 relevance/admission 渐进接入正式召回；仍不在 Phase 2 顺手处理家族聚类、关系边或额外 LLM agent。
@@ -163,7 +170,7 @@ Haven Phase 1 当前修正已全部 commit/push/deploy；最新线上 SHA 和 Ro
 
 ## 下一窗口唯一范围
 
-只完善 `ob-dashboard2` 的召回透镜，使正式与 Shadow 的判断、原因、主题证据、语义状态和降级信息在一个页面可直接排查，并完整审计中文映射。开始前读取 Dashboard 的 `CLAUDE.md`、`DESIGN.md` 以及本 handoff；按“假设 → 验证”优先读取最小前端片段，确定方案后列准确文件清单并等待用户确认再改。不得在该窗口修改 Haven 召回算法、称呼语境判断或正式 admission gate。
+召回透镜代码已本地完成。下一窗口若继续本议题，只做 Dashboard 部署后的真实页面验收：先检查 `ob2-20260827-r1bpf2` Round 25 和 Round 12，确认不打开 Gateway Debug 也能解释 Shadow 选择/拒绝、主题证据和 `query_timeout`；再按上述固定轮次继续验收。若发现纯展示缺口，只修 `ob-dashboard2/app/recall-lens/`；不得扩散到 Haven 召回算法、称呼语境判断、正式 admission gate 或 Gateway 原始 Debug。
 
 ## 不得扩散的边界
 

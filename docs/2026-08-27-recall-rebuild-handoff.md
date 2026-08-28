@@ -153,14 +153,38 @@ Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的
 
 后续线上 smoke session `ob2-20260828-i4tso3` 暴露新的 necessity 边界：首轮“这是测试记忆召回的窗口……在观测台看召回情况……不用搜东西”仍被判为 `contextual / natural_contextual_topic`，正式与 Shadow 都因“第一个/窗口”等表面主题保留候选。这是明确错误：召回测试语境、观测召回和否定搜索指令应以高优先级判 `none`，不能继续进入自然话题判断；修复方向应是意图组合与优先级，不是把“第一个/窗口”加入普通停用词。同 session 的“现在其实还是会召回一些不相关的桶”正确判 `none` 并未进入候选阶段。“就是要趁周末快点收尾”与“pro之后第一个周末一起干活”主题确实相关，但用户未期待主动召回，记录为“相关但未必值得此刻翻出”的灰区，不直接视为候选 relevance 错误。
 
-## Phase 1 组合意图优先级修复（2026-08-29 本地完成）
+## Phase 1 组合意图优先级修复（2026-08-29 已上线验收）
 
 - `recall_policy.py` 新增高优先级组合意图：同一轮同时表达召回测试、召回观测和“不用搜/不用回忆”时，在 meta、explicit 与 `natural_contextual_topic` 之前返回 `none / targetable=false`，原因码为 `recall_test_observation_search_negated`。
 - 三类信号必须同时成立；没有否定搜索与观测目的时，“你还记得我们第一次测试记忆召回的窗口吗”仍为 `explicit / targetable=true`。没有把“第一个、窗口、测试”等普通词加入全局停用表。
 - Gateway 原有 `necessity=none` 快速路径保持不变：不调用 `_shadow_candidate_relevance`，Shadow selected/rejected 均为空；正式 admission、排序、注入、relevance 阈值和 recall utility 均未修改。
 - `tests/test_recall_phase1_shadow.py` 已加入失败 session 原句、独立原因码、Shadow 不进入候选审核和真正过去事件不误杀的回归。
 - 本地验证：Phase 1 专项测试 21/21 通过；Haven 全套测试 142/142 通过；`py_compile recall_policy.py gateway.py embedding_engine.py tests/test_recall_phase1_shadow.py` 通过；`git diff --check` 通过。
-- 当前改动尚未 commit/push/deploy。此前线上版本仍为 `4b2ffd2eba884c6d3bdd1be07dd60a5ba48ceb48`；由用户提交后按 Coolify 完整 SHA 流程发布，再用新 session 重放失败原句，历史 Debug 不会重算。
+- 用户已 commit/push，并以完整 SHA `59a49ad8f5aaca332ef747ed1407e346949333c1` 通过 Coolify 发布。新 session 重放失败原句后，necessity 组合意图结果符合预期；后续发现的 source-record 候选误召回属于下述独立精细度边界，不影响本次 necessity 修复验收结论。历史 Debug 不会重算。
+
+## 已接受保留：source-record 标题局部命中的精细度边界
+
+组合意图修复上线验收时，原句“你还记得我们第一次测试记忆召回的窗口吗”已正确判为 `explicit / targetable=true`，但候选【第一次说爱你】仍被正式与 Shadow 同时召回。该候选为 `score=0.964 / semantic=0.425 / keyword=0.763`；Shadow 原因为 `shadow_unique_direct_evidence`。
+
+召回透镜证据：
+
+- `raw_topic_terms/topic_terms/matched_topic_terms` 均为“第一次、窗口”；两个词在该桶正文中都确实存在且不止一次，不是单关键词误命中。
+- `explicit_bucket_id=false`、`rare_name_direct=false`、`identity_name_direct=false`、`exact_direct=false`。
+- `_source_record_explicit_bucket_match_reason()` 因“第一次”是标题【第一次说爱你】中长度不少于 3 的子串而返回 `explicit_bucket_title`；只要整桶正文再命中任意可信主题，当前 Shadow 就令 `source_record_direct=true`，进而 `unique_direct=true` 并绕过后续语义门槛。
+- Haven 当前产品数据基本遵守“一桶一个事件”，因此未来无需为了此问题增加“同一局部片段共现”约束；整桶正文匹配仍可继续使用。问题在于标题局部词被错误升级成唯一证据，而不是关键词是否位于同一句。
+
+当前决定以稳定跑通为先，本阶段接受保留，不继续修改：
+
+- 该问题属于候选/source-record 直接证据精细度，不属于 necessity 组合意图，也不与 recall utility、阈值、正式 admission 或家族聚类混做。
+- 不为【第一次说爱你】或“第一次、窗口、测试”等词写特例，不加入全局停用词。
+- 不在当前阶段引入全库短语索引、动态独特性统计或局部片段匹配；也不为了这个案例恢复“测试/记忆/召回”为通用主题词，因为这些词在大量请求中只是召回操作外壳，可能扩大系统类误召回。
+
+未来做精细优化时按由简到繁的顺序评估：
+
+1. 先把“唯一直接证据”收紧为明确桶 ID、完整桶标题和稳定别名；标题局部词只作普通辅助证据，继续走语义与关键词一致性审核。此方案是全局规则，不针对单桶。
+2. 重点回归真正由独特标题片段指向的正确案例，例如“你还记得一点半见那次吗”对应【一点半见后来成为习惯】；风险是局部片段未被 rare-name 识别且语义低于门槛时可能漏召回。
+3. 只有真实漏召回证明简单规则过严时，再考虑缓存式“短语 → bucket ID 集合”统计：桶新增/修改/合并/删除时更新，召回时只查当前 query 的少量连续短语，不每轮重扫全库。完整且全库独特的连续短语可作为强证据；“第一次、窗口”这类分散普通词即使共同只命中一个桶，也不自动成为唯一证据。
+4. 正式与 Shadow 本次都召回了错误桶。未来实施时必须分别核对 shared source-record 生成路径与 Shadow `unique_direct`，先在 Shadow 固定验收，再决定何时影响正式路径。
 
 ## 发布后仍需继续核查
 
@@ -175,17 +199,17 @@ Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的
 ## 后续推进顺序
 
 1. Dashboard 召回透镜的单页 Debug 信息、中文映射、部署及 `ob2-20260827-r1bpf2` Round 25 / Round 12 第一组真实验收均已完成。
-2. Phase 1 “测试召回 / 观测召回 / 不用搜东西”组合意图优先判 `none` 的本地修复和回归已完成；下一步是用户 commit/push、按完整 SHA 部署并用新 session 重放失败原句。
+2. Phase 1 “测试召回 / 观测召回 / 不用搜东西”组合意图优先判 `none` 的修复、回归、完整 SHA 发布和新 session 验收均已完成。
 3. 继续用固定案例验收 necessity、候选独立审核、planner 降级不扩召回和 `semantic_status`；embedding 覆盖统计已完成，不做 backfill。
 4. 单独研究“主动召回价值”与“候选相关性”的分离方案，并把“周末快点收尾”作为灰区基线；未形成可靠契约前不直接切正式 contextual。
 5. 称呼作为明确讨论对象的语境区分另开后续窗口，不与上述 necessity / utility 问题混做。
 6. 只有 Shadow 验收稳定后才进入 Phase 2，把统一 relevance/admission 渐进接入正式召回；仍不在 Phase 2 顺手处理家族聚类、关系边或额外 LLM agent。
 
-此前 Haven Phase 1 修正已 commit/push/deploy，线上 SHA 和 Round 25 验收见上；2026-08-29 的组合意图优先级修复仍只在本地，待用户提交与发布。发布后先用新 session 重放 `ob2-20260828-i4tso3` 首轮原句，并继续用原固定 Round 9、12、25、54、57、61 与 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24 验收。历史 Debug 不会自动补算新字段。未完成线上真实验收前，不进入 Phase 2 正式 gate 切换。
+Haven Phase 1 当前修正均已 commit/push/deploy；组合意图优先级线上 SHA 为 `59a49ad8f5aaca332ef747ed1407e346949333c1`，新 session necessity 验收通过。后续仍可用原固定 Round 9、12、25、54、57、61 与 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24 继续观察候选泛化，但历史 Debug 不会自动补算新字段。在 Shadow 整体稳定前不进入 Phase 2 正式 gate 切换。
 
 ## 下一窗口唯一范围
 
-Phase 1 组合意图优先级已在本地完成，当前只剩用户 commit/push、Coolify 完整 SHA 发布和新 session 线上重放，不再扩大实现范围。线上验收通过后，若继续本议题，下一独立研究窗口只讨论主动召回价值 / recall utility 的产品契约，不与称呼语境、候选阈值、家族聚类、正式 admission 或额外 LLM agent 混做；utility 稳定前不进入 Phase 2 正式切换。
+Phase 1 组合意图优先级已完成发布与线上验收，不再扩大实现范围。若继续本议题，下一独立研究窗口只讨论主动召回价值 / recall utility 的产品契约；source-record 标题局部命中的精细优化保留在上节，另行评估，不与 utility、称呼语境、候选阈值、家族聚类、正式 admission 或额外 LLM agent 混做。utility 稳定前不进入 Phase 2 正式切换。
 
 ## 不得扩散的边界
 

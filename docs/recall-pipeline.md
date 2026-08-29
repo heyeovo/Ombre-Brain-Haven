@@ -85,10 +85,19 @@ _select_dynamic_buckets                     gateway.py ~16509
 - `explicit` 在 planner 降级时仍可走严格直接证据，不再因 vague / axis / anchor 整轮误杀；
 - domain、状态、profile/session 隔离、会话硬排除和语义去重等硬边界不变。
 
+通过 Shadow relevance 的候选还会进入代码版 recall utility 契约。该层输出
+`promote / neutral / reject`：明确回忆请求与具有可用上一轮上下文的接续指代会
+`promote`；自然 `contextual` 在本地规则无法确认增量价值时保持 `neutral`，仍有
+召回资格，不会默认沉默；只有候选正文与当前原句完全相同等确定无增量情况才
+`reject`。Shadow 优先从 `promote` 候选中选择，否则从 `neutral` 候选中选择，
+当前投影最多保留一张卡。该 utility 与单卡结果均只写 Debug，仍不改变正式
+admission、排序或注入。
+
 Debug 顶层新增：
 
 - `recall_necessity_debug`：必要性、是否可定位、理由码和上下文是否可用；
 - `recall_shadow_debug`：planner 状态、降级策略、正式/shadow 桶 ID、增减桶和 shadow 候选；
+- `recall_shadow_debug.utility_candidates`：通过 relevance 后每个候选的 utility 三档与原因码；选中/utility 拒绝候选还分别保留 `shadow_utility` 详情；
 - 两者都带 `affects_recall=false`，召回透镜可据此对比，但不会改变实际注入。
 
 ## 关键配置参数

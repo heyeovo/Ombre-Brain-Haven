@@ -18,7 +18,7 @@ if "httpx" in sys.modules and not hasattr(sys.modules["httpx"], "Response"):
 
 from gateway import GatewayService  # noqa: E402
 from embedding_engine import EmbeddingEngine  # noqa: E402
-from recall_policy import RecallNecessityPlan, RecallPolicy  # noqa: E402
+from recall_policy import RecallNecessityPlan, RecallPolicy, RecallUtilityDecision  # noqa: E402
 
 
 class RecallNecessityContractsTest(unittest.TestCase):
@@ -104,6 +104,12 @@ class RecallShadowContractsTest(unittest.TestCase):
             "shadow_test_reliable" if item.get("reliable") else "shadow_test_unreliable",
             {},
         )
+        service._shadow_candidate_utility = lambda _query, _plan, item, **_kwargs: (
+            RecallUtilityDecision(
+                str(item.get("utility") or "neutral"),
+                ("utility_test_decision",),
+            )
+        )
         service._pick_dynamic_cards = lambda items, *, query="": list(items)[:2]
         service._format_suppressed_bucket_debug = lambda item, **_kwargs: {
             "bucket_id": str((item.get("bucket") or {}).get("id") or ""),
@@ -112,11 +118,18 @@ class RecallShadowContractsTest(unittest.TestCase):
         return service
 
     @staticmethod
-    def item(bucket_id: str, reason: str, *, reliable: bool = True) -> dict:
+    def item(
+        bucket_id: str,
+        reason: str,
+        *,
+        reliable: bool = True,
+        utility: str = "neutral",
+    ) -> dict:
         return {
             "bucket": {"id": bucket_id, "metadata": {"name": bucket_id}},
             "admission_reason": reason,
             "reliable": reliable,
+            "utility": utility,
         }
 
     def test_none_shadow_removes_formal_result_without_mutating_it(self):
@@ -210,6 +223,97 @@ class RecallShadowContractsTest(unittest.TestCase):
         )
         self.assertEqual(debug["shadow_bucket_ids"], ["relevant"])
         self.assertEqual(debug["removed_bucket_ids"], ["noise"])
+
+    def test_utility_promote_precedes_neutral_and_shadow_selects_one_card(self):
+        service = self.make_service()
+        formal = [
+            self.item("neutral", "non_explicit_query", utility="neutral"),
+            self.item("promoted", "non_explicit_query", utility="promote"),
+        ]
+        debug = service._build_recall_shadow_debug(
+            "话说今天下雨了",
+            RecallNecessityPlan("contextual", True),
+            formal,
+            [],
+            {"errors": [], "triggered": False},
+        )
+        self.assertEqual(debug["shadow_bucket_ids"], ["promoted"])
+        self.assertEqual(debug["shadow_max_cards"], 1)
+        self.assertEqual(
+            debug["selected_candidates"][0]["shadow_utility"]["status"],
+            "promote",
+        )
+
+
+class RecallShadowUtilityTest(unittest.TestCase):
+    def make_service(self) -> GatewayService:
+        service = GatewayService.__new__(GatewayService)
+        service.recall_policy = RecallPolicy()
+        return service
+
+    @staticmethod
+    def item(content: str) -> dict:
+        return {
+            "bucket": {
+                "id": "utility-bucket",
+                "metadata": {"name": "utility-bucket"},
+                "content": content,
+            }
+        }
+
+    def test_explicit_relevant_candidate_is_promoted(self):
+        decision = self.make_service()._shadow_candidate_utility(
+            "你还记得我们第一次约会吗",
+            RecallNecessityPlan("explicit", True, ("explicit_recall_request",)),
+            self.item("第一次正式外出约会"),
+        )
+        self.assertEqual(decision.status, "promote")
+        self.assertEqual(decision.reason_codes, ("utility_explicit_recall_expectation",))
+
+    def test_contextual_reference_with_context_is_promoted(self):
+        decision = self.make_service()._shadow_candidate_utility(
+            "那后来呢",
+            RecallNecessityPlan(
+                "contextual",
+                True,
+                ("contextual_reference", "recent_context_available"),
+                context_available=True,
+            ),
+            self.item("搬家后第一次见邻居，后来成为朋友"),
+            recent_context="我们刚才在聊搬家后第一次见邻居",
+        )
+        self.assertEqual(decision.status, "promote")
+        self.assertEqual(decision.reason_codes, ("utility_resolves_contextual_reference",))
+
+    def test_natural_contextual_candidates_remain_neutral_and_eligible(self):
+        service = self.make_service()
+        for query, content in (
+            ("今天下雨了", "每一场雨都跟你在一起"),
+            ("好久没约会了", "第一次正式外出约会"),
+            ("就是要趁周末快点收尾", "一起在周末推进项目"),
+            ("pro之后第一个周末一起干活", "升级 Pro 后一起工作的第一个周末"),
+        ):
+            with self.subTest(query=query):
+                decision = service._shadow_candidate_utility(
+                    query,
+                    RecallNecessityPlan("contextual", True, ("natural_contextual_topic",)),
+                    self.item(content),
+                )
+                self.assertEqual(decision.status, "neutral")
+                self.assertTrue(decision.eligible)
+
+    def test_exact_repetition_without_increment_is_rejected(self):
+        decision = self.make_service()._shadow_candidate_utility(
+            "今天下雨了",
+            RecallNecessityPlan("contextual", True, ("natural_contextual_topic",)),
+            self.item("今天下雨了"),
+        )
+        self.assertEqual(decision.status, "reject")
+        self.assertFalse(decision.eligible)
+        self.assertEqual(
+            decision.reason_codes,
+            ("utility_exact_repetition_without_increment",),
+        )
 
 
 class RecallShadowCandidateRelevanceTest(unittest.TestCase):

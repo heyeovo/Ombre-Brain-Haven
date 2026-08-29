@@ -100,6 +100,7 @@ from recall_policy import (
     QueryAnchorPlan,
     RecallNecessityPlan,
     RecallPolicy,
+    RecallUtilityDecision,
     diffusion_seed_topic_term_has_specific_residue,
 )
 from memory_nodes import MemoryNodeStore
@@ -14753,6 +14754,67 @@ class GatewayService:
             return False, "shadow_query_topic_missing", details
         return False, "shadow_insufficient_relevance", details
 
+    def _shadow_candidate_utility(
+        self,
+        query: str,
+        necessity_plan: RecallNecessityPlan,
+        item: dict,
+        *,
+        recent_context: str = "",
+        relevance_debug: dict[str, Any] | None = None,
+    ) -> RecallUtilityDecision:
+        """Review the incremental value of an already-relevant Shadow candidate.
+
+        The first contract is deliberately conservative: uncertain natural contextual
+        recall stays eligible as neutral. Only evidence that is safe to recognize with
+        local rules is promoted or rejected.
+        """
+        bucket = item.get("bucket") if isinstance(item, dict) else None
+        if not isinstance(bucket, dict):
+            return RecallUtilityDecision(
+                "reject",
+                ("utility_invalid_candidate",),
+                {"context_available": bool(str(recent_context or "").strip())},
+            )
+
+        query_key = self._compact_lookup_key(query)
+        content_key = self._compact_lookup_key(bucket.get("content"))
+        context_available = bool(str(recent_context or "").strip())
+        details = {
+            "context_available": context_available,
+            "necessity_reason_codes": list(necessity_plan.reason_codes),
+            "matched_topic_terms": list((relevance_debug or {}).get("matched_topic_terms") or []),
+            "contract": "code_v1",
+        }
+
+        if necessity_plan.necessity == "explicit":
+            return RecallUtilityDecision(
+                "promote",
+                ("utility_explicit_recall_expectation",),
+                details,
+            )
+        if (
+            necessity_plan.necessity == "contextual"
+            and context_available
+            and "contextual_reference" in necessity_plan.reason_codes
+        ):
+            return RecallUtilityDecision(
+                "promote",
+                ("utility_resolves_contextual_reference",),
+                details,
+            )
+        if query_key and content_key and query_key == content_key:
+            return RecallUtilityDecision(
+                "reject",
+                ("utility_exact_repetition_without_increment",),
+                details,
+            )
+        return RecallUtilityDecision(
+            "neutral",
+            ("utility_relevant_value_uncertain",),
+            details,
+        )
+
     def _build_recall_shadow_debug(
         self,
         query: str,
@@ -14761,6 +14823,7 @@ class GatewayService:
         suppressed_items: list[dict],
         planner_debug: dict[str, Any],
         additional_candidate_items: list[dict] | None = None,
+        recent_context: str = "",
     ) -> dict[str, Any]:
         formal_items = [item for item in formal_items or [] if isinstance(item, dict)]
         suppressed_items = [item for item in suppressed_items or [] if isinstance(item, dict)]
@@ -14787,6 +14850,9 @@ class GatewayService:
             "removed_bucket_ids": [],
             "selected_candidates": [],
             "rejected_candidates": [],
+            "utility_candidates": [],
+            "utility_contract": "promote_neutral_reject_code_v1",
+            "shadow_max_cards": 1,
         }
         if not self.phase1_recall_shadow_enabled:
             debug["fallback_strategy"] = "shadow_disabled"
@@ -14794,6 +14860,7 @@ class GatewayService:
 
         shadow_pool: list[dict] = []
         rejected_rows: list[dict[str, Any]] = []
+        utility_rows: list[dict[str, Any]] = []
         if necessity_plan.necessity == "none":
             debug["fallback_strategy"] = "necessity_none"
         elif not necessity_plan.targetable:
@@ -14834,8 +14901,42 @@ class GatewayService:
                 )
                 original_reason = str(item.get("admission_reason") or "suppressed")
                 if admitted:
+                    utility = self._shadow_candidate_utility(
+                        query,
+                        necessity_plan,
+                        item,
+                        recent_context=recent_context,
+                        relevance_debug=relevance_debug,
+                    )
+                    utility_debug = {
+                        "status": utility.status,
+                        "reason_codes": list(utility.reason_codes),
+                        **dict(utility.debug or {}),
+                    }
+                    utility_rows.append(
+                        {
+                            "bucket_id": bucket_id,
+                            "status": utility.status,
+                            "reason_codes": list(utility.reason_codes),
+                        }
+                    )
+                    if not utility.eligible:
+                        row = self._format_suppressed_bucket_debug(
+                            item,
+                            query=query,
+                            status="shadow_utility_rejected",
+                        )
+                        row["formal_admission_reason"] = original_reason
+                        row["shadow_admission_reason"] = "shadow_utility_rejected"
+                        row["shadow_relevance_reason"] = shadow_reason
+                        row["shadow_relevance_debug"] = relevance_debug
+                        row["shadow_utility"] = utility_debug
+                        row["was_formal_candidate"] = bucket_id in formal_ids
+                        rejected_rows.append(row)
+                        continue
                     item["shadow_original_admission_reason"] = original_reason
                     item["shadow_relevance_debug"] = relevance_debug
+                    item["shadow_utility"] = utility_debug
                     item["admission_reason"] = shadow_reason
                     item.pop("blocked_reason", None)
                     shadow_pool.append(item)
@@ -14847,7 +14948,17 @@ class GatewayService:
                 row["was_formal_candidate"] = bucket_id in formal_ids
                 rejected_rows.append(row)
 
-        shadow_items = self._pick_dynamic_cards(shadow_pool, query=query) if shadow_pool else []
+        promoted_pool = [
+            item
+            for item in shadow_pool
+            if str((item.get("shadow_utility") or {}).get("status") or "") == "promote"
+        ]
+        selection_pool = promoted_pool or shadow_pool
+        shadow_items = (
+            self._pick_dynamic_cards(selection_pool, query=query)[:1]
+            if selection_pool
+            else []
+        )
         shadow_bucket_ids = [
             str((item.get("bucket") or {}).get("id") or "")
             for item in shadow_items
@@ -14864,12 +14975,14 @@ class GatewayService:
             row["shadow_admission_reason"] = str(item.get("admission_reason") or "shadow_selected")
             row["shadow_softened_reasons"] = list(item.get("shadow_softened_reasons") or [])
             row["shadow_relevance_debug"] = dict(item.get("shadow_relevance_debug") or {})
+            row["shadow_utility"] = dict(item.get("shadow_utility") or {})
             selected_rows.append(row)
         debug["shadow_bucket_ids"] = shadow_bucket_ids
         debug["added_bucket_ids"] = [item for item in shadow_bucket_ids if item not in formal_bucket_ids]
         debug["removed_bucket_ids"] = [item for item in formal_bucket_ids if item not in shadow_bucket_ids]
         debug["selected_candidates"] = selected_rows[:20]
         debug["rejected_candidates"] = rejected_rows[:20]
+        debug["utility_candidates"] = utility_rows[:20]
         return debug
 
     @staticmethod
@@ -17138,12 +17251,13 @@ class GatewayService:
         recent_context_query: str = "",
     ) -> tuple[list[dict], list[dict]] | tuple[list[dict], list[dict], dict[str, Any]]:
         planner_debug = self._query_planner_debug_base(query)
+        shadow_recent_context = (
+            recent_context_query
+            or self._shadow_previous_user_query(session_id, query)
+        )
         necessity_plan = self.recall_policy.plan_recall_necessity(
             query,
-            recent_context=(
-                recent_context_query
-                or self._shadow_previous_user_query(session_id, query)
-            ),
+            recent_context=shadow_recent_context,
         )
         planner_debug["recall_necessity_debug"] = self._recall_necessity_debug(necessity_plan)
         timing_debug = planner_debug.setdefault("timing_ms", {})
@@ -17154,6 +17268,7 @@ class GatewayService:
                 [],
                 [],
                 planner_debug,
+                recent_context=shadow_recent_context,
             )
             if include_query_planner_debug:
                 return [], [], planner_debug
@@ -17193,6 +17308,7 @@ class GatewayService:
                 shadow_suppressed,
                 planner_debug,
                 additional_candidate_items=shadow_admitted,
+                recent_context=shadow_recent_context,
             )
             if include_query_planner_debug:
                 return [], [], planner_debug
@@ -17436,6 +17552,7 @@ class GatewayService:
             selected_items,
             suppressed_candidates,
             planner_debug,
+            recent_context=shadow_recent_context,
         )
         selected_buckets = [
             self._bucket_with_recall_signal(item)

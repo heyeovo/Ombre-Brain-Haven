@@ -186,6 +186,44 @@ Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的
 3. 只有真实漏召回证明简单规则过严时，再考虑缓存式“短语 → bucket ID 集合”统计：桶新增/修改/合并/删除时更新，召回时只查当前 query 的少量连续短语，不每轮重扫全库。完整且全库独特的连续短语可作为强证据；“第一次、窗口”这类分散普通词即使共同只命中一个桶，也不自动成为唯一证据。
 4. 正式与 Shadow 本次都召回了错误桶。未来实施时必须分别核对 shared source-record 生成路径与 Shadow `unique_direct`，先在 Shadow 固定验收，再决定何时影响正式路径。
 
+## 轻量 Recall Utility Shadow（2026-08-30 本地完成）
+
+已确认产品方向：自然 `contextual` 是 Haven 日常主动召回的主入口，不能因本地规则
+无法证明高价值就默认沉默。Recall utility 只审核已经通过候选 relevance 的桶，第一版
+采用三档契约：
+
+- `promote`：代码有明确正向依据；当前包括用户明确期待回忆，以及有可用上一轮用户
+  上下文的接续指代；
+- `neutral`：候选相关，但本地规则无法可靠判断增量价值；仍保留召回资格；
+- `reject`：代码能确定没有增量；当前只覆盖候选正文与用户原句完全相同的保守边界。
+
+已在 Haven 本地实现：
+
+- `recall_policy.py` 新增 `RecallUtilityDecision`，将三档结果与是否仍有资格的契约固定；
+- `gateway.py` 在 `_shadow_candidate_relevance` 通过后执行 Shadow-only utility；
+- utility 优先从 `promote` 候选选择，没有 promote 时继续从 neutral 候选选择；
+- Shadow 最终投影暂时最多一张卡，正式 `inject_max_cards`、正式 admission、正式排序和
+  实际注入完全不变；
+- `recall_shadow_debug` 新增 `utility_contract`、`shadow_max_cards`、
+  `utility_candidates`，选中或 utility 拒绝候选保存 `shadow_utility` 详情；
+- `_select_dynamic_buckets` 把已有上一轮用户消息传给 utility，不新增会话读取路径。
+
+固定案例当前预期：明确回忆和“那后来呢 + 可用上一轮上下文”为 promote；“今天下雨了”、
+“好久没约会了”、“就是要趁周末快点收尾”、“pro 之后第一个周末一起干活”对应的
+相关候选先为 neutral 且仍可入选；完全重复原句的候选为 reject。后续若要判断更细腻的
+关系连续性，可在保持三档接口和硬边界不变的前提下加入轻量模型；模型失败时应回退
+neutral，不能扩大 relevance 未通过的候选池。
+
+本地验证：Phase 1/utility 专项测试 26/26 通过；Haven 全套 unittest 147/147 通过；
+`py_compile recall_policy.py gateway.py tests/test_recall_phase1_shadow.py` 与
+`git diff --check` 通过。为运行测试，在仓库忽略的 `.venv` 安装了 `requirements.txt`，
+不进入提交。本次尚未 commit/push/deploy，线上完整 SHA 仍为
+`59a49ad8f5aaca332ef747ed1407e346949333c1`。
+
+下一步只做：用户 commit/push 后按 Coolify 完整 SHA 流程发布，再用新 session 在召回
+透镜验收三档结果和单卡 Shadow。真实数据稳定前不进入 Phase 2 正式 admission 切换，
+也不在本次补 Dashboard 专用展示、source-record、称呼、家族、关系边或额外 LLM。
+
 ## 发布后仍需继续核查
 
 1. **Embedding 内容新鲜度**：线上 318 个桶已确认没有缺失或模型/维度过期向量，因此不执行 backfill。现有检查不包含正文内容哈希；只有后续出现“桶正文已改但向量未刷新”的具体证据时，再单独审计内容新鲜度。
@@ -194,28 +232,28 @@ Coolify `haven-brain` 容器执行 `python backfill_embeddings.py --dry-run` 的
 4. **Planner 实际可用性**：按新记录统计 normal / not_triggered / disabled / degraded，以及 dehydration 鉴权错误；确认用户当前线上是否确有可用 dehydration 配置。Planner 不可用时 contextual 必须保持“不新增”。
 5. **Shadow relevance 泛化**：继续收集自然话题、明确过去指向、系统复盘和 keyword-only 噪声案例。重点观察 `semantic >= 0.50 + keyword >= 0.65 + specific topic` 的第一版组合证据是否放过无关桶或漏掉真正相关桶；该阈值只用于 Shadow，线上验收后再决定是否调整。
 6. **缺少目标桶的明确请求**：旧 Round 25、54 若对应桶当前不存在，无法证明“明确请求不会整轮误杀”；必须另找已有真实桶的 explicit 案例替代，不把“候选不存在”误判为 gate 失败。
-7. **主动召回价值与纯相关性分离**：当前 `natural_contextual_topic` 主要回答“这句话有没有可检索的具体自然话题”，Shadow relevance 主要回答“候选是否与话题相关”；两者都没有完整回答“这段旧记忆现在出现，是否会为本轮回复增加足够独特的价值”。“周末快点收尾”案例说明，找到相关桶不等于值得主动注入。后续应单独研究 recall utility / contribution：记忆是否解决指代、延续共同事件、提供当前回复不可替代的信息或显著改善关系连续性；仅有词面/语义相关但不改变回复时默认不主动翻出。该问题比候选检索更难，先作为明确后续研究项，不在本轮用宽泛屏蔽词或单个阈值草率实现；在它稳定前，不把当前 contextual Shadow 直接整体切为正式召回。
+7. **主动召回价值与纯相关性分离**：`natural_contextual_topic` 回答“这句话有没有可检索的具体自然话题”，Shadow relevance 回答“候选是否与话题相关”，新增 utility 三档回答“相关桶当前应优先、保留还是明确拒绝”。自然 contextual 是主要主动召回入口，代码无法确认价值时保持 neutral，不默认沉默。当前代码只覆盖高把握 promote/reject；更细腻的关系连续性仍需先收集真实 neutral 案例，再决定是否增加轻量模型。utility Shadow 稳定前不把 contextual 整体切为正式召回。
 
 ## 后续推进顺序
 
 1. Dashboard 召回透镜的单页 Debug 信息、中文映射、部署及 `ob2-20260827-r1bpf2` Round 25 / Round 12 第一组真实验收均已完成。
 2. Phase 1 “测试召回 / 观测召回 / 不用搜东西”组合意图优先判 `none` 的修复、回归、完整 SHA 发布和新 session 验收均已完成。
 3. 继续用固定案例验收 necessity、候选独立审核、planner 降级不扩召回和 `semantic_status`；embedding 覆盖统计已完成，不做 backfill。
-4. 单独研究“主动召回价值”与“候选相关性”的分离方案，并把“周末快点收尾”作为灰区基线；未形成可靠契约前不直接切正式 contextual。
+4. Recall utility 与候选 relevance 已按 `promote / neutral / reject` 分离并完成本地 Shadow；下一步发布后以“周末快点收尾”等灰区基线验收三档和单卡投影。
 5. 称呼作为明确讨论对象的语境区分另开后续窗口，不与上述 necessity / utility 问题混做。
 6. 只有 Shadow 验收稳定后才进入 Phase 2，把统一 relevance/admission 渐进接入正式召回；仍不在 Phase 2 顺手处理家族聚类、关系边或额外 LLM agent。
 
-Haven Phase 1 当前修正均已 commit/push/deploy；组合意图优先级线上 SHA 为 `59a49ad8f5aaca332ef747ed1407e346949333c1`，新 session necessity 验收通过。后续仍可用原固定 Round 9、12、25、54、57、61 与 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24 继续观察候选泛化，但历史 Debug 不会自动补算新字段。在 Shadow 整体稳定前不进入 Phase 2 正式 gate 切换。
+Phase 1 necessity/relevance 修正已 commit/push/deploy；组合意图优先级线上 SHA 为 `59a49ad8f5aaca332ef747ed1407e346949333c1`，新 session necessity 验收通过。轻量 utility Shadow 仍只有本地改动，尚未 commit/push/deploy。后续仍可用原固定 Round 9、12、25、54、57、61 与 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24 继续观察候选泛化，但历史 Debug 不会自动补算新字段。在 Shadow 整体稳定前不进入 Phase 2 正式 gate 切换。
 
 ## 下一窗口唯一范围
 
-Phase 1 组合意图优先级已完成发布与线上验收，不再扩大实现范围。若继续本议题，下一独立研究窗口只讨论主动召回价值 / recall utility 的产品契约；source-record 标题局部命中的精细优化保留在上节，另行评估，不与 utility、称呼语境、候选阈值、家族聚类、正式 admission 或额外 LLM agent 混做。utility 稳定前不进入 Phase 2 正式切换。
+下一窗口唯一范围是发布并用新 session 验收轻量 utility Shadow：确认明确回忆/接续指代为 promote，自然 contextual 的相关桶为 neutral 且仍可单卡入选，确定完全重复为 reject。先记录真实结果，不在验收窗口调整 source-record、称呼语境、候选阈值、正式 admission、家族聚类或额外 LLM。utility Shadow 稳定前不进入 Phase 2 正式切换。
 
 ## 不得扩散的边界
 
 - Phase 1 不直接切换正式召回路径，只新增可观测的 shadow 结果。
 - Phase 1 不创建家族表、关系边或自动聚类任务。
-- 下一窗口只补召回透镜诊断字段、折叠详情和中文映射，不重做整体视觉，不修改 Gateway 原始 Debug 页面。
+- 下一窗口只用现有召回透镜和 Gateway Debug 验收 utility 原始字段，不补 Dashboard 专用展示，不重做视觉。
 - 不用 `localStorage` 作为未来人工标注的唯一存储。
 - 不在未对比固定验收集前删除现有召回规则。
 

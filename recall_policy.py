@@ -1053,6 +1053,17 @@ class RecallNecessityPlan:
 
 
 @dataclass(frozen=True)
+class RecallUtilityDecision:
+    status: str
+    reason_codes: tuple[str, ...] = ()
+    debug: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def eligible(self) -> bool:
+        return self.status in {"promote", "neutral"}
+
+
+@dataclass(frozen=True)
 class RecallQueryPlan:
     query: str
     wants_body_chain: bool

@@ -220,9 +220,33 @@ neutral，不能扩大 relevance 未通过的候选池。
 不进入提交。本次尚未 commit/push/deploy，线上完整 SHA 仍为
 `59a49ad8f5aaca332ef747ed1407e346949333c1`。
 
-下一步只做：用户 commit/push 后按 Coolify 完整 SHA 流程发布，再用新 session 在召回
-透镜验收三档结果和单卡 Shadow。真实数据稳定前不进入 Phase 2 正式 admission 切换，
-也不在本次补 Dashboard 专用展示、source-record、称呼、家族、关系边或额外 LLM。
+Haven utility 已由用户 commit/push，完整 SHA 为
+`2fa725a834af1b040c9d7bc77379b99b2b44b2a6`；仍需以 Coolify 实际采用该 SHA 且
+Brain/Gateway 均 healthy 为线上生效标准。
+
+## Recall Utility 召回透镜展示（2026-08-30 Dashboard 本地完成）
+
+用户再次确认：所有召回验收必须在 Dashboard 召回透镜完成，不能依赖 Gateway Debug；
+后者数据过长，浏览器容易停止响应。`ob-dashboard2` 已完成：
+
+- “新规则 Shadow 对比”直接展示 utility contract、Shadow 单卡上限和全部
+  `utility_candidates`；
+- 三档使用中文产品语言显示为“优先召回 / 保留召回资格 / 不值得本轮召回”，同时保留
+  `promote / neutral / reject` 原始码；
+- 每张候选卡新增“召回价值 Utility”，显示原因、前文是否可用、命中主题和判断器；
+- 没有 utility 的候选明确区分“未通过 relevance，未进入 utility”和“旧记录没有
+  utility 数据”，不把字段缺失误判为 neutral/reject；
+- 新增 `shadow_utility_rejected` 与五个 utility 原因码中文解释；未知码继续保留原始值。
+
+Dashboard 本地验证：utility 中文映射测试 6/6 通过；目标文件 ESLint 通过；
+`npm run build` 通过。浏览器本地检查被 Dashboard 登录口令拦截，未代填用户凭据；
+部署后视觉与真实数据验收仍须使用已登录页面和新 session。本次未修改其他页面、API、
+Gateway Debug 或正式召回。
+
+下一步只做：用户 commit/push Dashboard 等待 Vercel 发布，同时确认 Haven Coolify 已采用
+上述完整 SHA；随后用新 session 完全在召回透镜验收三档结果和单卡 Shadow。真实数据
+稳定前不进入 Phase 2 正式 admission 切换，也不处理 source-record、称呼、家族、关系边
+或额外 LLM。
 
 ## 发布后仍需继续核查
 
@@ -253,7 +277,7 @@ Phase 1 necessity/relevance 修正已 commit/push/deploy；组合意图优先级
 
 - Phase 1 不直接切换正式召回路径，只新增可观测的 shadow 结果。
 - Phase 1 不创建家族表、关系边或自动聚类任务。
-- 下一窗口只用现有召回透镜和 Gateway Debug 验收 utility 原始字段，不补 Dashboard 专用展示，不重做视觉。
+- 下一窗口只用召回透镜验收 utility 三档和单卡结果；不再要求打开 Gateway Debug，也不扩大其他页面视觉。
 - 不用 `localStorage` 作为未来人工标注的唯一存储。
 - 不在未对比固定验收集前删除现有召回规则。
 

@@ -39,7 +39,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 |------|------|
 | `server.py` | **Brain** 入口（~640KB）。MCP 工具注册（`@mcp.custom_route`）+ REST API + 记忆核心 |
 | `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线 + cc 持久化路由（`Route()` 注册） |
-| `gateway_state.py` | Gateway/cc SQLite 状态：会话原文、窗口闲聊/工作模式、固定日回顾与 handoff 快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与游标、桶排除账本 |
+| `gateway_state.py` | Gateway/cc SQLite 状态：会话原文、窗口闲聊/工作模式、固定日回顾、handoff 与 CC 缓存前缀快照、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与游标、桶排除账本 |
 | `prompt_store.py` | 四类产品 Prompt 覆盖持久化：按 profile 保存 `analyze`、`merge`、`daily_review`、`weekly_journey` 用户版本、revision 与更新时间；代码默认仍是系统真源 |
 | `automation_store.py` | 通用自动化 SQLite 控制面：持久 schedule、逐任务 API/Pro 选择、实际 execution、run、candidate，兼容旧库重复迁移；候选 revision CAS、批准冻结、执行状态和任务 lease 与普通记忆桶隔离 |
 | `automation_model_runner.py` | 仅为 `daily_review` / `weekly_journey` 按 Haven 持久选择调用既有 API client 或 Dashboard Claude Pro runner；Pro 入口缺失、额度/登录/网络失败均原样失败，不自动 fallback |
@@ -334,6 +334,7 @@ cc 配置/用户数据由 **Gateway** 持久化到 Haven 数据库，路由注�
 /api/cc/upstream      # 上游模型配置（cc_upstream_config 表）
 /api/cc/permissions   # 写权限批准
 /api/cc/mcp           # MCP 工具配置
+/api/cc/pro-usage-snapshot  # 当前 profile 最近一次 Pro 额度快照；GET / POST 单条覆盖
 ```
 dashboards 的 `/api/gateway/[...path]` 代理到这些路由，Bearer 网关鉴权。
 
@@ -343,6 +344,8 @@ dashboards 的 `/api/gateway/[...path]` 代理到这些路由，Bearer 网关鉴
 - 一个 `session_id` 永久绑定一个 `persona_id`；旧窗口从首轮 `client="ob2-chat/<persona>"` 回填，无主历史归 `ombre`。
 - `local_engine_preference` 只保存用户的本地首选；Vercel 的 `effective_engine=selfhost` 不得写回。
 - `handoff_snapshot_json` 按 `profile_id + session_id` 保存 Dashboard 已完成统一预算裁剪的换窗正文与统计；只接受首次写入，后续轮次和幂等重试不得覆盖。CC 每条原生线路启动时与无状态 selfhost 每轮读取同一快照，避免切引擎、重启或换设备后丢失钉选桶、最近记忆、feel、journal、日回顾或旧聊天原文。
+- `frozen_persona_append` 按 `profile_id + session_id` 首次写入后冻结，保存 CC 实际系统提示词追加前缀；Dashboard 重部署或换设备后继续读取原值，窗口永久删除时随 `conversation_sessions` 一起删除。`frozen_persona_append_initialized` 区分“尚未写入”和“已冻结为空串”，旧库迁移可重复执行。
+- `cc_pro_usage_snapshot` 每个 profile 只保留最近一条 Claude Pro 额度快照，新读取覆盖旧值，不按窗口累积；Dashboard 无在线 Pro 子进程时把它作为带时间戳的上次值显示。
 - 严格写入用 `request_id` 防重复，用 `expected_last_round_id` 拒绝基于旧历史的跨设备追加；SQLite `BEGIN IMMEDIATE` 内统一分配下一轮。
 - 附件先按窗口暂存，严格写入把有序 ID + SHA-256 纳入幂等指纹并在同一事务绑定轮次；图片接受 JPEG/PNG/WebP（压缩后单张不超过 2MB），文件接受 PDF/DOCX/MD/TXT/CSV（单个不超过 4MB，并保存浏览器提取的受限正文），每轮两类合计不超过 4 个。私有读取必须经 Bearer 网关，未绑定附件 24 小时后在后续上传时清理；按 `kind=image/file` 分类清除互不影响，文件清除同时擦除解析正文。
 - `/api/conversation/turn?request_id=` 可在进程重启或换设备后读回严格写入结果；调用端校验 session/persona/user 原文后重放已保存过程，不再请求上游。

@@ -16870,6 +16870,10 @@ if __name__ == "__main__":
                 if request.method == "POST":
                     return await _gw_service.handle_cc_upstream_save(request)
                 return await _gw_service.handle_cc_upstream_get(request)
+            async def _gw_cc_pro_usage_snapshot(request):
+                if request.method == "POST":
+                    return await _gw_service.handle_cc_pro_usage_snapshot_save(request)
+                return await _gw_service.handle_cc_pro_usage_snapshot_get(request)
             async def _gw_cc_permissions(request):
                 if request.method == "POST":
                     return await _gw_service.handle_cc_permissions_save(request)
@@ -16899,6 +16903,7 @@ if __name__ == "__main__":
                 _GwRoute("/gateway/api/persona/exchange", _gw_persona_exchange, methods=["POST"]),
                 _GwRoute("/gateway/api/cc/personas", _gw_cc_personas, methods=["GET", "POST", "DELETE"]),
                 _GwRoute("/gateway/api/cc/upstream", _gw_cc_upstream, methods=["GET", "POST"]),
+                _GwRoute("/gateway/api/cc/pro-usage-snapshot", _gw_cc_pro_usage_snapshot, methods=["GET", "POST"]),
                 _GwRoute("/gateway/api/cc/permissions", _gw_cc_permissions, methods=["GET", "POST"]),
                 _GwRoute("/gateway/api/cc/mcp", _gw_cc_mcp, methods=["GET", "POST"]),
                 _GwRoute("/gateway/api/preview-handoff", _gw_preview_handoff, methods=["GET"]),

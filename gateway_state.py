@@ -220,6 +220,8 @@ class GatewayStateStore:
                 daily_review_snapshot_json TEXT NOT NULL DEFAULT '[]',
                 daily_review_snapshot_initialized INTEGER NOT NULL DEFAULT 0,
                 handoff_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                frozen_persona_append TEXT NOT NULL DEFAULT '',
+                frozen_persona_append_initialized INTEGER NOT NULL DEFAULT 0,
                 cc_seen_round_id INTEGER NOT NULL DEFAULT 0,
                 state_version INTEGER NOT NULL DEFAULT 0,
                 deleted_at TEXT,
@@ -308,6 +310,8 @@ class GatewayStateStore:
                 "daily_review_snapshot_json": "TEXT NOT NULL DEFAULT '[]'",
                 "daily_review_snapshot_initialized": "INTEGER NOT NULL DEFAULT 0",
                 "handoff_snapshot_json": "TEXT NOT NULL DEFAULT '{}'",
+                "frozen_persona_append": "TEXT NOT NULL DEFAULT ''",
+                "frozen_persona_append_initialized": "INTEGER NOT NULL DEFAULT 0",
                 "cc_seen_round_id": "INTEGER NOT NULL DEFAULT 0",
                 "state_version": "INTEGER NOT NULL DEFAULT 0",
             },
@@ -523,6 +527,17 @@ class GatewayStateStore:
             """
             CREATE TABLE IF NOT EXISTS cc_upstream_config (
                 id TEXT PRIMARY KEY,
+                payload TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        # Claude Pro 额度属于 profile，而不是某个聊天窗口。每个 profile 只保留
+        # 最近一次成功读取的快照，新值覆盖旧值，避免按窗口重复累积。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cc_pro_usage_snapshot (
+                profile_id TEXT PRIMARY KEY,
                 payload TEXT NOT NULL DEFAULT '{}',
                 updated_at TEXT NOT NULL DEFAULT ''
             )
@@ -896,6 +911,55 @@ class GatewayStateStore:
         conn.commit()
         conn.close()
         return self.load_cc_upstream_config()
+
+    # ------------------------------------------------------------------
+    # Claude Pro 最近额度快照（每个 profile 单条覆盖）
+    # ------------------------------------------------------------------
+
+    def load_cc_pro_usage_snapshot(self, *, profile_id: str) -> dict[str, Any]:
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT payload, updated_at FROM cc_pro_usage_snapshot WHERE profile_id = ?",
+            (safe_profile_id,),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return {}
+        try:
+            value = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError):
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        value["persisted_at"] = str(row["updated_at"] or "")
+        return value
+
+    def save_cc_pro_usage_snapshot(
+        self, *, profile_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        if not isinstance(payload, dict):
+            raise ValueError("snapshot must be an object")
+        safe = {key: value for key, value in payload.items() if key != "persisted_at"}
+        encoded = json.dumps(safe, ensure_ascii=False)
+        if len(encoded.encode("utf-8")) > 32_000:
+            raise ValueError("snapshot is too large")
+        updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        conn = self._connect()
+        conn.execute(
+            """
+            INSERT INTO cc_pro_usage_snapshot (profile_id, payload, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(profile_id) DO UPDATE SET
+                payload = excluded.payload,
+                updated_at = excluded.updated_at
+            """,
+            (safe_profile_id, encoded, updated_at),
+        )
+        conn.commit()
+        conn.close()
+        return self.load_cc_pro_usage_snapshot(profile_id=safe_profile_id)
 
     # ------------------------------------------------------------------
     # cc 前端永久工具权限
@@ -2812,6 +2876,7 @@ class GatewayStateStore:
                    cc_lanes_json, prompt_module_overrides_json,
                    mode, daily_review_enabled, daily_review_snapshot_json,
                    daily_review_snapshot_initialized, handoff_snapshot_json,
+                   frozen_persona_append, frozen_persona_append_initialized,
                    cc_seen_round_id, state_version, deleted_at, updated_at
             FROM conversation_sessions
             WHERE profile_id = ? AND session_id = ?
@@ -2849,6 +2914,8 @@ class GatewayStateStore:
             ],
             "daily_review_snapshot_initialized": bool(row["daily_review_snapshot_initialized"]),
             "handoff_snapshot": self._json_object(row["handoff_snapshot_json"]),
+            "frozen_persona_append": str(row["frozen_persona_append"] or ""),
+            "frozen_persona_append_initialized": bool(row["frozen_persona_append_initialized"]),
             "cc_seen_round_id": int(row["cc_seen_round_id"] or 0),
             "state_version": int(row["state_version"] or 0),
             "deleted_at": row["deleted_at"],
@@ -2878,6 +2945,7 @@ class GatewayStateStore:
         allowed = {
             "local_engine_preference", "selfhost_overrides", "cc_overrides", "prompt_module_overrides",
             "mode", "daily_review_enabled", "initialize_daily_review_snapshot", "handoff_snapshot",
+            "frozen_persona_append",
         }
         unknown = sorted(set(updates) - allowed)
         if unknown:
@@ -2944,6 +3012,14 @@ class GatewayStateStore:
             if len(encoded_handoff_snapshot.encode("utf-8")) > 2_000_000:
                 raise ValueError("handoff_snapshot is too large")
             handoff_snapshot = dict(raw_handoff_snapshot)
+        frozen_persona_append: str | None = None
+        if "frozen_persona_append" in updates:
+            raw_frozen_append = updates.get("frozen_persona_append")
+            if not isinstance(raw_frozen_append, str):
+                raise ValueError("frozen_persona_append must be a string")
+            if len(raw_frozen_append.encode("utf-8")) > 2_000_000:
+                raise ValueError("frozen_persona_append is too large")
+            frozen_persona_append = raw_frozen_append
 
         updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         conn = self._connect()
@@ -2954,7 +3030,8 @@ class GatewayStateStore:
                 SELECT persona_id, local_engine_preference, selfhost_overrides_json, cc_overrides_json,
                        prompt_module_overrides_json, mode, daily_review_enabled,
                        daily_review_snapshot_json, daily_review_snapshot_initialized,
-                       handoff_snapshot_json, state_version
+                       handoff_snapshot_json, frozen_persona_append,
+                       frozen_persona_append_initialized, state_version
                 FROM conversation_sessions
                 WHERE profile_id = ? AND session_id = ?
                 """,
@@ -2979,6 +3056,8 @@ class GatewayStateStore:
                 current_daily_review_snapshot = self._json_array(row["daily_review_snapshot_json"])
                 current_daily_review_initialized = bool(row["daily_review_snapshot_initialized"])
                 current_handoff_snapshot = self._json_object(row["handoff_snapshot_json"])
+                current_frozen_persona_append = str(row["frozen_persona_append"] or "")
+                current_frozen_persona_append_initialized = bool(row["frozen_persona_append_initialized"])
             else:
                 current_version = 0
                 if expected_state_version not in (None, 0):
@@ -2992,6 +3071,8 @@ class GatewayStateStore:
                 current_daily_review_snapshot = []
                 current_daily_review_initialized = False
                 current_handoff_snapshot = {}
+                current_frozen_persona_append = ""
+                current_frozen_persona_append_initialized = False
 
             next_preference = preference or current_preference
             next_overrides = overrides if overrides is not None else current_overrides
@@ -3015,6 +3096,13 @@ class GatewayStateStore:
             next_handoff_snapshot = current_handoff_snapshot
             if handoff_snapshot is not None and not current_handoff_snapshot:
                 next_handoff_snapshot = handoff_snapshot
+            # 与 handoff 一样只接受首次写入。它必须跨 Dashboard 部署保持完全一致，
+            # 否则 Claude 的 1h 系统 Prompt Cache 会因前缀变化而全量重写。
+            next_frozen_persona_append = current_frozen_persona_append
+            next_frozen_persona_append_initialized = current_frozen_persona_append_initialized
+            if frozen_persona_append is not None and not current_frozen_persona_append_initialized:
+                next_frozen_persona_append = frozen_persona_append
+                next_frozen_persona_append_initialized = True
             next_version = current_version + 1
             conn.execute(
                 """
@@ -3022,9 +3110,10 @@ class GatewayStateStore:
                 (profile_id, session_id, persona_id, title, local_engine_preference,
                  selfhost_overrides_json, cc_overrides_json, prompt_module_overrides_json, mode,
                  daily_review_enabled, daily_review_snapshot_json, daily_review_snapshot_initialized,
-                 handoff_snapshot_json, cc_seen_round_id, state_version,
+                 handoff_snapshot_json, frozen_persona_append, frozen_persona_append_initialized,
+                 cc_seen_round_id, state_version,
                  deleted_at, updated_at)
-                VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?)
+                VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?)
                 ON CONFLICT(profile_id, session_id) DO UPDATE SET
                     local_engine_preference = excluded.local_engine_preference,
                     selfhost_overrides_json = excluded.selfhost_overrides_json,
@@ -3035,6 +3124,8 @@ class GatewayStateStore:
                     daily_review_snapshot_json = excluded.daily_review_snapshot_json,
                     daily_review_snapshot_initialized = excluded.daily_review_snapshot_initialized,
                     handoff_snapshot_json = excluded.handoff_snapshot_json,
+                    frozen_persona_append = excluded.frozen_persona_append,
+                    frozen_persona_append_initialized = excluded.frozen_persona_append_initialized,
                     state_version = excluded.state_version,
                     updated_at = excluded.updated_at
                 """,
@@ -3051,6 +3142,8 @@ class GatewayStateStore:
                     json.dumps(next_daily_review_snapshot, ensure_ascii=False),
                     1 if next_daily_review_initialized else 0,
                     json.dumps(next_handoff_snapshot, ensure_ascii=False),
+                    next_frozen_persona_append,
+                    1 if next_frozen_persona_append_initialized else 0,
                     next_version,
                     updated_at,
                 ),

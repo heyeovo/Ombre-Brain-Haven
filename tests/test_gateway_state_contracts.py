@@ -266,6 +266,8 @@ class GatewayStateContractsTest(unittest.TestCase):
         self.assertEqual(state["cc_seen_round_id"], 3)
         self.assertEqual(state["local_engine_preference"], "cc")
         self.assertEqual(state["handoff_snapshot"], {})
+        self.assertEqual(state["frozen_persona_append"], "")
+        self.assertFalse(state["frozen_persona_append_initialized"])
         restarted = GatewayStateStore(str(db_path))
         self.assertEqual(
             restarted.get_conversation_session_state(
@@ -552,6 +554,87 @@ class GatewayStateContractsTest(unittest.TestCase):
                 profile_id="another-profile", session_id="handoff-session"
             ),
             {},
+        )
+
+    def test_frozen_persona_append_is_first_write_wins_across_restart(self):
+        store = self.make_store()
+        state = store.patch_conversation_session_state(
+            profile_id="default",
+            session_id="frozen-session",
+            persona_id="ombre",
+            updates={"frozen_persona_append": "固定系统前缀"},
+        )
+        self.assertTrue(state["frozen_persona_append_initialized"])
+        self.assertEqual(state["frozen_persona_append"], "固定系统前缀")
+
+        repeated = store.patch_conversation_session_state(
+            profile_id="default",
+            session_id="frozen-session",
+            persona_id="ombre",
+            updates={"frozen_persona_append": "不得覆盖"},
+            expected_state_version=state["state_version"],
+        )
+        self.assertEqual(repeated["frozen_persona_append"], "固定系统前缀")
+
+        restarted = GatewayStateStore(str(self.root / "gateway_state.db"))
+        self.assertEqual(
+            restarted.get_conversation_session_state(
+                profile_id="default", session_id="frozen-session"
+            )["frozen_persona_append"],
+            "固定系统前缀",
+        )
+        self.assertEqual(
+            restarted.get_conversation_session_state(
+                profile_id="another-profile", session_id="frozen-session"
+            ),
+            {},
+        )
+
+    def test_empty_frozen_persona_append_is_still_initialized(self):
+        store = self.make_store()
+        state = store.patch_conversation_session_state(
+            profile_id="default",
+            session_id="empty-frozen-session",
+            persona_id="ombre",
+            updates={"frozen_persona_append": ""},
+        )
+        self.assertTrue(state["frozen_persona_append_initialized"])
+        repeated = store.patch_conversation_session_state(
+            profile_id="default",
+            session_id="empty-frozen-session",
+            persona_id="ombre",
+            updates={"frozen_persona_append": "不得补写"},
+            expected_state_version=state["state_version"],
+        )
+        self.assertEqual(repeated["frozen_persona_append"], "")
+
+    def test_pro_usage_snapshot_overwrites_single_profile_row_and_is_isolated(self):
+        store = self.make_store()
+        first = {
+            "available": True,
+            "stale": False,
+            "experimental": True,
+            "updatedAt": "2026-08-30T01:00:00.000Z",
+            "fiveHour": {"utilization": 20, "resetsAt": None},
+            "sevenDay": None,
+        }
+        second = {**first, "updatedAt": "2026-08-30T02:00:00.000Z"}
+        store.save_cc_pro_usage_snapshot(profile_id="default", payload=first)
+        saved = store.save_cc_pro_usage_snapshot(profile_id="default", payload=second)
+        self.assertEqual(saved["updatedAt"], second["updatedAt"])
+        self.assertTrue(saved["persisted_at"])
+        self.assertEqual(store.load_cc_pro_usage_snapshot(profile_id="other"), {})
+
+        conn = sqlite3.connect(self.root / "gateway_state.db")
+        count = conn.execute(
+            "SELECT COUNT(*) FROM cc_pro_usage_snapshot WHERE profile_id = 'default'"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 1)
+        restarted = GatewayStateStore(str(self.root / "gateway_state.db"))
+        self.assertEqual(
+            restarted.load_cc_pro_usage_snapshot(profile_id="default")["updatedAt"],
+            second["updatedAt"],
         )
 
     def test_manual_daily_review_is_protected_from_automatic_overwrite(self):

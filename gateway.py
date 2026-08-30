@@ -3470,6 +3470,7 @@ class GatewayService:
             "daily_review_enabled",
             "initialize_daily_review_snapshot",
             "handoff_snapshot",
+            "frozen_persona_append",
             "effective_engine",
         }
         updates = {key: body[key] for key in state_keys if key in body}
@@ -3678,6 +3679,34 @@ class GatewayService:
         payload = body.get("config") if isinstance(body.get("config"), dict) else body
         saved = self.state_store.save_cc_upstream_config(payload)
         return JSONResponse({"ok": True, "config": saved})
+
+    async def handle_cc_pro_usage_snapshot_get(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        snapshot = self.state_store.load_cc_pro_usage_snapshot(
+            profile_id=self._conversation_profile_id
+        )
+        return JSONResponse({"ok": True, "snapshot": snapshot})
+
+    async def handle_cc_pro_usage_snapshot_save(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict) or not isinstance(body.get("snapshot"), dict):
+            return JSONResponse({"error": "snapshot must be an object"}, status_code=400)
+        try:
+            snapshot = self.state_store.save_cc_pro_usage_snapshot(
+                profile_id=self._conversation_profile_id,
+                payload=body["snapshot"],
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "snapshot": snapshot})
 
     # ------------------------------------------------------------------
     # cc 前端永久工具权限
@@ -22690,6 +22719,12 @@ def create_gateway_app(
             return await service.handle_cc_upstream_save(request)
         return await service.handle_cc_upstream_get(request)
 
+    async def cc_pro_usage_snapshot(request: Request) -> Response:
+        service = request.app.state.gateway_service
+        if request.method == "POST":
+            return await service.handle_cc_pro_usage_snapshot_save(request)
+        return await service.handle_cc_pro_usage_snapshot_get(request)
+
     async def cc_permissions(request: Request) -> Response:
         service = request.app.state.gateway_service
         if request.method == "POST":
@@ -22723,6 +22758,7 @@ def create_gateway_app(
             Route("/api/persona/exchange", persona_exchange, methods=["POST"]),
             Route("/api/cc/personas", cc_personas, methods=["GET", "POST", "DELETE"]),
             Route("/api/cc/upstream", cc_upstream, methods=["GET", "POST"]),
+            Route("/api/cc/pro-usage-snapshot", cc_pro_usage_snapshot, methods=["GET", "POST"]),
             Route("/api/cc/permissions", cc_permissions, methods=["GET", "POST"]),
             Route("/api/cc/mcp", cc_mcp, methods=["GET", "POST"]),
             Route("/v1/models", models, methods=["GET"]),

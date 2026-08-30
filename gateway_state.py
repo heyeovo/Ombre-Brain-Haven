@@ -214,6 +214,7 @@ class GatewayStateStore:
                 selfhost_overrides_json TEXT NOT NULL DEFAULT '{}',
                 cc_overrides_json TEXT NOT NULL DEFAULT '{}',
                 cc_lanes_json TEXT NOT NULL DEFAULT '{}',
+                context_gc_json TEXT NOT NULL DEFAULT '{}',
                 prompt_module_overrides_json TEXT NOT NULL DEFAULT '{}',
                 mode TEXT NOT NULL DEFAULT 'chat',
                 daily_review_enabled INTEGER NOT NULL DEFAULT 1,
@@ -304,6 +305,7 @@ class GatewayStateStore:
                 "selfhost_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
                 "cc_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
                 "cc_lanes_json": "TEXT NOT NULL DEFAULT '{}'",
+                "context_gc_json": "TEXT NOT NULL DEFAULT '{}'",
                 "prompt_module_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
                 "mode": "TEXT NOT NULL DEFAULT 'chat'",
                 "daily_review_enabled": "INTEGER NOT NULL DEFAULT 1",
@@ -2873,7 +2875,7 @@ class GatewayStateStore:
             """
             SELECT profile_id, session_id, persona_id, title,
                    local_engine_preference, selfhost_overrides_json, cc_overrides_json,
-                   cc_lanes_json, prompt_module_overrides_json,
+                   cc_lanes_json, context_gc_json, prompt_module_overrides_json,
                    mode, daily_review_enabled, daily_review_snapshot_json,
                    daily_review_snapshot_initialized, handoff_snapshot_json,
                    frozen_persona_append, frozen_persona_append_initialized,
@@ -2901,6 +2903,7 @@ class GatewayStateStore:
             "selfhost_overrides": self._json_object(row["selfhost_overrides_json"]),
             "cc_overrides": self._json_object(row["cc_overrides_json"]),
             "cc_lanes": self._json_object(row["cc_lanes_json"]),
+            "context_gc": self._json_object(row["context_gc_json"]),
             "prompt_module_overrides": {
                 str(key): bool(value)
                 for key, value in self._json_object(row["prompt_module_overrides_json"]).items()
@@ -2921,6 +2924,121 @@ class GatewayStateStore:
             "deleted_at": row["deleted_at"],
             "updated_at": str(row["updated_at"] or ""),
         }
+
+    def patch_conversation_context_gc(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        persona_id: str,
+        preferences: dict[str, Any] | None = None,
+        commit: dict[str, Any] | None = None,
+        expected_state_version: int | None = None,
+    ) -> dict[str, Any]:
+        """Save GC choices and atomically move one lane to its cleaned Claude fork."""
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "").strip()
+        safe_persona_id = str(persona_id or "").strip()
+        if not safe_session_id or not safe_persona_id:
+            raise ValueError("session_id and persona_id are required")
+        if preferences is None and commit is None:
+            raise ValueError("preferences or commit is required")
+        if preferences is not None and not isinstance(preferences, dict):
+            raise ValueError("preferences must be an object")
+        if commit is not None and not isinstance(commit, dict):
+            raise ValueError("commit must be an object")
+
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT persona_id, cc_lanes_json, context_gc_json, state_version
+                   FROM conversation_sessions
+                   WHERE profile_id = ? AND session_id = ?""",
+                (safe_profile_id, safe_session_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("session not found")
+            actual_persona_id = str(row["persona_id"] or "ombre")
+            if actual_persona_id != safe_persona_id:
+                raise ConversationPersonaConflictError(safe_persona_id, actual_persona_id)
+            current_version = int(row["state_version"] or 0)
+            if expected_state_version is not None and int(expected_state_version) != current_version:
+                raise SessionStateConflictError(int(expected_state_version), current_version)
+
+            lanes = self._json_object(row["cc_lanes_json"])
+            raw_gc = self._json_object(row["context_gc_json"])
+            old_history = raw_gc.get("history") if isinstance(raw_gc.get("history"), list) else []
+            gc_state: dict[str, Any] = {
+                "auto_enabled": bool(raw_gc.get("auto_enabled", False)),
+                "schedule_time": "05:30",
+                "protected_keys": raw_gc.get("protected_keys") if isinstance(raw_gc.get("protected_keys"), list) else [],
+                "history": [item for item in old_history if isinstance(item, dict)][-20:],
+                "last_auto_date": str(raw_gc.get("last_auto_date") or "")[:10],
+            }
+
+            if preferences is not None:
+                if "auto_enabled" in preferences:
+                    if not isinstance(preferences["auto_enabled"], bool):
+                        raise ValueError("auto_enabled must be boolean")
+                    gc_state["auto_enabled"] = preferences["auto_enabled"]
+                if "protected_keys" in preferences:
+                    raw_keys = preferences["protected_keys"]
+                    if not isinstance(raw_keys, list):
+                        raise ValueError("protected_keys must be an array")
+                    gc_state["protected_keys"] = list(dict.fromkeys(
+                        str(item).strip()[:500] for item in raw_keys if str(item).strip()
+                    ))[:500]
+
+            if commit is not None:
+                lane_id = str(commit.get("lane_id") or "").strip()[:300]
+                expected_cc_id = str(commit.get("expected_cc_session_id") or "").strip()[:500]
+                next_cc_id = str(commit.get("next_cc_session_id") or "").strip()[:500]
+                if not lane_id or not expected_cc_id or not next_cc_id:
+                    raise ValueError("GC commit requires lane_id and both CC session ids")
+                lane = lanes.get(lane_id)
+                if not isinstance(lane, dict) or str(lane.get("cc_session_id") or "").strip() != expected_cc_id:
+                    raise ValueError("cc_session_id_conflict")
+                lanes[lane_id] = {**lane, "cc_session_id": next_cc_id}
+                mode = "auto" if str(commit.get("mode") or "") == "auto" else "manual"
+                event = {
+                    "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "mode": mode,
+                    "lane_id": lane_id,
+                    "previous_cc_session_id": expected_cc_id,
+                    "next_cc_session_id": next_cc_id,
+                    "released_tokens": max(0, int(commit.get("released_tokens") or 0)),
+                    "candidate_count": max(0, int(commit.get("candidate_count") or 0)),
+                    "counts": commit.get("counts") if isinstance(commit.get("counts"), dict) else {},
+                }
+                gc_state["history"] = [*[item for item in old_history if isinstance(item, dict)], event][-20:]
+                if mode == "auto":
+                    gc_state["last_auto_date"] = str(commit.get("local_date") or "")[:10]
+
+            next_version = current_version + 1
+            conn.execute(
+                """UPDATE conversation_sessions
+                   SET cc_lanes_json = ?, context_gc_json = ?, state_version = ?, updated_at = ?
+                   WHERE profile_id = ? AND session_id = ?""",
+                (
+                    json.dumps(lanes, ensure_ascii=False),
+                    json.dumps(gc_state, ensure_ascii=False),
+                    next_version,
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    safe_profile_id,
+                    safe_session_id,
+                ),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return self.get_conversation_session_state(
+            profile_id=safe_profile_id,
+            session_id=safe_session_id,
+        )
 
     def patch_conversation_session_state(
         self,

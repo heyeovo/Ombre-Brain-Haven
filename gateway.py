@@ -3461,6 +3461,42 @@ class GatewayService:
             )
             return JSONResponse({"ok": True, "deleted": True, "session": metadata})
 
+        if "context_gc_preferences" in body or "context_gc_commit" in body:
+            persona_id = str(body.get("persona_id") or "").strip()
+            if not persona_id:
+                return JSONResponse({"error": "persona_id is required"}, status_code=400)
+            try:
+                state = self.state_store.patch_conversation_context_gc(
+                    profile_id=profile_id,
+                    session_id=session_id,
+                    persona_id=persona_id,
+                    preferences=body.get("context_gc_preferences"),
+                    commit=body.get("context_gc_commit"),
+                    expected_state_version=body.get("expected_state_version"),
+                )
+            except ConversationPersonaConflictError as exc:
+                return JSONResponse(
+                    {
+                        "error": "conversation_persona_conflict",
+                        "expected_persona_id": exc.expected_persona_id,
+                        "actual_persona_id": exc.actual_persona_id,
+                    },
+                    status_code=409,
+                )
+            except SessionStateConflictError as exc:
+                return JSONResponse(
+                    {
+                        "error": "session_state_conflict",
+                        "expected_state_version": exc.expected_version,
+                        "actual_state_version": exc.actual_version,
+                    },
+                    status_code=409,
+                )
+            except (TypeError, ValueError) as exc:
+                status = 409 if str(exc) == "cc_session_id_conflict" else 400
+                return JSONResponse({"error": str(exc)}, status_code=status)
+            return JSONResponse({"ok": True, "session": state})
+
         state_keys = {
             "local_engine_preference",
             "selfhost_overrides",

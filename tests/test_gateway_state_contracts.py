@@ -21,6 +21,7 @@ from gateway_state import (  # noqa: E402
     ConversationPersonaConflictError,
     GatewayStateStore,
     RequestIdReuseError,
+    SessionStateConflictError,
 )
 
 
@@ -462,6 +463,82 @@ class GatewayStateContractsTest(unittest.TestCase):
             ),
             {},
         )
+
+    def test_context_gc_preferences_and_lane_switch_are_profile_scoped_and_atomic(self):
+        store = self.make_store()
+        self.commit(
+            store,
+            request_id="gc-source",
+            expected=0,
+            source="cc",
+            raw_json=json.dumps(
+                {
+                    "cred_mode": "subscription",
+                    "model": "claude-sonnet-5",
+                    "cc_session_id": "native-before",
+                }
+            ),
+        )
+        state = store.get_conversation_session_state(
+            profile_id="default", session_id="session-1"
+        )
+        saved = store.patch_conversation_context_gc(
+            profile_id="default",
+            session_id="session-1",
+            persona_id="ombre",
+            expected_state_version=state["state_version"],
+            preferences={
+                "auto_enabled": False,
+                "protected_keys": ["ob:bucket-1", "search:abc"],
+            },
+        )
+        self.assertFalse(saved["context_gc"]["auto_enabled"])
+        self.assertEqual(saved["context_gc"]["schedule_time"], "05:30")
+        self.assertEqual(saved["context_gc"]["protected_keys"], ["ob:bucket-1", "search:abc"])
+
+        switched = store.patch_conversation_context_gc(
+            profile_id="default",
+            session_id="session-1",
+            persona_id="ombre",
+            expected_state_version=saved["state_version"],
+            commit={
+                "lane_id": "subscription",
+                "expected_cc_session_id": "native-before",
+                "next_cc_session_id": "native-after",
+                "released_tokens": 4321,
+                "candidate_count": 2,
+                "counts": {"ob_recall": 1, "search_chat": 1},
+                "mode": "manual",
+            },
+        )
+        self.assertEqual(switched["cc_lanes"]["subscription"]["cc_session_id"], "native-after")
+        self.assertEqual(switched["context_gc"]["history"][-1]["released_tokens"], 4321)
+        self.assertEqual(
+            store.get_conversation_session_state(
+                profile_id="another-profile", session_id="session-1"
+            ),
+            {},
+        )
+        with self.assertRaises(SessionStateConflictError):
+            store.patch_conversation_context_gc(
+                profile_id="default",
+                session_id="session-1",
+                persona_id="ombre",
+                expected_state_version=saved["state_version"],
+                preferences={"auto_enabled": True},
+            )
+        with self.assertRaises(ValueError):
+            store.patch_conversation_context_gc(
+                profile_id="default",
+                session_id="session-1",
+                persona_id="ombre",
+                expected_state_version=switched["state_version"],
+                commit={
+                    "lane_id": "subscription",
+                    "expected_cc_session_id": "native-before",
+                    "next_cc_session_id": "must-not-win",
+                },
+            )
 
     def test_daily_review_snapshot_is_recent_fixed_and_optional(self):
         store = self.make_store()

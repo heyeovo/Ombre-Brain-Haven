@@ -276,7 +276,7 @@ cc/selfhost 严格写入可以携带 `request_id`、`expected_last_round_id` 与
 
 cc 协作者可分别维护基础 system 提示词和长期提示词模块：基础提示词存于 `cc_personas.base_prompt`，由订阅、API 中转站和 selfhost 共用，默认采用原 cc 闲聊模式提示词；cc 闲聊不再另加写死副本，工作模式则在 Claude Code preset 后追加同一份配置。模块有独立名称、正文、顺序和默认启停，组装时以 `【模块名称】` 标明边界；旧的单块提示词会兼容为一个默认开启模块。每个聊天窗口只持久保存与协作者默认不同的启停覆盖；两种执行器都在下一轮按当前有效模块组装 system。selfhost 每轮直接重组，Claude Code 链路在组合变化时用原 SDK session 重建空闲 query，因此保留聊天上下文，同时让新提示词生效。
 
-`/cc` 私有附件保存在 `buckets_dir/cc-attachments`，SQLite 的 `conversation_attachments` 保存窗口/轮次归属、类型、文件名、MIME、大小、SHA-256，以及文档的受限解析正文。图片接受压缩后的 JPEG/PNG/WebP（单张 ≤2MB）；文件接受 PDF/DOCX/MD/TXT/CSV（单个 ≤4MB，为 Dashboard/Vercel multipart 留出请求体余量），解析正文只用于该窗口模型上下文，不进入长期记忆或召回。读取必须通过 Gateway Bearer 鉴权，不生成永久公开 URL；严格写入在同一事务中把有序附件绑定到轮次并纳入幂等指纹。图片与文件可分别单个或按窗口分类清除：删除原文件，文件还会擦除解析正文，但历史保留对应占位元数据；永久删除窗口会同时删除该窗口的附件记录和文件。
+`/cc` 私有附件保存在 `buckets_dir/cc-attachments`，SQLite 的 `conversation_attachments` 保存窗口/轮次归属、类型、文件名、MIME、大小、SHA-256，以及文档的受限解析正文。图片接受压缩后的 JPEG/PNG/WebP（单张 ≤2MB）；文件接受 PDF/DOCX/MD/TXT/CSV（单个 ≤4MB，为 Dashboard/Vercel multipart 留出请求体余量），解析正文只用于该窗口模型上下文，不进入长期记忆或召回。读取必须通过 Gateway Bearer 鉴权，不生成永久公开 URL；严格写入在同一事务中把有序附件绑定到轮次并纳入幂等指纹。图片与文件可分别单个或按窗口分类清除：删除原文件，文件还会擦除解析正文，但历史保留对应占位元数据；永久删除窗口会同时删除该窗口的附件记录和文件。Dashboard 的“窗口减负”另行复制并瘦身 Claude 本地 transcript，Haven 只原子保存新 lane 指针、保护规则与释放记录，稳定的 Dashboard session 和 `conversation_turns` 原文不会复制。
 
 这里要区分三层限制：**存储层不按轮数裁剪**；列表和聊天页面可以分页读取（例如每页 100 轮），分页不会删除数据；Just Now、handoff 和模型请求仍会按各自的时间范围、条数与 token 预算选取一部分原文，避免把整库塞进一次请求。
 

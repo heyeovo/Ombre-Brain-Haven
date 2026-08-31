@@ -341,7 +341,7 @@ dashboards 的 `/api/gateway/[...path]` 代理到这些路由，Bearer 网关鉴
 
 会话轮次存 `conversation_turns`，窗口状态存 `conversation_sessions`，图片/文件元数据与文件解析正文存 `conversation_attachments`；私有文件位于 `buckets_dir/cc-attachments`。`conversation_turns.turn_kind` 兼容区分 `user` / `agent_wake`，旧行默认 `user`。主动唤醒控制面与会话表共用 `gateway_state.db`：`agent_wake_schedules` 按 `profile_id + session_id + lane_id` 隔离双时钟、开关、CAS 版本和 lease，`agent_wake_runs` 以 `wake_id` 保存幂等运行状态；窗口永久删除时只清理同 profile/session 的两类 wake 记录。
 
-当前只完成 Haven 持久控制面，尚未接 Dashboard 模型执行、scheduler 回调或前端 UI。
+Haven 持久控制面与 Dashboard 阶段 2 后台 CC turn 已完成：Dashboard 可从本窗口状态恢复最后活跃 CC lane、Persona、冻结 prompt 与 resume id，并通过统一协调器串行进入同一个 Agent SDK iterator。尚未接 Haven scheduler 回调、wake 消息原子持久化或前端 UI。
 
 其余会话持久化契约：
 

@@ -40,6 +40,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `server.py` | **Brain** 入口（~640KB）。MCP 工具注册（`@mcp.custom_route`）+ REST API + 记忆核心 |
 | `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线 + cc 持久化路由（`Route()` 注册） |
 | `gateway_state.py` | Gateway/cc SQLite 状态：会话原文、窗口闲聊/工作模式、固定日回顾、handoff 与 CC 缓存前缀快照、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与游标、Context GC 配置/历史、桶排除账本 |
+| `agent_wake_store.py` | CC 主动唤醒的 Haven 持久控制面：在 `gateway_state.db` 中维护 profile/session/lane 级 schedule、版本 CAS、到期 claim、可恢复 lease 与幂等 wake run；只负责持久契约，不执行模型 turn |
 | `prompt_store.py` | 四类产品 Prompt 覆盖持久化：按 profile 保存 `analyze`、`merge`、`daily_review`、`weekly_journey` 用户版本、revision 与更新时间；代码默认仍是系统真源 |
 | `automation_store.py` | 通用自动化 SQLite 控制面：持久 schedule、逐任务 API/Pro 选择、实际 execution、run、candidate，兼容旧库重复迁移；候选 revision CAS、批准冻结、执行状态和任务 lease 与普通记忆桶隔离 |
 | `automation_model_runner.py` | 仅为 `daily_review` / `weekly_journey` 按 Haven 持久选择调用既有 API client 或 Dashboard Claude Pro runner；Pro 入口缺失、额度/登录/网络失败均原样失败，不自动 fallback |
@@ -338,7 +339,11 @@ cc 配置/用户数据由 **Gateway** 持久化到 Haven 数据库，路由注�
 ```
 dashboards 的 `/api/gateway/[...path]` 代理到这些路由，Bearer 网关鉴权。
 
-会话轮次存 `conversation_turns`，窗口状态存 `conversation_sessions`，图片/文件元数据与文件解析正文存 `conversation_attachments`；私有文件位于 `buckets_dir/cc-attachments`：
+会话轮次存 `conversation_turns`，窗口状态存 `conversation_sessions`，图片/文件元数据与文件解析正文存 `conversation_attachments`；私有文件位于 `buckets_dir/cc-attachments`。`conversation_turns.turn_kind` 兼容区分 `user` / `agent_wake`，旧行默认 `user`。主动唤醒控制面与会话表共用 `gateway_state.db`：`agent_wake_schedules` 按 `profile_id + session_id + lane_id` 隔离双时钟、开关、CAS 版本和 lease，`agent_wake_runs` 以 `wake_id` 保存幂等运行状态；窗口永久删除时只清理同 profile/session 的两类 wake 记录。
+
+当前只完成 Haven 持久控制面，尚未接 Dashboard 模型执行、scheduler 回调或前端 UI。
+
+其余会话持久化契约：
 
 - 订阅、API 中转站和 selfhost 共用的协作者基础提示词存 `cc_personas.base_prompt`，默认值为原 cc 闲聊模式提示词；短暂使用过的旧 selfhost 三句默认文案在读取时迁成该统一默认。提示词模块存 `cc_personas.prompt_modules`，每条包含 id、名称、正文和默认启停，组装时以 `【模块名称】` 标明边界。旧 `prompt` 在读取时兼容成一个默认开启模块。当前窗口的差异化启停存 `conversation_sessions.prompt_module_overrides_json`，未覆盖的模块继续跟随协作者默认。
 - 一个 `session_id` 永久绑定一个 `persona_id`；旧窗口从首轮 `client="ob2-chat/<persona>"` 回填，无主历史归 `ombre`。

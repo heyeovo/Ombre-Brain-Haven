@@ -8,6 +8,8 @@ import zipfile
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from agent_wake_store import delete_agent_wake_session_records, initialize_agent_wake_schema
+
 
 _LEGACY_SELFHOST_BASE_PROMPT = "\n".join(
     (
@@ -164,6 +166,7 @@ class GatewayStateStore:
                 client TEXT NOT NULL DEFAULT '',
                 route TEXT NOT NULL DEFAULT '',
                 source TEXT NOT NULL DEFAULT 'gateway',
+                turn_kind TEXT NOT NULL DEFAULT 'user',
                 raw_json TEXT NOT NULL DEFAULT '',
                 request_id TEXT,
                 request_fingerprint TEXT,
@@ -179,6 +182,7 @@ class GatewayStateStore:
             "conversation_turns",
             {
                 "source": "TEXT NOT NULL DEFAULT 'gateway'",
+                "turn_kind": "TEXT NOT NULL DEFAULT 'user'",
                 "raw_json": "TEXT NOT NULL DEFAULT ''",
                 "request_id": "TEXT",
                 "request_fingerprint": "TEXT",
@@ -569,6 +573,7 @@ class GatewayStateStore:
             )
             """
         )
+        initialize_agent_wake_schema(conn)
         try:
             conn.execute(
                 """
@@ -1655,6 +1660,7 @@ class GatewayStateStore:
             "client": str(row["client"] or ""),
             "route": str(row["route"] or ""),
             "source": str(row["source"] or "gateway"),
+            "turn_kind": str(row["turn_kind"] or "user"),
             "request_id": str(row["request_id"] or ""),
         }
 
@@ -1675,7 +1681,7 @@ class GatewayStateStore:
             SELECT turns.id, turns.profile_id, turns.session_id, turns.round_id,
                    turns.created_at, turns.user_text, turns.assistant_text,
                    turns.model, turns.client, turns.route, turns.source,
-                   turns.raw_json, turns.request_id,
+                   turns.turn_kind, turns.raw_json, turns.request_id,
                    COALESCE(sessions.persona_id, 'ombre') AS persona_id
             FROM conversation_turns AS turns
             LEFT JOIN conversation_sessions AS sessions
@@ -1793,7 +1799,7 @@ class GatewayStateStore:
                 """
                 SELECT id, profile_id, session_id, round_id, created_at,
                        user_text, assistant_text, model, client, route, source,
-                       request_id, request_fingerprint
+                       turn_kind, request_id, request_fingerprint
                 FROM conversation_turns
                 WHERE profile_id = ? AND request_id = ?
                 """,
@@ -2015,7 +2021,7 @@ class GatewayStateStore:
                 """
                 SELECT id, profile_id, session_id, round_id, created_at,
                        user_text, assistant_text, model, client, route, source,
-                       request_id
+                       turn_kind, request_id
                 FROM conversation_turns WHERE id = ?
                 """,
                 (turn_id,),
@@ -2212,7 +2218,7 @@ class GatewayStateStore:
         rows = conn.execute(
             f"""
             SELECT id, profile_id, session_id, round_id, created_at,
-                   user_text, assistant_text, model, client, route, source
+                   user_text, assistant_text, model, client, route, source, turn_kind
             FROM conversation_turns
             WHERE {where_clause}
             ORDER BY id DESC
@@ -2234,6 +2240,7 @@ class GatewayStateStore:
                 "client": row["client"] or "",
                 "route": row["route"] or "",
                 "source": row["source"] or "gateway",
+                "turn_kind": row["turn_kind"] or "user",
             }
             for row in rows
         ]
@@ -2358,6 +2365,7 @@ class GatewayStateStore:
                 "round_id": row["round_id"],
                 "created_at": row["created_at"],
                 "source": row["source"] or "gateway",
+                "turn_kind": row["turn_kind"] or "user",
             }
             u = str(row["user_text"] or "").strip()
             a = str(row["assistant_text"] or "").strip()
@@ -2446,7 +2454,7 @@ class GatewayStateStore:
         rows = conn.execute(
             """
             SELECT id, profile_id, session_id, round_id, created_at,
-                   user_text, assistant_text, model, client, route, source
+                   user_text, assistant_text, model, client, route, source, turn_kind
             FROM conversation_turns
             WHERE profile_id = ?
             ORDER BY id DESC
@@ -2507,6 +2515,7 @@ class GatewayStateStore:
                 "client": row["client"] or "",
                 "route": row["route"] or "",
                 "source": row["source"] or "gateway",
+                "turn_kind": row["turn_kind"] or "user",
             }
             for row in filtered
         ]
@@ -2521,7 +2530,7 @@ class GatewayStateStore:
         rows = conn.execute(
             """
             SELECT turns.id, turns.session_id, turns.round_id, turns.created_at,
-                   turns.user_text, turns.assistant_text, turns.source,
+                   turns.user_text, turns.assistant_text, turns.source, turns.turn_kind,
                    COALESCE(sessions.mode, 'chat') AS mode,
                    COALESCE(sessions.title, '') AS session_title
             FROM conversation_turns turns
@@ -2552,6 +2561,7 @@ class GatewayStateStore:
                 "user_text": str(row["user_text"] or ""),
                 "assistant_text": str(row["assistant_text"] or ""),
                 "source": str(row["source"] or "gateway"),
+                "turn_kind": str(row["turn_kind"] or "user"),
                 "mode": mode if mode in {"chat", "work"} else "chat",
                 "session_title": str(row["session_title"] or ""),
             })
@@ -3329,6 +3339,11 @@ class GatewayStateStore:
                     (safe_profile_id, safe_session_id),
                 )
                 counts[table] = max(0, int(cursor.rowcount or 0))
+            counts.update(
+                delete_agent_wake_session_records(
+                    conn, profile_id=safe_profile_id, session_id=safe_session_id
+                )
+            )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -3404,7 +3419,7 @@ class GatewayStateStore:
         rows = conn.execute(
             f"""
             SELECT id, profile_id, session_id, round_id, created_at,
-                   user_text, assistant_text, model, client, route, source, raw_json
+                   user_text, assistant_text, model, client, route, source, turn_kind, raw_json
             FROM conversation_turns
             WHERE {where_clause}
             ORDER BY id DESC
@@ -3444,6 +3459,7 @@ class GatewayStateStore:
                 "client": row["client"] or "",
                 "route": row["route"] or "",
                 "source": row["source"] or "gateway",
+                "turn_kind": row["turn_kind"] or "user",
                 "attachments": attachments_by_turn.get(int(row["id"]), []),
                 **({"raw_json": row["raw_json"] or ""} if include_raw else {}),
             }

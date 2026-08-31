@@ -1,0 +1,807 @@
+"""Persistent control plane for CC agent wake schedules and runs."""
+
+from __future__ import annotations
+
+import os
+import sqlite3
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+
+CACHE_STATES = {"unarmed", "warm", "cooling", "cold"}
+RUN_STATUSES = {"claimed", "running", "completed", "deferred", "failed", "superseded"}
+TERMINAL_RUN_STATUSES = {"completed", "deferred", "failed", "superseded"}
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso(value: datetime | str | None, *, allow_empty: bool = True) -> str:
+    if value is None or value == "":
+        if allow_empty:
+            return ""
+        raise ValueError("timestamp is required")
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw = str(value).strip()
+        if not raw:
+            if allow_empty:
+                return ""
+            raise ValueError("timestamp is required")
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("timestamp must be RFC 3339") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def _ensure_columns(
+    conn: sqlite3.Connection,
+    table: str,
+    columns: dict[str, str],
+) -> None:
+    existing = {
+        str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    for name, ddl in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+
+def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
+    """Create or idempotently upgrade the agent wake tables in gateway_state.db."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_wake_schedules (
+            profile_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            lane_id TEXT NOT NULL,
+            keepalive_enabled INTEGER NOT NULL DEFAULT 0,
+            keepalive_paused_until_user INTEGER NOT NULL DEFAULT 0,
+            agent_wake_enabled INTEGER NOT NULL DEFAULT 0,
+            last_user_activity_at TEXT NOT NULL DEFAULT '',
+            last_model_activity_at TEXT NOT NULL DEFAULT '',
+            last_cache_refresh_at TEXT NOT NULL DEFAULT '',
+            last_heartbeat_at TEXT NOT NULL DEFAULT '',
+            next_agent_wake_at TEXT NOT NULL DEFAULT '',
+            wake_reason TEXT NOT NULL DEFAULT '',
+            cache_keepalive_deadline TEXT NOT NULL DEFAULT '',
+            due_at TEXT NOT NULL DEFAULT '',
+            cache_state TEXT NOT NULL DEFAULT 'unarmed',
+            schedule_version INTEGER NOT NULL DEFAULT 1,
+            lease_owner TEXT NOT NULL DEFAULT '',
+            lease_until TEXT NOT NULL DEFAULT '',
+            background_turn_limit INTEGER NOT NULL DEFAULT 48,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT NOT NULL DEFAULT '',
+            gc_eligible_at TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (profile_id, session_id, lane_id)
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "agent_wake_schedules",
+        {
+            "profile_id": "TEXT NOT NULL DEFAULT ''",
+            "session_id": "TEXT NOT NULL DEFAULT ''",
+            "lane_id": "TEXT NOT NULL DEFAULT ''",
+            "keepalive_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "keepalive_paused_until_user": "INTEGER NOT NULL DEFAULT 0",
+            "agent_wake_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "last_user_activity_at": "TEXT NOT NULL DEFAULT ''",
+            "last_model_activity_at": "TEXT NOT NULL DEFAULT ''",
+            "last_cache_refresh_at": "TEXT NOT NULL DEFAULT ''",
+            "last_heartbeat_at": "TEXT NOT NULL DEFAULT ''",
+            "next_agent_wake_at": "TEXT NOT NULL DEFAULT ''",
+            "wake_reason": "TEXT NOT NULL DEFAULT ''",
+            "cache_keepalive_deadline": "TEXT NOT NULL DEFAULT ''",
+            "due_at": "TEXT NOT NULL DEFAULT ''",
+            "cache_state": "TEXT NOT NULL DEFAULT 'unarmed'",
+            "schedule_version": "INTEGER NOT NULL DEFAULT 1",
+            "lease_owner": "TEXT NOT NULL DEFAULT ''",
+            "lease_until": "TEXT NOT NULL DEFAULT ''",
+            "background_turn_limit": "INTEGER NOT NULL DEFAULT 48",
+            "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
+            "last_error": "TEXT NOT NULL DEFAULT ''",
+            "gc_eligible_at": "TEXT NOT NULL DEFAULT ''",
+            "created_at": "TEXT NOT NULL DEFAULT ''",
+            "updated_at": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_wake_schedule_scope
+        ON agent_wake_schedules (profile_id, session_id, lane_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_agent_wake_schedules_due
+        ON agent_wake_schedules (due_at, lease_until)
+        WHERE due_at != ''
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_wake_runs (
+            wake_id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            lane_id TEXT NOT NULL,
+            schedule_version INTEGER NOT NULL,
+            cause TEXT NOT NULL,
+            due_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'claimed',
+            lease_owner TEXT NOT NULL DEFAULT '',
+            started_at TEXT NOT NULL DEFAULT '',
+            completed_at TEXT NOT NULL DEFAULT '',
+            turn_id INTEGER,
+            error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    _ensure_columns(
+        conn,
+        "agent_wake_runs",
+        {
+            "wake_id": "TEXT NOT NULL DEFAULT ''",
+            "profile_id": "TEXT NOT NULL DEFAULT ''",
+            "session_id": "TEXT NOT NULL DEFAULT ''",
+            "lane_id": "TEXT NOT NULL DEFAULT ''",
+            "schedule_version": "INTEGER NOT NULL DEFAULT 0",
+            "cause": "TEXT NOT NULL DEFAULT ''",
+            "due_at": "TEXT NOT NULL DEFAULT ''",
+            "status": "TEXT NOT NULL DEFAULT 'claimed'",
+            "lease_owner": "TEXT NOT NULL DEFAULT ''",
+            "started_at": "TEXT NOT NULL DEFAULT ''",
+            "completed_at": "TEXT NOT NULL DEFAULT ''",
+            "turn_id": "INTEGER",
+            "error": "TEXT NOT NULL DEFAULT ''",
+            "created_at": "TEXT NOT NULL DEFAULT ''",
+            "updated_at": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_wake_runs_wake_id
+        ON agent_wake_runs (wake_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_agent_wake_runs_scope
+        ON agent_wake_runs (profile_id, session_id, lane_id, created_at DESC)
+        """
+    )
+
+
+class AgentWakeConflictError(RuntimeError):
+    def __init__(self, expected_version: int, actual_version: int):
+        super().__init__(
+            f"agent wake schedule version conflict: expected {expected_version}, "
+            f"actual {actual_version}"
+        )
+        self.expected_version = expected_version
+        self.actual_version = actual_version
+
+
+class AgentWakeStore:
+    """Session/lane-scoped schedule and idempotent run persistence."""
+
+    _BOOLEAN_FIELDS = {
+        "keepalive_enabled",
+        "keepalive_paused_until_user",
+        "agent_wake_enabled",
+    }
+    _TIMESTAMP_FIELDS = {
+        "last_user_activity_at",
+        "last_model_activity_at",
+        "last_cache_refresh_at",
+        "last_heartbeat_at",
+        "next_agent_wake_at",
+        "cache_keepalive_deadline",
+        "gc_eligible_at",
+    }
+    _WRITABLE_FIELDS = _BOOLEAN_FIELDS | _TIMESTAMP_FIELDS | {
+        "wake_reason",
+        "cache_state",
+        "background_turn_limit",
+        "consecutive_failures",
+        "last_error",
+    }
+
+    def __init__(self, db_path: str):
+        self.db_path = str(db_path)
+        parent = os.path.dirname(self.db_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        conn = self._connect()
+        try:
+            initialize_agent_wake_schema(conn)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    @staticmethod
+    def _scope(profile_id: str, session_id: str, lane_id: str) -> tuple[str, str, str]:
+        profile = str(profile_id or "default").strip() or "default"
+        session = str(session_id or "").strip()
+        lane = str(lane_id or "").strip()
+        if not session or not lane:
+            raise ValueError("session_id and lane_id are required")
+        return profile, session, lane
+
+    @staticmethod
+    def _computed_due_at(values: dict[str, Any]) -> str:
+        candidates: list[str] = []
+        if (
+            bool(values.get("keepalive_enabled"))
+            and not bool(values.get("keepalive_paused_until_user"))
+            and str(values.get("cache_keepalive_deadline") or "")
+        ):
+            candidates.append(str(values["cache_keepalive_deadline"]))
+        if bool(values.get("agent_wake_enabled")) and str(values.get("next_agent_wake_at") or ""):
+            candidates.append(str(values["next_agent_wake_at"]))
+        return min(candidates) if candidates else ""
+
+    @staticmethod
+    def _schedule_payload(row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None:
+            return {}
+        payload = dict(row)
+        for key in AgentWakeStore._BOOLEAN_FIELDS:
+            payload[key] = bool(payload.get(key))
+        payload["schedule_version"] = int(payload.get("schedule_version") or 0)
+        payload["background_turn_limit"] = int(payload.get("background_turn_limit") or 0)
+        payload["consecutive_failures"] = int(payload.get("consecutive_failures") or 0)
+        return payload
+
+    @staticmethod
+    def _run_payload(row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None:
+            return {}
+        payload = dict(row)
+        payload["schedule_version"] = int(payload.get("schedule_version") or 0)
+        payload["turn_id"] = int(payload["turn_id"]) if payload.get("turn_id") is not None else None
+        return payload
+
+    def create_schedule(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        lane_id: str,
+        **initial: Any,
+    ) -> tuple[dict[str, Any], bool]:
+        profile, session, lane = self._scope(profile_id, session_id, lane_id)
+        unknown = set(initial) - self._WRITABLE_FIELDS
+        if unknown:
+            raise ValueError(f"unsupported schedule fields: {', '.join(sorted(unknown))}")
+        now = _iso(_utc_now(), allow_empty=False)
+        defaults: dict[str, Any] = {
+            "keepalive_enabled": False,
+            "keepalive_paused_until_user": False,
+            "agent_wake_enabled": False,
+            "last_user_activity_at": "",
+            "last_model_activity_at": "",
+            "last_cache_refresh_at": "",
+            "last_heartbeat_at": "",
+            "next_agent_wake_at": "",
+            "wake_reason": "",
+            "cache_keepalive_deadline": "",
+            "cache_state": "unarmed",
+            "background_turn_limit": 48,
+            "consecutive_failures": 0,
+            "last_error": "",
+            "gc_eligible_at": "",
+        }
+        defaults.update(self._normalized_changes(initial))
+        due_at = self._computed_due_at(defaults)
+        conn = self._connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO agent_wake_schedules
+                    (profile_id, session_id, lane_id, keepalive_enabled,
+                     keepalive_paused_until_user, agent_wake_enabled,
+                     last_user_activity_at, last_model_activity_at,
+                     last_cache_refresh_at, last_heartbeat_at, next_agent_wake_at,
+                     wake_reason, cache_keepalive_deadline, due_at, cache_state,
+                     schedule_version, lease_owner, lease_until,
+                     background_turn_limit, consecutive_failures, last_error,
+                     gc_eligible_at, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', '', ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        profile, session, lane,
+                        int(defaults["keepalive_enabled"]),
+                        int(defaults["keepalive_paused_until_user"]),
+                        int(defaults["agent_wake_enabled"]),
+                        defaults["last_user_activity_at"],
+                        defaults["last_model_activity_at"],
+                        defaults["last_cache_refresh_at"],
+                        defaults["last_heartbeat_at"],
+                        defaults["next_agent_wake_at"], defaults["wake_reason"],
+                        defaults["cache_keepalive_deadline"], due_at,
+                        defaults["cache_state"], defaults["background_turn_limit"],
+                        defaults["consecutive_failures"], defaults["last_error"],
+                        defaults["gc_eligible_at"], now, now,
+                    ),
+                )
+            return self.get_schedule(
+                profile_id=profile, session_id=session, lane_id=lane
+            ), cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    def get_schedule(self, *, profile_id: str, session_id: str, lane_id: str) -> dict[str, Any]:
+        profile, session, lane = self._scope(profile_id, session_id, lane_id)
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT * FROM agent_wake_schedules
+                WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+                """,
+                (profile, session, lane),
+            ).fetchone()
+            return self._schedule_payload(row)
+        finally:
+            conn.close()
+
+    def list_schedules(
+        self, *, profile_id: str, session_id: str = ""
+    ) -> list[dict[str, Any]]:
+        profile = str(profile_id or "default").strip() or "default"
+        session = str(session_id or "").strip()
+        conn = self._connect()
+        try:
+            if session:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM agent_wake_schedules
+                    WHERE profile_id = ? AND session_id = ?
+                    ORDER BY lane_id
+                    """,
+                    (profile, session),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM agent_wake_schedules
+                    WHERE profile_id = ?
+                    ORDER BY session_id, lane_id
+                    """,
+                    (profile,),
+                ).fetchall()
+            return [self._schedule_payload(row) for row in rows]
+        finally:
+            conn.close()
+
+    def _normalized_changes(self, changes: dict[str, Any]) -> dict[str, Any]:
+        normalized: dict[str, Any] = {}
+        for key, value in changes.items():
+            if key in self._BOOLEAN_FIELDS:
+                normalized[key] = bool(value)
+            elif key in self._TIMESTAMP_FIELDS:
+                normalized[key] = _iso(value)
+            elif key == "cache_state":
+                state = str(value or "").strip()
+                if state not in CACHE_STATES:
+                    raise ValueError("invalid cache_state")
+                normalized[key] = state
+            elif key == "wake_reason":
+                reason = str(value or "").strip()
+                if len(reason.encode("utf-8")) > 90:
+                    raise ValueError("wake_reason exceeds 30 Chinese characters or equivalent")
+                normalized[key] = reason
+            elif key in {"background_turn_limit", "consecutive_failures"}:
+                number = int(value)
+                if number < 0:
+                    raise ValueError(f"{key} cannot be negative")
+                normalized[key] = number
+            elif key == "last_error":
+                normalized[key] = str(value or "")[:1000]
+        return normalized
+
+    def update_schedule(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        lane_id: str,
+        expected_version: int,
+        **changes: Any,
+    ) -> dict[str, Any]:
+        profile, session, lane = self._scope(profile_id, session_id, lane_id)
+        unknown = set(changes) - self._WRITABLE_FIELDS
+        if unknown:
+            raise ValueError(f"unsupported schedule fields: {', '.join(sorted(unknown))}")
+        if not changes:
+            return self.get_schedule(profile_id=profile, session_id=session, lane_id=lane)
+        normalized = self._normalized_changes(changes)
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT * FROM agent_wake_schedules
+                WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+                """,
+                (profile, session, lane),
+            ).fetchone()
+            if row is None:
+                raise KeyError("agent wake schedule not found")
+            actual_version = int(row["schedule_version"] or 0)
+            if actual_version != int(expected_version):
+                raise AgentWakeConflictError(int(expected_version), actual_version)
+            values = dict(row)
+            values.update(normalized)
+            values["due_at"] = self._computed_due_at(values)
+            assignments = [f"{key} = ?" for key in normalized]
+            params = [int(value) if key in self._BOOLEAN_FIELDS else value for key, value in normalized.items()]
+            assignments.extend(
+                [
+                    "due_at = ?",
+                    "schedule_version = schedule_version + 1",
+                    "lease_owner = ''",
+                    "lease_until = ''",
+                    "updated_at = ?",
+                ]
+            )
+            params.extend([values["due_at"], _iso(_utc_now(), allow_empty=False)])
+            params.extend([profile, session, lane, actual_version])
+            cursor = conn.execute(
+                f"""
+                UPDATE agent_wake_schedules SET {', '.join(assignments)}
+                WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+                  AND schedule_version = ?
+                """,
+                params,
+            )
+            if cursor.rowcount != 1:
+                latest = conn.execute(
+                    """
+                    SELECT schedule_version FROM agent_wake_schedules
+                    WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+                    """,
+                    (profile, session, lane),
+                ).fetchone()
+                raise AgentWakeConflictError(
+                    int(expected_version), int(latest["schedule_version"] if latest else 0)
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return self.get_schedule(profile_id=profile, session_id=session, lane_id=lane)
+
+    def delete_schedule(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        lane_id: str,
+        expected_version: int,
+    ) -> bool:
+        profile, session, lane = self._scope(profile_id, session_id, lane_id)
+        conn = self._connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    DELETE FROM agent_wake_schedules
+                    WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+                      AND schedule_version = ?
+                    """,
+                    (profile, session, lane, int(expected_version)),
+                )
+            if cursor.rowcount == 1:
+                return True
+            row = conn.execute(
+                """
+                SELECT schedule_version FROM agent_wake_schedules
+                WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+                """,
+                (profile, session, lane),
+            ).fetchone()
+            if row is None:
+                return False
+            raise AgentWakeConflictError(int(expected_version), int(row["schedule_version"]))
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _cause(row: sqlite3.Row) -> str:
+        due_at = str(row["due_at"] or "")
+        if str(row["next_agent_wake_at"] or "") == due_at:
+            return "agent_schedule"
+        return "cache_keepalive"
+
+    def claim_due_schedule(
+        self,
+        *,
+        owner: str,
+        now: datetime,
+        lease_seconds: int = 120,
+    ) -> dict[str, Any]:
+        safe_owner = str(owner or "").strip()
+        if not safe_owner:
+            raise ValueError("lease owner is required")
+        now_iso = _iso(now, allow_empty=False)
+        lease_until = _iso(
+            now.astimezone(timezone.utc) + timedelta(seconds=max(30, int(lease_seconds))),
+            allow_empty=False,
+        )
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT * FROM agent_wake_schedules
+                WHERE due_at != '' AND due_at <= ?
+                  AND (lease_owner = '' OR lease_until = '' OR lease_until <= ?)
+                ORDER BY due_at, profile_id, session_id, lane_id
+                LIMIT 1
+                """,
+                (now_iso, now_iso),
+            ).fetchone()
+            if row is None:
+                conn.commit()
+                return {}
+            cursor = conn.execute(
+                """
+                UPDATE agent_wake_schedules
+                SET lease_owner = ?, lease_until = ?, updated_at = ?
+                WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+                  AND schedule_version = ?
+                  AND (lease_owner = '' OR lease_until = '' OR lease_until <= ?)
+                """,
+                (
+                    safe_owner, lease_until, now_iso,
+                    row["profile_id"], row["session_id"], row["lane_id"],
+                    row["schedule_version"], now_iso,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.commit()
+                return {}
+            run = conn.execute(
+                """
+                SELECT * FROM agent_wake_runs
+                WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+                  AND schedule_version = ? AND due_at = ?
+                  AND status IN ('claimed', 'running')
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (
+                    row["profile_id"], row["session_id"], row["lane_id"],
+                    row["schedule_version"], row["due_at"],
+                ),
+            ).fetchone()
+            recovered = run is not None
+            if run is None:
+                wake_id = f"wake_{uuid.uuid4().hex}"
+                conn.execute(
+                    """
+                    INSERT INTO agent_wake_runs
+                    (wake_id, profile_id, session_id, lane_id, schedule_version,
+                     cause, due_at, status, lease_owner, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'claimed', ?, ?, ?)
+                    """,
+                    (
+                        wake_id, row["profile_id"], row["session_id"], row["lane_id"],
+                        row["schedule_version"], self._cause(row), row["due_at"],
+                        safe_owner, now_iso, now_iso,
+                    ),
+                )
+                run = conn.execute(
+                    "SELECT * FROM agent_wake_runs WHERE wake_id = ?", (wake_id,)
+                ).fetchone()
+            else:
+                conn.execute(
+                    """
+                    UPDATE agent_wake_runs
+                    SET lease_owner = ?, updated_at = ? WHERE wake_id = ?
+                    """,
+                    (safe_owner, now_iso, run["wake_id"]),
+                )
+                run = conn.execute(
+                    "SELECT * FROM agent_wake_runs WHERE wake_id = ?", (run["wake_id"],)
+                ).fetchone()
+            conn.commit()
+            claimed_schedule = dict(row)
+            claimed_schedule["lease_owner"] = safe_owner
+            claimed_schedule["lease_until"] = lease_until
+            return {
+                "schedule": self._schedule_payload(claimed_schedule),
+                "run": self._run_payload(run),
+                "recovered": recovered,
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def get_run(self, wake_id: str) -> dict[str, Any]:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM agent_wake_runs WHERE wake_id = ?", (str(wake_id),)
+            ).fetchone()
+            return self._run_payload(row)
+        finally:
+            conn.close()
+
+    def mark_run_running(self, *, wake_id: str, owner: str) -> dict[str, Any]:
+        safe_owner = str(owner or "").strip()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            run = conn.execute(
+                "SELECT * FROM agent_wake_runs WHERE wake_id = ?", (str(wake_id),)
+            ).fetchone()
+            if run is None:
+                raise KeyError("agent wake run not found")
+            schedule = conn.execute(
+                """
+                SELECT schedule_version, lease_owner FROM agent_wake_schedules
+                WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+                """,
+                (run["profile_id"], run["session_id"], run["lane_id"]),
+            ).fetchone()
+            current = (
+                schedule is not None
+                and int(schedule["schedule_version"] or 0) == int(run["schedule_version"] or 0)
+                and str(schedule["lease_owner"] or "") == safe_owner
+                and str(run["lease_owner"] or "") == safe_owner
+            )
+            now = _iso(_utc_now(), allow_empty=False)
+            if not current:
+                conn.execute(
+                    """
+                    UPDATE agent_wake_runs
+                    SET status = 'superseded', completed_at = ?, updated_at = ?
+                    WHERE wake_id = ? AND status IN ('claimed', 'running')
+                    """,
+                    (now, now, str(wake_id)),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE agent_wake_runs
+                    SET status = 'running', started_at = CASE WHEN started_at = '' THEN ? ELSE started_at END,
+                        updated_at = ?
+                    WHERE wake_id = ? AND status = 'claimed'
+                    """,
+                    (now, now, str(wake_id)),
+                )
+                if cursor.rowcount != 1 and str(run["status"]) != "running":
+                    raise ValueError("agent wake run is not claimable")
+            conn.commit()
+            return self.get_run(str(wake_id))
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def finish_run(
+        self,
+        *,
+        wake_id: str,
+        owner: str,
+        status: str,
+        turn_id: int | None = None,
+        error: str = "",
+    ) -> dict[str, Any]:
+        safe_status = str(status or "").strip()
+        if safe_status not in TERMINAL_RUN_STATUSES:
+            raise ValueError("finish status must be terminal")
+        safe_owner = str(owner or "").strip()
+        now = _iso(_utc_now(), allow_empty=False)
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            run = conn.execute(
+                "SELECT * FROM agent_wake_runs WHERE wake_id = ?", (str(wake_id),)
+            ).fetchone()
+            if run is None:
+                raise KeyError("agent wake run not found")
+            if str(run["status"]) in TERMINAL_RUN_STATUSES:
+                conn.commit()
+                return self._run_payload(run)
+            if str(run["lease_owner"] or "") != safe_owner:
+                raise ValueError("agent wake run lease was lost")
+            conn.execute(
+                """
+                UPDATE agent_wake_runs
+                SET status = ?, completed_at = ?, turn_id = ?, error = ?, updated_at = ?
+                WHERE wake_id = ?
+                """,
+                (safe_status, now, turn_id, str(error or "")[:1000], now, str(wake_id)),
+            )
+            conn.execute(
+                """
+                UPDATE agent_wake_schedules
+                SET lease_owner = '', lease_until = '', updated_at = ?
+                WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+                  AND schedule_version = ? AND lease_owner = ?
+                """,
+                (
+                    now, run["profile_id"], run["session_id"], run["lane_id"],
+                    run["schedule_version"], safe_owner,
+                ),
+            )
+            conn.commit()
+            return self.get_run(str(wake_id))
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def list_runs(
+        self, *, profile_id: str, session_id: str, lane_id: str = ""
+    ) -> list[dict[str, Any]]:
+        profile = str(profile_id or "default").strip() or "default"
+        session = str(session_id or "").strip()
+        lane = str(lane_id or "").strip()
+        if not session:
+            raise ValueError("session_id is required")
+        conn = self._connect()
+        try:
+            if lane:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM agent_wake_runs
+                    WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+                    ORDER BY created_at, wake_id
+                    """,
+                    (profile, session, lane),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM agent_wake_runs
+                    WHERE profile_id = ? AND session_id = ?
+                    ORDER BY created_at, wake_id
+                    """,
+                    (profile, session),
+                ).fetchall()
+            return [self._run_payload(row) for row in rows]
+        finally:
+            conn.close()
+
+
+def delete_agent_wake_session_records(
+    conn: sqlite3.Connection, *, profile_id: str, session_id: str
+) -> dict[str, int]:
+    """Delete only one verified profile/session's wake control-plane records."""
+    counts: dict[str, int] = {}
+    for table in ("agent_wake_runs", "agent_wake_schedules"):
+        cursor = conn.execute(
+            f"DELETE FROM {table} WHERE profile_id = ? AND session_id = ?",
+            (str(profile_id), str(session_id)),
+        )
+        counts[table] = max(0, int(cursor.rowcount or 0))
+    return counts

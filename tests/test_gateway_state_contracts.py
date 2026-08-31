@@ -23,6 +23,7 @@ from gateway_state import (  # noqa: E402
     RequestIdReuseError,
     SessionStateConflictError,
 )
+from agent_wake_store import AgentWakeStore  # noqa: E402
 
 
 class GatewayStateContractsTest(unittest.TestCase):
@@ -269,6 +270,16 @@ class GatewayStateContractsTest(unittest.TestCase):
         self.assertEqual(state["handoff_snapshot"], {})
         self.assertEqual(state["frozen_persona_append"], "")
         self.assertFalse(state["frozen_persona_append_initialized"])
+        turns = store.list_conversation_turns_by_session(
+            profile_id="default", session_id="legacy-session"
+        )
+        self.assertEqual(turns[0]["turn_kind"], "user")
+        conn = sqlite3.connect(db_path)
+        turn_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(conversation_turns)")
+        }
+        conn.close()
+        self.assertIn("turn_kind", turn_columns)
         restarted = GatewayStateStore(str(db_path))
         self.assertEqual(
             restarted.get_conversation_session_state(
@@ -870,6 +881,52 @@ class GatewayStateContractsTest(unittest.TestCase):
                 profile_id="default", session_id="session-1"
             ),
             {"bucket-recalled"},
+        )
+
+    def test_permanent_delete_removes_only_target_wake_records(self):
+        store = self.make_store()
+        self.commit(store, request_id="request-1", expected=0)
+        wake_store = AgentWakeStore(str(self.root / "gateway_state.db"))
+        target, _ = wake_store.create_schedule(
+            profile_id="default",
+            session_id="session-1",
+            lane_id="subscription",
+            keepalive_enabled=True,
+            cache_keepalive_deadline=datetime.now(timezone.utc) - timedelta(minutes=1),
+        )
+        claimed = wake_store.claim_due_schedule(
+            owner="owner-a", now=datetime.now(timezone.utc)
+        )
+        self.assertEqual(claimed["schedule"]["schedule_version"], target["schedule_version"])
+        wake_store.create_schedule(
+            profile_id="default", session_id="session-2", lane_id="subscription"
+        )
+        wake_store.create_schedule(
+            profile_id="another-profile", session_id="session-1", lane_id="subscription"
+        )
+
+        deleted = store.permanently_delete_conversation_session(
+            profile_id="default", session_id="session-1"
+        )
+        self.assertEqual(deleted["agent_wake_schedules"], 1)
+        self.assertEqual(deleted["agent_wake_runs"], 1)
+        self.assertEqual(
+            wake_store.get_schedule(
+                profile_id="default", session_id="session-1", lane_id="subscription"
+            ),
+            {},
+        )
+        self.assertTrue(
+            wake_store.get_schedule(
+                profile_id="default", session_id="session-2", lane_id="subscription"
+            )
+        )
+        self.assertTrue(
+            wake_store.get_schedule(
+                profile_id="another-profile",
+                session_id="session-1",
+                lane_id="subscription",
+            )
         )
 
     def test_cooldown_normalizes_new_aware_timestamp_with_naive_now(self):

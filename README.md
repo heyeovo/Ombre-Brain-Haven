@@ -272,7 +272,7 @@ Gateway 会把成功完成的 user / assistant 轮次持久保存到 `conversati
 
 cc/selfhost 严格写入可以携带 `request_id`、`expected_last_round_id` 与 `persona_id`：Haven 在同一事务中检查幂等、窗口协作者归属和最后轮次，冲突时拒绝分叉。已提交轮次可通过 `GET /gateway/api/conversation/turn?request_id=...` 读回（含 `raw_json`），用于跨重启、跨设备的持久幂等重放。
 
-CC 主动唤醒复用同一严格写入：可见消息或无正文结果、wake event、下一次 wake、usage、cache refresh 和活动时间与轮次原子提交。正常用户 turn 成功提交时只采样一次持久 conversation silence timer，幂等重试不重抽；下一条用户消息进入模型前会原子取消仍未触发的 timer。该控制面只保存状态，实际 scheduler 回调仍由后续阶段接通。
+CC 主动唤醒复用同一严格写入：可见消息或无正文结果、wake event、下一次 wake、usage、cache refresh 和活动时间与轮次原子提交。正常用户 turn 成功提交时只采样一次持久 conversation silence timer，幂等重试不重抽；下一条用户消息进入模型前会原子取消仍未触发的 timer。Haven Brain 每 30 秒按持久 `due_at` 原子领取到期任务，通过独立 Bearer callback 调用 Dashboard；Dashboard 取得同一 `SessionTurnCoordinator` 的后台执行权后才原子确认 run 并请求模型。Run、lease、重试和滚动 24 小时上限均保存在 `gateway_state.db`，服务重启不会重新采样或重复已落库的 `wake_id`。
 
 同一 Dashboard `session_id` 可在 CC Pro、CC API provider 与 selfhost 之间人工往返。selfhost 继续从 Haven 重放完整角色历史；CC Pro 与每个 API provider 各自拥有独立 Claude 原生 session 和已读游标，不共享凭据或隐藏上下文。进入某条 CC 线路时，Haven 中该线路尚未见过的成功 user/assistant 文字轮次会作为隐藏的 `<上次聊到这里>` 衔接块一次性补入；thinking、图片和文件内容不跨线路补入。只有目标线路成功写回后才推进其游标，不实现额度不足后的自动切换。
 
@@ -353,6 +353,8 @@ Gateway 首次启动时会把镜像内的基础配置初始化为 `/config/confi
 上游模型密钥只注入 Gateway 服务；Brain 与 Dashboard 不得接收 `OMBRE_GATEWAY_UPSTREAM_API_KEY` 或各 provider 的真实 key。多 upstream 应通过各自的 `api_key_env` 引用 Gateway 私密环境项。
 
 该栈现承接 VPS Haven 正式流量；Dashboard 通过 Coolify 内网访问 Brain，公网 Remote MCP 入口由 Brain 的 Coolify 域名与 OAuth 配置保护。Zeabur 数据已落后于 VPS，不能把旧 Zeabur 地址作为直接回切目标。
+
+启用 CC 主动唤醒时，按 [`ENV_VARS.md`](ENV_VARS.md) 同时配置 Brain 的 wake runner URL/共享 token 与 Dashboard 的同名 token；Compose 已把两项透传给 Brain。缺少任一项时 Brain 会保持 scheduler 关闭，不会在内存中创建替代计时器。
 
 若日回顾或 weekly journey 要使用 Claude Pro，Haven Brain 还需要 Dashboard runner 的完整 URL 与共享 token，Dashboard Application 需要同一个 token；变量名和注入边界见 `ENV_VARS.md`。默认 API 选择不需要这两个变量。
 

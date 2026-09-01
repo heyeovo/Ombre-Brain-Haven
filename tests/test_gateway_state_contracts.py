@@ -1103,6 +1103,68 @@ class GatewayStateContractsTest(unittest.TestCase):
         self.assertEqual(raw["agent_wake"]["outcome"], "noop")
         self.assertEqual(raw["next_wake"]["reason"], "稍后再看")
 
+    def test_agent_schedule_is_consumed_once_without_overwriting_a_new_decision(self):
+        store = self.make_store()
+        at = datetime(2026, 8, 31, 13, 0, tzinfo=timezone.utc)
+        schedule = store.get_agent_wake_schedule(
+            profile_id="default", session_id="session-1", lane_id="subscription", create=True
+        )
+        store.patch_agent_wake_schedule(
+            profile_id="default", session_id="session-1", lane_id="subscription",
+            expected_version=schedule["schedule_version"],
+            changes={"agent_wake_enabled": True, "next_agent_wake_at": at.isoformat(), "wake_reason": "旧计划"},
+        )
+        store.commit_conversation_turn(
+            profile_id="default", session_id="session-1", persona_id="ombre",
+            request_id="agent-schedule-consume", expected_last_round_id=0,
+            user_text="", assistant_text="done", source="cc", turn_kind="agent_wake",
+            lane_id="subscription",
+            agent_wake_update={
+                "model_activity_at": at.isoformat(), "wake_cause": "agent_schedule",
+                "agent_wake": {"wake_id": "agent-schedule-consume", "cause": "agent_schedule", "at": at.isoformat()},
+                "wake_decision": {"action": "schedule", "at": (at + timedelta(minutes=20)).isoformat(), "reason": "新计划"},
+            },
+            created_at=at + timedelta(seconds=2),
+        )
+        updated = store.get_agent_wake_schedule(
+            profile_id="default", session_id="session-1", lane_id="subscription"
+        )
+        self.assertEqual(updated["next_agent_wake_at"], (at + timedelta(minutes=20)).isoformat(timespec="seconds"))
+        self.assertEqual(updated["wake_reason"], "新计划")
+
+    def test_silence_wake_never_samples_a_followup_silence_timer(self):
+        store = self.make_store()
+        started = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc)
+        user = store.commit_conversation_turn(
+            profile_id="default", session_id="session-1", persona_id="ombre",
+            request_id="silence-source", expected_last_round_id=0,
+            user_text="hello", assistant_text="reply", source="cc", turn_kind="user",
+            lane_id="subscription",
+            agent_wake_update={"model_activity_at": started.isoformat(), "sample_silence": True},
+            created_at=started,
+        )
+        schedule = store.get_agent_wake_schedule(
+            profile_id="default", session_id="session-1", lane_id="subscription"
+        )
+        silence_at = schedule["conversation_silence_check_at"]
+        store.commit_conversation_turn(
+            profile_id="default", session_id="session-1", persona_id="ombre",
+            request_id="silence-wake", expected_last_round_id=1,
+            user_text="", assistant_text="要继续吗？", source="cc", turn_kind="agent_wake",
+            lane_id="subscription",
+            agent_wake_update={
+                "model_activity_at": silence_at, "wake_cause": "conversation_silence",
+                "agent_wake": {"wake_id": "silence-wake", "cause": "conversation_silence", "at": silence_at},
+            },
+            created_at=datetime.fromisoformat(silence_at) + timedelta(seconds=1),
+        )
+        updated = store.get_agent_wake_schedule(
+            profile_id="default", session_id="session-1", lane_id="subscription"
+        )
+        self.assertGreater(user["turn"]["id"], 0)
+        self.assertEqual(updated["conversation_silence_check_at"], "")
+        self.assertEqual(updated["silence_source_turn_id"], 0)
+
     def test_cooldown_normalizes_new_aware_timestamp_with_naive_now(self):
         store = self.make_store()
         store.record_success(

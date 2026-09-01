@@ -144,6 +144,8 @@ from automation_scheduler import (
     schedule_payload as automation_schedule_payload,
 )
 from automation_executor import AutomationExecutor
+from agent_wake_scheduler import AgentWakeScheduler
+from agent_wake_store import AgentWakeStore
 from journey_weekly_engine import (
     TASK_TYPE as WEEKLY_JOURNEY_TASK_TYPE,
     WEEKLY_JOURNEY_HARD_CONSTRAINTS,
@@ -16690,6 +16692,37 @@ if __name__ == "__main__":
         ast = threading.Thread(target=_start_automation_scheduler, daemon=True)
         ast.start()
         logger.info("Persistent automation scheduler enabled / 持久自动化定时器已启用")
+
+        wake_runner_url = os.environ.get("OMBRE_AGENT_WAKE_RUNNER_URL", "").strip()
+        wake_runner_token = os.environ.get("OMBRE_AGENT_WAKE_RUNNER_TOKEN", "").strip()
+        if wake_runner_url and wake_runner_token:
+            async def _agent_wake_schedule_loop():
+                await asyncio.sleep(30)
+                owner = f"agent-wake-scheduler:{os.getpid()}:{threading.get_ident()}"
+                scheduler = AgentWakeScheduler(
+                    AgentWakeStore(os.path.join(config["buckets_dir"], "gateway_state.db")),
+                    runner_url=wake_runner_url,
+                    token=wake_runner_token,
+                    owner=owner,
+                )
+                while True:
+                    try:
+                        result = await scheduler.run_once()
+                        if result.get("status") != "idle":
+                            logger.info("Agent wake scheduler result / 主动唤醒调度结果: %s", result)
+                    except Exception as e:
+                        logger.warning("Agent wake scheduler failed / 主动唤醒调度失败: %s", e)
+                    await asyncio.sleep(30)
+
+            def _start_agent_wake_scheduler():
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(_agent_wake_schedule_loop())
+
+            awt = threading.Thread(target=_start_agent_wake_scheduler, daemon=True)
+            awt.start()
+            logger.info("Persistent agent wake scheduler enabled / 主动唤醒持久调度已启用")
+        elif wake_runner_url or wake_runner_token:
+            logger.warning("Agent wake scheduler disabled: runner URL/token must both be configured")
 
         async def _portrait_loop():
             await asyncio.sleep(25)

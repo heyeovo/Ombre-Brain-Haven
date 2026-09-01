@@ -12,6 +12,7 @@ from typing import Any
 CACHE_STATES = {"unarmed", "warm", "cooling", "cold"}
 RUN_STATUSES = {"claimed", "running", "completed", "deferred", "failed", "superseded"}
 TERMINAL_RUN_STATUSES = {"completed", "deferred", "failed", "superseded"}
+MAX_CONSECUTIVE_FAILURES = 5
 
 
 def _utc_now() -> datetime:
@@ -79,6 +80,7 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
             schedule_version INTEGER NOT NULL DEFAULT 1,
             lease_owner TEXT NOT NULL DEFAULT '',
             lease_until TEXT NOT NULL DEFAULT '',
+            retry_at TEXT NOT NULL DEFAULT '',
             background_turn_limit INTEGER NOT NULL DEFAULT 48,
             agent_wake_min_minutes INTEGER NOT NULL DEFAULT 10,
             silence_min_minutes INTEGER NOT NULL DEFAULT 8,
@@ -117,6 +119,7 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
             "schedule_version": "INTEGER NOT NULL DEFAULT 1",
             "lease_owner": "TEXT NOT NULL DEFAULT ''",
             "lease_until": "TEXT NOT NULL DEFAULT ''",
+            "retry_at": "TEXT NOT NULL DEFAULT ''",
             "background_turn_limit": "INTEGER NOT NULL DEFAULT 48",
             "agent_wake_min_minutes": "INTEGER NOT NULL DEFAULT 10",
             "silence_min_minutes": "INTEGER NOT NULL DEFAULT 8",
@@ -223,6 +226,7 @@ class AgentWakeStore:
         "next_agent_wake_at",
         "conversation_silence_check_at",
         "cache_keepalive_deadline",
+        "retry_at",
         "gc_eligible_at",
     }
     _WRITABLE_FIELDS = _BOOLEAN_FIELDS | _TIMESTAMP_FIELDS | {
@@ -338,6 +342,7 @@ class AgentWakeStore:
             "silence_max_minutes": 25,
             "consecutive_failures": 0,
             "last_error": "",
+            "retry_at": "",
             "gc_eligible_at": "",
         }
         defaults.update(self._normalized_changes(initial))
@@ -355,12 +360,12 @@ class AgentWakeStore:
                      wake_reason, conversation_silence_check_at,
                      silence_source_turn_id, silence_policy_version,
                      cache_keepalive_deadline, due_at, cache_state,
-                     schedule_version, lease_owner, lease_until,
+                     schedule_version, lease_owner, lease_until, retry_at,
                      background_turn_limit, agent_wake_min_minutes,
                      silence_min_minutes, silence_max_minutes,
                      consecutive_failures, last_error,
                      gc_eligible_at, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         profile, session, lane,
@@ -376,7 +381,7 @@ class AgentWakeStore:
                         defaults["silence_source_turn_id"],
                         defaults["silence_policy_version"],
                         defaults["cache_keepalive_deadline"], due_at,
-                        defaults["cache_state"], defaults["background_turn_limit"],
+                        defaults["cache_state"], defaults["retry_at"], defaults["background_turn_limit"],
                         defaults["agent_wake_min_minutes"],
                         defaults["silence_min_minutes"], defaults["silence_max_minutes"],
                         defaults["consecutive_failures"], defaults["last_error"],
@@ -604,15 +609,45 @@ class AgentWakeStore:
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            inactive_before = _iso(
+                now.astimezone(timezone.utc) - timedelta(hours=24), allow_empty=False
+            )
+            inactive_rows = conn.execute(
+                """
+                SELECT * FROM agent_wake_schedules
+                WHERE keepalive_enabled = 1 AND keepalive_paused_until_user = 0
+                  AND last_user_activity_at != '' AND last_user_activity_at <= ?
+                """,
+                (inactive_before,),
+            ).fetchall()
+            for inactive in inactive_rows:
+                values = {**dict(inactive), "keepalive_paused_until_user": 1}
+                conn.execute(
+                    """
+                    UPDATE agent_wake_schedules
+                    SET keepalive_paused_until_user = 1, cache_state = 'cooling', due_at = ?,
+                        schedule_version = schedule_version + 1,
+                        lease_owner = '', lease_until = '', updated_at = ?
+                    WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+                      AND schedule_version = ?
+                    """,
+                    (
+                        self._computed_due_at(values), now_iso,
+                        inactive["profile_id"], inactive["session_id"], inactive["lane_id"],
+                        inactive["schedule_version"],
+                    ),
+                )
             row = conn.execute(
                 """
                 SELECT * FROM agent_wake_schedules
                 WHERE due_at != '' AND due_at <= ?
+                  AND consecutive_failures < ?
+                  AND (retry_at = '' OR retry_at <= ?)
                   AND (lease_owner = '' OR lease_until = '' OR lease_until <= ?)
                 ORDER BY due_at, profile_id, session_id, lane_id
                 LIMIT 1
                 """,
-                (now_iso, now_iso),
+                (now_iso, MAX_CONSECUTIVE_FAILURES, now_iso, now_iso),
             ).fetchone()
             if row is None:
                 conn.commit()
@@ -670,7 +705,8 @@ class AgentWakeStore:
                 conn.execute(
                     """
                     UPDATE agent_wake_runs
-                    SET lease_owner = ?, updated_at = ? WHERE wake_id = ?
+                    SET status = 'claimed', lease_owner = ?, completed_at = '', error = '', updated_at = ?
+                    WHERE wake_id = ?
                     """,
                     (safe_owner, now_iso, run["wake_id"]),
                 )
@@ -702,8 +738,20 @@ class AgentWakeStore:
         finally:
             conn.close()
 
-    def mark_run_running(self, *, wake_id: str, owner: str) -> dict[str, Any]:
+    def begin_run(
+        self,
+        *,
+        wake_id: str,
+        owner: str,
+        expected_profile_id: str = "",
+        expected_session_id: str = "",
+        expected_lane_id: str = "",
+        expected_schedule_version: int | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
         safe_owner = str(owner or "").strip()
+        now_dt = (now or _utc_now()).astimezone(timezone.utc)
+        now_iso = _iso(now_dt, allow_empty=False)
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -712,9 +760,21 @@ class AgentWakeStore:
             ).fetchone()
             if run is None:
                 raise KeyError("agent wake run not found")
+            scope_matches = (
+                (not expected_profile_id or str(run["profile_id"]) == str(expected_profile_id))
+                and (not expected_session_id or str(run["session_id"]) == str(expected_session_id))
+                and (not expected_lane_id or str(run["lane_id"]) == str(expected_lane_id))
+                and (
+                    expected_schedule_version is None
+                    or int(run["schedule_version"] or 0) == int(expected_schedule_version)
+                )
+            )
+            if not scope_matches:
+                conn.commit()
+                return {"status": "scope_mismatch", "run": self._run_payload(run)}
             schedule = conn.execute(
                 """
-                SELECT schedule_version, lease_owner FROM agent_wake_schedules
+                SELECT * FROM agent_wake_schedules
                 WHERE profile_id = ? AND session_id = ? AND lane_id = ?
                 """,
                 (run["profile_id"], run["session_id"], run["lane_id"]),
@@ -725,7 +785,6 @@ class AgentWakeStore:
                 and str(schedule["lease_owner"] or "") == safe_owner
                 and str(run["lease_owner"] or "") == safe_owner
             )
-            now = _iso(_utc_now(), allow_empty=False)
             if not current:
                 conn.execute(
                     """
@@ -733,27 +792,126 @@ class AgentWakeStore:
                     SET status = 'superseded', completed_at = ?, updated_at = ?
                     WHERE wake_id = ? AND status IN ('claimed', 'running')
                     """,
-                    (now, now, str(wake_id)),
+                    (now_iso, now_iso, str(wake_id)),
                 )
-            else:
-                cursor = conn.execute(
+                conn.commit()
+                return {"status": "superseded", "run": self.get_run(str(wake_id))}
+            if str(run["status"]) == "running":
+                conn.commit()
+                return {"status": "duplicate", "run": self._run_payload(run)}
+            if str(run["status"]) != "claimed":
+                conn.commit()
+                return {"status": str(run["status"]), "run": self._run_payload(run)}
+
+            if str(run["cause"]) == "conversation_silence":
+                source_turn_id = int(schedule["silence_source_turn_id"] or 0)
+                source = conn.execute(
+                    """
+                    SELECT id FROM conversation_turns
+                    WHERE id = ? AND profile_id = ? AND session_id = ? AND turn_kind = 'user'
+                    """,
+                    (source_turn_id, run["profile_id"], run["session_id"]),
+                ).fetchone()
+                later_user = conn.execute(
+                    """
+                    SELECT 1 FROM conversation_turns
+                    WHERE profile_id = ? AND session_id = ? AND turn_kind = 'user' AND id > ?
+                    LIMIT 1
+                    """,
+                    (run["profile_id"], run["session_id"], source_turn_id),
+                ).fetchone()
+                valid_silence = (
+                    source is not None
+                    and later_user is None
+                    and source_turn_id > 0
+                    and str(schedule["conversation_silence_check_at"] or "") == str(run["due_at"])
+                )
+                if not valid_silence:
+                    conn.execute(
+                        """UPDATE agent_wake_runs
+                           SET status = 'superseded', completed_at = ?, error = ?, updated_at = ?
+                           WHERE wake_id = ?""",
+                        (now_iso, "conversation_silence_source_invalid", now_iso, str(wake_id)),
+                    )
+                    conn.execute(
+                        """UPDATE agent_wake_schedules
+                           SET conversation_silence_check_at = '', silence_source_turn_id = 0,
+                               silence_policy_version = '', due_at = ?, lease_owner = '', lease_until = '', updated_at = ?
+                           WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+                             AND schedule_version = ? AND lease_owner = ?""",
+                        (
+                            self._computed_due_at({**dict(schedule), "conversation_silence_check_at": ""}),
+                            now_iso, run["profile_id"], run["session_id"], run["lane_id"],
+                            run["schedule_version"], safe_owner,
+                        ),
+                    )
+                    conn.commit()
+                    return {"status": "superseded", "run": self.get_run(str(wake_id))}
+
+            limit = int(schedule["background_turn_limit"] or 0)
+            window_start = _iso(now_dt - timedelta(hours=24), allow_empty=False)
+            used = int(conn.execute(
+                """
+                SELECT COUNT(*) FROM agent_wake_runs
+                WHERE profile_id = ? AND session_id = ?
+                  AND wake_id != ? AND started_at >= ?
+                  AND status IN ('running', 'completed', 'failed')
+                """,
+                (run["profile_id"], run["session_id"], str(wake_id), window_start),
+            ).fetchone()[0])
+            if limit <= 0 or used >= limit:
+                oldest = conn.execute(
+                    """
+                    SELECT started_at FROM agent_wake_runs
+                    WHERE profile_id = ? AND session_id = ?
+                      AND started_at >= ? AND status IN ('running', 'completed', 'failed')
+                    ORDER BY started_at LIMIT 1
+                    """,
+                    (run["profile_id"], run["session_id"], window_start),
+                ).fetchone()
+                retry_at = _iso(
+                    datetime.fromisoformat(str(oldest["started_at"])) + timedelta(hours=24)
+                    if oldest and str(oldest["started_at"] or "") else now_dt + timedelta(hours=24),
+                    allow_empty=False,
+                )
+                error = f"background_turn_limit_reached:{used}/{limit}"
+                conn.execute(
+                    """UPDATE agent_wake_runs
+                       SET status = 'deferred', completed_at = ?, error = ?, updated_at = ?
+                       WHERE wake_id = ?""",
+                    (now_iso, error, now_iso, str(wake_id)),
+                )
+                conn.execute(
+                    """UPDATE agent_wake_schedules
+                       SET retry_at = ?, last_error = ?, lease_owner = '', lease_until = '', updated_at = ?
+                       WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+                         AND schedule_version = ? AND lease_owner = ?""",
+                    (retry_at, error, now_iso, run["profile_id"], run["session_id"], run["lane_id"], run["schedule_version"], safe_owner),
+                )
+                conn.commit()
+                return {"status": "limit_reached", "run": self.get_run(str(wake_id)), "retry_at": retry_at}
+
+            cursor = conn.execute(
                     """
                     UPDATE agent_wake_runs
                     SET status = 'running', started_at = CASE WHEN started_at = '' THEN ? ELSE started_at END,
                         updated_at = ?
                     WHERE wake_id = ? AND status = 'claimed'
                     """,
-                    (now, now, str(wake_id)),
+                    (now_iso, now_iso, str(wake_id)),
                 )
-                if cursor.rowcount != 1 and str(run["status"]) != "running":
-                    raise ValueError("agent wake run is not claimable")
+            if cursor.rowcount != 1:
+                raise ValueError("agent wake run is not claimable")
             conn.commit()
-            return self.get_run(str(wake_id))
+            return {"status": "started", "run": self.get_run(str(wake_id)), "used": used + 1, "limit": limit}
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
+
+    def mark_run_running(self, *, wake_id: str, owner: str) -> dict[str, Any]:
+        return self.begin_run(wake_id=wake_id, owner=owner)["run"]
 
     def finish_run(
         self,
@@ -790,6 +948,42 @@ class AgentWakeStore:
                 """,
                 (safe_status, now, turn_id, str(error or "")[:1000], now, str(wake_id)),
             )
+            schedule = conn.execute(
+                """SELECT * FROM agent_wake_schedules
+                   WHERE profile_id = ? AND session_id = ? AND lane_id = ?""",
+                (run["profile_id"], run["session_id"], run["lane_id"]),
+            ).fetchone()
+            if schedule is not None and int(schedule["schedule_version"] or 0) == int(run["schedule_version"] or 0):
+                failures = int(schedule["consecutive_failures"] or 0)
+                retry_at = str(schedule["retry_at"] or "")
+                last_error = str(schedule["last_error"] or "")
+                if safe_status == "deferred":
+                    retry_at = _iso(_utc_now() + timedelta(seconds=30), allow_empty=False)
+                elif safe_status == "failed":
+                    failures += 1
+                    last_error = str(error or "agent wake failed")[:1000]
+                    retry_at = _iso(
+                        _utc_now() + timedelta(seconds=min(900, 30 * (2 ** max(0, failures - 1)))),
+                        allow_empty=False,
+                    )
+                elif safe_status == "completed":
+                    failures = 0
+                    retry_at = ""
+                    last_error = ""
+                elif safe_status == "superseded" and str(error or "") == "claimed_lane_is_not_active":
+                    retry_at = ""
+                conn.execute(
+                    """UPDATE agent_wake_schedules
+                       SET retry_at = ?, consecutive_failures = ?, last_error = ?,
+                           due_at = CASE WHEN ? THEN '' ELSE due_at END, updated_at = ?
+                       WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+                         AND schedule_version = ?""",
+                    (
+                        retry_at, failures, last_error,
+                        int(safe_status == "superseded" and str(error or "") == "claimed_lane_is_not_active"),
+                        now, run["profile_id"], run["session_id"], run["lane_id"], run["schedule_version"],
+                    ),
+                )
             conn.execute(
                 """
                 UPDATE agent_wake_schedules

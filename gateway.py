@@ -2945,15 +2945,26 @@ class GatewayService:
             session_id = str(body.get("session_id") or "").strip()
             lane_id = str(body.get("lane_id") or "").strip()
             if request.method == "POST":
-                if body.get("action") != "accept_user":
-                    raise ValueError("unsupported agent wake action")
-                schedule = self.state_store.accept_user_activity_and_cancel_silence(
-                    profile_id=profile_id,
-                    session_id=session_id,
-                    lane_id=lane_id,
-                    user_activity_at=body.get("user_activity_at"),
-                )
-                return JSONResponse({"ok": True, "schedule": schedule})
+                action = str(body.get("action") or "")
+                if action == "accept_user":
+                    schedule = self.state_store.accept_user_activity_and_cancel_silence(
+                        profile_id=profile_id,
+                        session_id=session_id,
+                        lane_id=lane_id,
+                        user_activity_at=body.get("user_activity_at"),
+                    )
+                    return JSONResponse({"ok": True, "schedule": schedule})
+                if action == "begin_run":
+                    result = self.state_store.begin_agent_wake_run(
+                        profile_id=profile_id,
+                        session_id=session_id,
+                        lane_id=lane_id,
+                        schedule_version=int(body.get("schedule_version") or 0),
+                        wake_id=str(body.get("wake_id") or "").strip(),
+                        owner=str(body.get("lease_owner") or "").strip(),
+                    )
+                    return JSONResponse({"ok": True, **result})
+                raise ValueError("unsupported agent wake action")
 
             changes = body.get("changes")
             if not isinstance(changes, dict):
@@ -2981,6 +2992,8 @@ class GatewayService:
             )
         except (TypeError, ValueError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
+        except KeyError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
 
     async def handle_conversation_attachment(self, request: Request) -> Response:
         auth_result = self._authorize(request.headers.get("Authorization", ""))

@@ -29,6 +29,21 @@ class AgentWakeStoreContractsTest(unittest.TestCase):
     def make_store(self) -> AgentWakeStore:
         return AgentWakeStore(str(self.db_path))
 
+    def add_turn_table(self, rows=()):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS conversation_turns (
+                   id INTEGER PRIMARY KEY, profile_id TEXT NOT NULL,
+                   session_id TEXT NOT NULL, turn_kind TEXT NOT NULL
+               )"""
+        )
+        conn.executemany(
+            "INSERT INTO conversation_turns (id, profile_id, session_id, turn_kind) VALUES (?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+        conn.close()
+
     @staticmethod
     def past(minutes: int = 1) -> datetime:
         return datetime.now(timezone.utc) - timedelta(minutes=minutes)
@@ -62,6 +77,7 @@ class AgentWakeStoreContractsTest(unittest.TestCase):
                 "conversation_silence_check_at", "silence_source_turn_id",
                 "silence_policy_version", "agent_wake_min_minutes",
                 "silence_min_minutes", "silence_max_minutes",
+                "retry_at",
             }.issubset(schedule_columns)
         )
         self.assertTrue(
@@ -295,6 +311,137 @@ class AgentWakeStoreContractsTest(unittest.TestCase):
             profile_id="profile-a", session_id="session-a", lane_id="subscription"
         )
         self.assertEqual(schedule["lease_owner"], "")
+
+    def test_begin_run_rejects_duplicate_callback_and_enforces_rolling_limit(self):
+        store = self.make_store()
+        store.create_schedule(
+            profile_id="profile-a", session_id="session-a", lane_id="subscription",
+            keepalive_enabled=True, cache_keepalive_deadline=self.past(), background_turn_limit=1,
+        )
+        claimed = store.claim_due_schedule(owner="owner-a", now=datetime.now(timezone.utc))
+        started = store.begin_run(wake_id=claimed["run"]["wake_id"], owner="owner-a")
+        duplicate = store.begin_run(wake_id=claimed["run"]["wake_id"], owner="owner-a")
+        self.assertEqual(started["status"], "started")
+        self.assertEqual(duplicate["status"], "duplicate")
+        store.finish_run(wake_id=claimed["run"]["wake_id"], owner="owner-a", status="completed")
+
+        second = store.claim_due_schedule(owner="owner-a", now=datetime.now(timezone.utc))
+        limited = store.begin_run(wake_id=second["run"]["wake_id"], owner="owner-a")
+        self.assertEqual(limited["status"], "limit_reached")
+        schedule = store.get_schedule(profile_id="profile-a", session_id="session-a", lane_id="subscription")
+        self.assertIn("background_turn_limit_reached", schedule["last_error"])
+        self.assertTrue(schedule["retry_at"])
+
+    def test_background_limit_counts_all_lanes_in_the_window(self):
+        store = self.make_store()
+        due = self.past()
+        store.create_schedule(
+            profile_id="profile-a", session_id="session-a", lane_id="api:one",
+            keepalive_enabled=True, cache_keepalive_deadline=due, background_turn_limit=1,
+        )
+        first = store.claim_due_schedule(owner="owner-a", now=datetime.now(timezone.utc))
+        store.begin_run(wake_id=first["run"]["wake_id"], owner="owner-a")
+        store.finish_run(wake_id=first["run"]["wake_id"], owner="owner-a", status="completed")
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("UPDATE agent_wake_schedules SET due_at = '' WHERE lane_id = 'api:one'")
+        conn.commit()
+        conn.close()
+        store.create_schedule(
+            profile_id="profile-a", session_id="session-a", lane_id="subscription",
+            keepalive_enabled=True, cache_keepalive_deadline=due, background_turn_limit=1,
+        )
+        second = store.claim_due_schedule(owner="owner-b", now=datetime.now(timezone.utc))
+        limited = store.begin_run(wake_id=second["run"]["wake_id"], owner="owner-b")
+        self.assertEqual(limited["status"], "limit_reached")
+
+    def test_inactive_lane_supersede_makes_schedule_dormant_until_next_turn(self):
+        store = self.make_store()
+        store.create_schedule(
+            profile_id="profile-a", session_id="session-a", lane_id="api:old",
+            keepalive_enabled=True, cache_keepalive_deadline=self.past(),
+        )
+        claimed = store.claim_due_schedule(owner="owner-a", now=datetime.now(timezone.utc))
+        store.finish_run(
+            wake_id=claimed["run"]["wake_id"], owner="owner-a", status="superseded",
+            error="claimed_lane_is_not_active",
+        )
+        schedule = store.get_schedule(profile_id="profile-a", session_id="session-a", lane_id="api:old")
+        self.assertEqual(schedule["due_at"], "")
+        self.assertEqual(store.claim_due_schedule(owner="owner-b", now=datetime.now(timezone.utc)), {})
+
+    def test_begin_scope_mismatch_does_not_consume_the_valid_claim(self):
+        store = self.make_store()
+        store.create_schedule(
+            profile_id="profile-a", session_id="session-a", lane_id="subscription",
+            keepalive_enabled=True, cache_keepalive_deadline=self.past(),
+        )
+        claimed = store.claim_due_schedule(owner="owner-a", now=datetime.now(timezone.utc))
+        mismatch = store.begin_run(
+            wake_id=claimed["run"]["wake_id"], owner="owner-a",
+            expected_profile_id="profile-b", expected_session_id="session-a",
+            expected_lane_id="subscription", expected_schedule_version=1,
+        )
+        self.assertEqual(mismatch["status"], "scope_mismatch")
+        self.assertEqual(store.get_run(claimed["run"]["wake_id"])["status"], "claimed")
+
+    def test_silence_source_is_rechecked_atomically_before_model_start(self):
+        store = self.make_store()
+        self.add_turn_table([
+            (9, "profile-a", "session-a", "user"),
+            (10, "profile-a", "session-a", "user"),
+        ])
+        due = self.past()
+        store.create_schedule(
+            profile_id="profile-a", session_id="session-a", lane_id="subscription",
+            conversation_silence_check_at=due, silence_source_turn_id=9,
+            silence_policy_version="conversation-silence-v1",
+        )
+        claimed = store.claim_due_schedule(owner="owner-a", now=datetime.now(timezone.utc))
+        result = store.begin_run(wake_id=claimed["run"]["wake_id"], owner="owner-a")
+        self.assertEqual(result["status"], "superseded")
+        schedule = store.get_schedule(profile_id="profile-a", session_id="session-a", lane_id="subscription")
+        self.assertEqual(schedule["conversation_silence_check_at"], "")
+
+    def test_failed_runs_persist_backoff_and_pause_after_threshold(self):
+        store = self.make_store()
+        store.create_schedule(
+            profile_id="profile-a", session_id="session-a", lane_id="subscription",
+            keepalive_enabled=True, cache_keepalive_deadline=self.past(), background_turn_limit=48,
+        )
+        for attempt in range(5):
+            conn = sqlite3.connect(self.db_path)
+            conn.execute("UPDATE agent_wake_schedules SET retry_at = ''")
+            conn.commit()
+            conn.close()
+            claimed = store.claim_due_schedule(owner="owner-a", now=datetime.now(timezone.utc))
+            self.assertTrue(claimed, attempt)
+            store.begin_run(wake_id=claimed["run"]["wake_id"], owner="owner-a")
+            store.finish_run(
+                wake_id=claimed["run"]["wake_id"], owner="owner-a",
+                status="failed", error=f"failure-{attempt + 1}",
+            )
+        schedule = store.get_schedule(profile_id="profile-a", session_id="session-a", lane_id="subscription")
+        self.assertEqual(schedule["consecutive_failures"], 5)
+        self.assertEqual(store.claim_due_schedule(owner="owner-b", now=datetime.now(timezone.utc)), {})
+
+    def test_24_hour_user_inactivity_pauses_only_keepalive(self):
+        store = self.make_store()
+        now = datetime.now(timezone.utc)
+        future_agent = now + timedelta(hours=2)
+        store.create_schedule(
+            profile_id="profile-a", session_id="session-a", lane_id="subscription",
+            keepalive_enabled=True, agent_wake_enabled=True,
+            last_user_activity_at=now - timedelta(hours=25),
+            cache_keepalive_deadline=now - timedelta(minutes=1),
+            next_agent_wake_at=future_agent,
+        )
+        self.assertEqual(store.claim_due_schedule(owner="owner-a", now=now), {})
+        schedule = store.get_schedule(profile_id="profile-a", session_id="session-a", lane_id="subscription")
+        self.assertTrue(schedule["keepalive_enabled"])
+        self.assertTrue(schedule["keepalive_paused_until_user"])
+        self.assertEqual(schedule["cache_state"], "cooling")
+        self.assertEqual(schedule["next_agent_wake_at"], future_agent.isoformat(timespec="seconds"))
+        self.assertEqual(schedule["due_at"], future_agent.isoformat(timespec="seconds"))
 
 
 if __name__ == "__main__":

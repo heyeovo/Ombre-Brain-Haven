@@ -41,6 +41,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线 + cc 持久化路由（`Route()` 注册） |
 | `gateway_state.py` | Gateway/cc SQLite 状态：会话原文、窗口闲聊/工作模式、固定日回顾、handoff 与 CC 缓存前缀快照、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与游标、Context GC 配置/历史、桶排除账本；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake 与 silence timer |
 | `agent_wake_store.py` | CC 主动唤醒的 Haven 持久控制面：在 `gateway_state.db` 中维护 profile/session/lane 级 schedule、双开关、cache/agent/silence 时钟、版本 CAS、到期 claim、可恢复 lease 与幂等 wake run；只负责持久契约，不执行模型 turn |
+| `agent_wake_scheduler.py` | CC 主动唤醒的 30 秒持久调度桥：领取 Haven due schedule，以独立 Bearer callback 调用 Dashboard 后台 runner，并把完成、deferred、失败与重试状态写回 wake run |
 | `prompt_store.py` | 四类产品 Prompt 覆盖持久化：按 profile 保存 `analyze`、`merge`、`daily_review`、`weekly_journey` 用户版本、revision 与更新时间；代码默认仍是系统真源 |
 | `automation_store.py` | 通用自动化 SQLite 控制面：持久 schedule、逐任务 API/Pro 选择、实际 execution、run、candidate，兼容旧库重复迁移；候选 revision CAS、批准冻结、执行状态和任务 lease 与普通记忆桶隔离 |
 | `automation_model_runner.py` | 仅为 `daily_review` / `weekly_journey` 按 Haven 持久选择调用既有 API client 或 Dashboard Claude Pro runner；Pro 入口缺失、额度/登录/网络失败均原样失败，不自动 fallback |
@@ -343,7 +344,7 @@ dashboards 的 `/api/gateway/[...path]` 代理到这些路由，Bearer 网关鉴
 
 会话轮次存 `conversation_turns`，窗口状态存 `conversation_sessions`，图片/文件元数据与文件解析正文存 `conversation_attachments`；私有文件位于 `buckets_dir/cc-attachments`。`conversation_turns.turn_kind` 兼容区分 `user` / `agent_wake`，旧行默认 `user`；wake 可保存空 assistant 正文，并在 `raw_json` 记录 wake event、next wake、usage 与版本化 `display_segments`。主动唤醒控制面与会话表共用 `gateway_state.db`：`agent_wake_schedules` 按 `profile_id + session_id + lane_id` 隔离 cache/agent/silence 三类时钟、开关、CAS 版本和 lease，`agent_wake_runs` 以 `wake_id` 保存幂等运行状态；窗口永久删除时只清理同 profile/session 的两类 wake 记录。
 
-阶段 1–3 已完成：Dashboard 从窗口状态恢复最后活跃 CC lane、Persona、冻结 prompt 与 resume id，通过统一协调器串行进入同一个 Agent SDK iterator；成功用户/wake turn 在 Haven 单事务提交消息、活动/cache 时间、turn-local wake 决定和 silence timer。Haven scheduler 回调、30 秒调度、lease 故障验证与后台次数上限执行仍归阶段 4。
+Dashboard 从窗口状态恢复最后活跃 CC lane、Persona、冻结 prompt 与 resume id，通过统一协调器串行进入同一个 Agent SDK iterator；成功用户/wake turn 在 Haven 单事务提交消息、活动/cache 时间、turn-local wake 决定和 silence timer。Haven Brain 每 30 秒按持久 `due_at` 领取任务，Dashboard 取得后台协调器门禁后再原子 begin；旧 version、无效 silence 来源、重复 callback、过期 lease、失败退避、24 小时无用户活动和滚动后台 turn 上限均由持久状态恢复与约束。
 
 其余会话持久化契约：
 

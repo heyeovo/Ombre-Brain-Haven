@@ -9,7 +9,7 @@ import zipfile
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from agent_wake_store import delete_agent_wake_session_records, initialize_agent_wake_schema
+from agent_wake_store import AgentWakeStore, delete_agent_wake_session_records, initialize_agent_wake_schema
 
 
 _LEGACY_SELFHOST_BASE_PROMPT = "\n".join(
@@ -190,6 +190,9 @@ class GatewayStateStore:
                 datetime.fromisoformat(cache_refresh_at) + timedelta(minutes=55)
             )
             values["cache_state"] = "warm"
+        values["retry_at"] = ""
+        values["consecutive_failures"] = 0
+        values["last_error"] = ""
 
         if turn_kind == "user":
             values["last_user_activity_at"] = cls._agent_wake_timestamp(
@@ -211,12 +214,21 @@ class GatewayStateStore:
                 )[:80]
         else:
             values["last_heartbeat_at"] = model_activity_at or now_iso
-            # A consumed silence timer is one-shot. Phase 4 will only call this after
-            # validating the persisted source turn.
-            if str(update.get("wake_cause") or "") == "conversation_silence":
+            wake_cause = str(update.get("wake_cause") or "")
+            wake_event = update.get("agent_wake") if isinstance(update.get("agent_wake"), dict) else {}
+            wake_at = cls._agent_wake_timestamp(wake_event.get("at")) if wake_event.get("at") else ""
+            if wake_cause == "conversation_silence":
                 values["conversation_silence_check_at"] = ""
                 values["silence_source_turn_id"] = 0
                 values["silence_policy_version"] = ""
+            elif wake_cause == "agent_schedule" and wake_at and str(values.get("next_agent_wake_at") or "") == wake_at:
+                values["next_agent_wake_at"] = ""
+                values["wake_reason"] = ""
+            elif wake_cause == "cache_keepalive" and not cache_refresh_at:
+                # A successful model turn without confirmed cache usage must not spin
+                # forever on the already-expired keepalive deadline.
+                values["cache_keepalive_deadline"] = ""
+                values["cache_state"] = "cold"
 
         decision = update.get("wake_decision")
         if isinstance(decision, dict):
@@ -237,7 +249,8 @@ class GatewayStateStore:
                 next_agent_wake_at = ?, wake_reason = ?,
                 conversation_silence_check_at = ?, silence_source_turn_id = ?,
                 silence_policy_version = ?, cache_keepalive_deadline = ?, due_at = ?,
-                cache_state = ?, schedule_version = schedule_version + 1,
+                cache_state = ?, retry_at = '', consecutive_failures = 0, last_error = '',
+                schedule_version = schedule_version + 1,
                 lease_owner = '', lease_until = '', updated_at = ?
             WHERE profile_id = ? AND session_id = ? AND lane_id = ?
             """,
@@ -1912,6 +1925,25 @@ class GatewayStateStore:
         finally:
             conn.close()
 
+    def begin_agent_wake_run(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        lane_id: str,
+        schedule_version: int,
+        wake_id: str,
+        owner: str,
+    ) -> dict[str, Any]:
+        return AgentWakeStore(self.db_path).begin_run(
+            wake_id=wake_id,
+            owner=owner,
+            expected_profile_id=profile_id,
+            expected_session_id=session_id,
+            expected_lane_id=lane_id,
+            expected_schedule_version=schedule_version,
+        )
+
     def patch_agent_wake_schedule(
         self,
         *,
@@ -1979,7 +2011,8 @@ class GatewayStateStore:
                     next_agent_wake_at = ?, wake_reason = ?, agent_wake_min_minutes = ?,
                     silence_min_minutes = ?, silence_max_minutes = ?, background_turn_limit = ?,
                     conversation_silence_check_at = ?, silence_source_turn_id = ?, silence_policy_version = ?,
-                    due_at = ?, schedule_version = schedule_version + 1,
+                    due_at = ?, retry_at = '', consecutive_failures = 0, last_error = '',
+                    schedule_version = schedule_version + 1,
                     lease_owner = '', lease_until = '', updated_at = ?
                 WHERE profile_id = ? AND session_id = ? AND lane_id = ?
                 """,
@@ -2047,6 +2080,7 @@ class GatewayStateStore:
                 SET last_user_activity_at = ?, keepalive_paused_until_user = 0,
                     conversation_silence_check_at = ?, silence_source_turn_id = ?,
                     silence_policy_version = ?, due_at = ?,
+                    retry_at = '', consecutive_failures = 0, last_error = '',
                     schedule_version = schedule_version + 1,
                     lease_owner = '', lease_until = '', updated_at = ?
                 WHERE profile_id = ? AND session_id = ? AND lane_id = ?

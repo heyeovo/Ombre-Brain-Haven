@@ -74,6 +74,7 @@ class AgentWakeStoreContractsTest(unittest.TestCase):
             {
                 "profile_id", "session_id", "lane_id", "due_at",
                 "schedule_version", "lease_until", "background_turn_limit",
+                "conversation_silence_enabled",
                 "conversation_silence_check_at", "silence_source_turn_id",
                 "silence_policy_version", "agent_wake_min_minutes",
                 "silence_min_minutes", "silence_max_minutes",
@@ -94,6 +95,7 @@ class AgentWakeStoreContractsTest(unittest.TestCase):
             session_id="session-a",
             lane_id="subscription",
             keepalive_enabled=True,
+            conversation_silence_enabled=True,
             cache_keepalive_deadline=cache_due,
             conversation_silence_check_at=silence_due,
             silence_source_turn_id=9,
@@ -103,6 +105,55 @@ class AgentWakeStoreContractsTest(unittest.TestCase):
         claimed = store.claim_due_schedule(owner="owner-a", now=datetime.now(timezone.utc))
         self.assertEqual(claimed["run"]["cause"], "conversation_silence")
         self.assertEqual(claimed["schedule"]["silence_source_turn_id"], 9)
+
+    def test_disabling_silence_clears_timer_and_invalidates_old_schedule_version(self):
+        store = self.make_store()
+        due = self.past()
+        schedule, _ = store.create_schedule(
+            profile_id="profile-a", session_id="session-a", lane_id="subscription",
+            conversation_silence_enabled=True,
+            conversation_silence_check_at=due, silence_source_turn_id=9,
+            silence_policy_version="conversation-silence-v1",
+        )
+        claimed = store.claim_due_schedule(owner="owner-a", now=datetime.now(timezone.utc))
+        disabled = store.update_schedule(
+            profile_id="profile-a", session_id="session-a", lane_id="subscription",
+            expected_version=schedule["schedule_version"],
+            conversation_silence_enabled=False,
+        )
+        self.assertFalse(disabled["conversation_silence_enabled"])
+        self.assertEqual(disabled["conversation_silence_check_at"], "")
+        self.assertEqual(disabled["silence_source_turn_id"], 0)
+        result = store.begin_run(wake_id=claimed["run"]["wake_id"], owner="owner-a")
+        self.assertEqual(result["status"], "superseded")
+
+    def test_schema_upgrade_cancels_a_legacy_timer_defaulted_to_off(self):
+        store = self.make_store()
+        due = self.past()
+        schedule, _ = store.create_schedule(
+            profile_id="profile-a", session_id="session-a", lane_id="subscription",
+            conversation_silence_enabled=True,
+            conversation_silence_check_at=due, silence_source_turn_id=9,
+            silence_policy_version="conversation-silence-v1",
+        )
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            """UPDATE agent_wake_schedules
+               SET conversation_silence_enabled = 0
+               WHERE profile_id = 'profile-a' AND session_id = 'session-a'
+                 AND lane_id = 'subscription'"""
+        )
+        conn.commit()
+        conn.close()
+
+        AgentWakeStore(str(self.db_path))
+        upgraded = store.get_schedule(
+            profile_id="profile-a", session_id="session-a", lane_id="subscription"
+        )
+        self.assertFalse(upgraded["conversation_silence_enabled"])
+        self.assertEqual(upgraded["conversation_silence_check_at"], "")
+        self.assertEqual(upgraded["silence_source_turn_id"], 0)
+        self.assertEqual(upgraded["schedule_version"], schedule["schedule_version"] + 1)
 
     def test_schedule_crud_derives_due_at_and_uses_version_cas(self):
         store = self.make_store()
@@ -393,6 +444,7 @@ class AgentWakeStoreContractsTest(unittest.TestCase):
         due = self.past()
         store.create_schedule(
             profile_id="profile-a", session_id="session-a", lane_id="subscription",
+            conversation_silence_enabled=True,
             conversation_silence_check_at=due, silence_source_turn_id=9,
             silence_policy_version="conversation-silence-v1",
         )

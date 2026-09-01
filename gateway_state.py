@@ -111,7 +111,10 @@ class GatewayStateStore:
             candidates.append(str(values["cache_keepalive_deadline"]))
         if bool(values.get("agent_wake_enabled")) and str(values.get("next_agent_wake_at") or ""):
             candidates.append(str(values["next_agent_wake_at"]))
-        if str(values.get("conversation_silence_check_at") or ""):
+        if (
+            bool(values.get("conversation_silence_enabled"))
+            and str(values.get("conversation_silence_check_at") or "")
+        ):
             candidates.append(str(values["conversation_silence_check_at"]))
         return min(candidates) if candidates else ""
 
@@ -120,7 +123,10 @@ class GatewayStateStore:
         if row is None:
             return {}
         payload = dict(row)
-        for key in ("keepalive_enabled", "keepalive_paused_until_user", "agent_wake_enabled"):
+        for key in (
+            "keepalive_enabled", "keepalive_paused_until_user", "agent_wake_enabled",
+            "conversation_silence_enabled",
+        ):
             payload[key] = bool(payload.get(key))
         for key, fallback in (
             ("schedule_version", 0), ("background_turn_limit", 48),
@@ -199,7 +205,7 @@ class GatewayStateStore:
                 update.get("user_activity_at") or model_activity_at or now_iso
             )
             values["keepalive_paused_until_user"] = 0
-            if update.get("sample_silence") is True:
+            if bool(values.get("conversation_silence_enabled")) and update.get("sample_silence") is True:
                 minimum = max(1, min(1440, int(values.get("silence_min_minutes") or 8)))
                 maximum = max(minimum, min(1440, int(values.get("silence_max_minutes") or 25)))
                 mode = min(maximum, max(minimum, 14))
@@ -1960,6 +1966,7 @@ class GatewayStateStore:
             raise ValueError("session_id and lane_id are required")
         allowed = {
             "keepalive_enabled", "keepalive_paused_until_user", "agent_wake_enabled",
+            "conversation_silence_enabled",
             "next_agent_wake_at", "wake_reason", "agent_wake_min_minutes",
             "silence_min_minutes", "silence_max_minutes", "background_turn_limit",
             "conversation_silence_check_at", "silence_source_turn_id", "silence_policy_version",
@@ -1979,7 +1986,10 @@ class GatewayStateStore:
                 raise SessionStateConflictError(int(expected_version), actual_version)
             values = dict(row)
             for key, value in changes.items():
-                if key in {"keepalive_enabled", "keepalive_paused_until_user", "agent_wake_enabled"}:
+                if key in {
+                    "keepalive_enabled", "keepalive_paused_until_user", "agent_wake_enabled",
+                    "conversation_silence_enabled",
+                }:
                     values[key] = int(bool(value))
                 elif key in {"next_agent_wake_at", "conversation_silence_check_at"}:
                     values[key] = self._agent_wake_timestamp(value)
@@ -2001,6 +2011,10 @@ class GatewayStateStore:
                     if key == "silence_source_turn_id" and number < 0:
                         raise ValueError("silence_source_turn_id cannot be negative")
                     values[key] = number
+            if not bool(values.get("conversation_silence_enabled")):
+                values["conversation_silence_check_at"] = ""
+                values["silence_source_turn_id"] = 0
+                values["silence_policy_version"] = ""
             if int(values.get("silence_min_minutes") or 8) > int(values.get("silence_max_minutes") or 25):
                 raise ValueError("silence_min_minutes cannot exceed silence_max_minutes")
             values["due_at"] = self._agent_wake_due_at(values)
@@ -2008,6 +2022,7 @@ class GatewayStateStore:
                 """
                 UPDATE agent_wake_schedules
                 SET keepalive_enabled = ?, keepalive_paused_until_user = ?, agent_wake_enabled = ?,
+                    conversation_silence_enabled = ?,
                     next_agent_wake_at = ?, wake_reason = ?, agent_wake_min_minutes = ?,
                     silence_min_minutes = ?, silence_max_minutes = ?, background_turn_limit = ?,
                     conversation_silence_check_at = ?, silence_source_turn_id = ?, silence_policy_version = ?,
@@ -2020,6 +2035,7 @@ class GatewayStateStore:
                     int(bool(values.get("keepalive_enabled"))),
                     int(bool(values.get("keepalive_paused_until_user"))),
                     int(bool(values.get("agent_wake_enabled"))),
+                    int(bool(values.get("conversation_silence_enabled"))),
                     str(values.get("next_agent_wake_at") or ""), str(values.get("wake_reason") or ""),
                     int(values.get("agent_wake_min_minutes") or 10),
                     int(values.get("silence_min_minutes") or 8), int(values.get("silence_max_minutes") or 25),

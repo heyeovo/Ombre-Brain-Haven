@@ -65,6 +65,7 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
             keepalive_enabled INTEGER NOT NULL DEFAULT 0,
             keepalive_paused_until_user INTEGER NOT NULL DEFAULT 0,
             agent_wake_enabled INTEGER NOT NULL DEFAULT 0,
+            conversation_silence_enabled INTEGER NOT NULL DEFAULT 0,
             last_user_activity_at TEXT NOT NULL DEFAULT '',
             last_model_activity_at TEXT NOT NULL DEFAULT '',
             last_cache_refresh_at TEXT NOT NULL DEFAULT '',
@@ -104,6 +105,7 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
             "keepalive_enabled": "INTEGER NOT NULL DEFAULT 0",
             "keepalive_paused_until_user": "INTEGER NOT NULL DEFAULT 0",
             "agent_wake_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "conversation_silence_enabled": "INTEGER NOT NULL DEFAULT 0",
             "last_user_activity_at": "TEXT NOT NULL DEFAULT ''",
             "last_model_activity_at": "TEXT NOT NULL DEFAULT ''",
             "last_cache_refresh_at": "TEXT NOT NULL DEFAULT ''",
@@ -131,6 +133,38 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
             "updated_at": "TEXT NOT NULL DEFAULT ''",
         },
     )
+    # The switch was introduced after silence timers already existed. Defaulting the
+    # new column off must also invalidate those persisted callbacks immediately.
+    stale_silence_rows = conn.execute(
+        """SELECT * FROM agent_wake_schedules
+           WHERE conversation_silence_enabled = 0
+             AND conversation_silence_check_at != ''"""
+    ).fetchall()
+    for row in stale_silence_rows:
+        values = dict(row)
+        values["conversation_silence_check_at"] = ""
+        candidates: list[str] = []
+        if (
+            bool(values.get("keepalive_enabled"))
+            and not bool(values.get("keepalive_paused_until_user"))
+            and str(values.get("cache_keepalive_deadline") or "")
+        ):
+            candidates.append(str(values["cache_keepalive_deadline"]))
+        if bool(values.get("agent_wake_enabled")) and str(values.get("next_agent_wake_at") or ""):
+            candidates.append(str(values["next_agent_wake_at"]))
+        conn.execute(
+            """UPDATE agent_wake_schedules
+               SET conversation_silence_check_at = '', silence_source_turn_id = 0,
+                   silence_policy_version = '', due_at = ?,
+                   schedule_version = schedule_version + 1,
+                   lease_owner = '', lease_until = '', updated_at = ?
+               WHERE profile_id = ? AND session_id = ? AND lane_id = ?""",
+            (
+                min(candidates) if candidates else "",
+                _iso(_utc_now(), allow_empty=False),
+                row["profile_id"], row["session_id"], row["lane_id"],
+            ),
+        )
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_wake_schedule_scope
@@ -217,6 +251,7 @@ class AgentWakeStore:
         "keepalive_enabled",
         "keepalive_paused_until_user",
         "agent_wake_enabled",
+        "conversation_silence_enabled",
     }
     _TIMESTAMP_FIELDS = {
         "last_user_activity_at",
@@ -279,7 +314,10 @@ class AgentWakeStore:
             candidates.append(str(values["cache_keepalive_deadline"]))
         if bool(values.get("agent_wake_enabled")) and str(values.get("next_agent_wake_at") or ""):
             candidates.append(str(values["next_agent_wake_at"]))
-        if str(values.get("conversation_silence_check_at") or ""):
+        if (
+            bool(values.get("conversation_silence_enabled"))
+            and str(values.get("conversation_silence_check_at") or "")
+        ):
             candidates.append(str(values["conversation_silence_check_at"]))
         return min(candidates) if candidates else ""
 
@@ -325,6 +363,7 @@ class AgentWakeStore:
             "keepalive_enabled": False,
             "keepalive_paused_until_user": False,
             "agent_wake_enabled": False,
+            "conversation_silence_enabled": False,
             "last_user_activity_at": "",
             "last_model_activity_at": "",
             "last_cache_refresh_at": "",
@@ -346,6 +385,10 @@ class AgentWakeStore:
             "gc_eligible_at": "",
         }
         defaults.update(self._normalized_changes(initial))
+        if not bool(defaults.get("conversation_silence_enabled")):
+            defaults["conversation_silence_check_at"] = ""
+            defaults["silence_source_turn_id"] = 0
+            defaults["silence_policy_version"] = ""
         due_at = self._computed_due_at(defaults)
         conn = self._connect()
         try:
@@ -354,7 +397,7 @@ class AgentWakeStore:
                     """
                     INSERT OR IGNORE INTO agent_wake_schedules
                     (profile_id, session_id, lane_id, keepalive_enabled,
-                     keepalive_paused_until_user, agent_wake_enabled,
+                     keepalive_paused_until_user, agent_wake_enabled, conversation_silence_enabled,
                      last_user_activity_at, last_model_activity_at,
                      last_cache_refresh_at, last_heartbeat_at, next_agent_wake_at,
                      wake_reason, conversation_silence_check_at,
@@ -365,13 +408,14 @@ class AgentWakeStore:
                      silence_min_minutes, silence_max_minutes,
                      consecutive_failures, last_error,
                      gc_eligible_at, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         profile, session, lane,
                         int(defaults["keepalive_enabled"]),
                         int(defaults["keepalive_paused_until_user"]),
                         int(defaults["agent_wake_enabled"]),
+                        int(defaults["conversation_silence_enabled"]),
                         defaults["last_user_activity_at"],
                         defaults["last_model_activity_at"],
                         defaults["last_cache_refresh_at"],
@@ -506,6 +550,15 @@ class AgentWakeStore:
                 raise AgentWakeConflictError(int(expected_version), actual_version)
             values = dict(row)
             values.update(normalized)
+            if not bool(values.get("conversation_silence_enabled")):
+                values["conversation_silence_check_at"] = ""
+                values["silence_source_turn_id"] = 0
+                values["silence_policy_version"] = ""
+                normalized.update({
+                    "conversation_silence_check_at": "",
+                    "silence_source_turn_id": 0,
+                    "silence_policy_version": "",
+                })
             values["due_at"] = self._computed_due_at(values)
             assignments = [f"{key} = ?" for key in normalized]
             params = [int(value) if key in self._BOOLEAN_FIELDS else value for key, value in normalized.items()]
@@ -824,6 +877,7 @@ class AgentWakeStore:
                     source is not None
                     and later_user is None
                     and source_turn_id > 0
+                    and bool(schedule["conversation_silence_enabled"])
                     and str(schedule["conversation_silence_check_at"] or "") == str(run["due_at"])
                 )
                 if not valid_silence:

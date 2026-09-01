@@ -939,7 +939,11 @@ class GatewayStateContractsTest(unittest.TestCase):
             session_id="session-1",
             lane_id="subscription",
             expected_version=schedule["schedule_version"],
-            changes={"keepalive_enabled": True, "agent_wake_enabled": True},
+            changes={
+                "keepalive_enabled": True,
+                "agent_wake_enabled": True,
+                "conversation_silence_enabled": True,
+            },
         )
         started = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc)
         payload = dict(
@@ -987,6 +991,44 @@ class GatewayStateContractsTest(unittest.TestCase):
         self.assertTrue(replay["idempotent_replay"])
         self.assertEqual(replayed["schedule_version"], version)
         self.assertEqual(replayed["conversation_silence_check_at"], persisted["conversation_silence_check_at"])
+
+    def test_user_turn_does_not_sample_silence_while_switch_is_off(self):
+        store = self.make_store()
+        started = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc)
+        store.commit_conversation_turn(
+            profile_id="default", session_id="session-1", persona_id="ombre",
+            request_id="silence-disabled", expected_last_round_id=0,
+            user_text="hello", assistant_text="reply", source="cc", turn_kind="user",
+            lane_id="subscription",
+            agent_wake_update={"model_activity_at": started.isoformat(), "sample_silence": True},
+            created_at=started,
+        )
+        schedule = store.get_agent_wake_schedule(
+            profile_id="default", session_id="session-1", lane_id="subscription"
+        )
+        self.assertFalse(schedule["conversation_silence_enabled"])
+        self.assertEqual(schedule["conversation_silence_check_at"], "")
+        self.assertEqual(schedule["silence_source_turn_id"], 0)
+
+        enabled = store.patch_agent_wake_schedule(
+            profile_id="default", session_id="session-1", lane_id="subscription",
+            expected_version=schedule["schedule_version"],
+            changes={"conversation_silence_enabled": True},
+        )
+        self.assertEqual(enabled["conversation_silence_check_at"], "")
+        store.commit_conversation_turn(
+            profile_id="default", session_id="session-1", persona_id="ombre",
+            request_id="silence-enabled-next-turn", expected_last_round_id=1,
+            user_text="again", assistant_text="reply", source="cc", turn_kind="user",
+            lane_id="subscription",
+            agent_wake_update={"model_activity_at": started.isoformat(), "sample_silence": True},
+            created_at=started + timedelta(minutes=1),
+        )
+        sampled = store.get_agent_wake_schedule(
+            profile_id="default", session_id="session-1", lane_id="subscription"
+        )
+        self.assertTrue(sampled["conversation_silence_check_at"])
+        self.assertGreater(sampled["silence_source_turn_id"], 0)
 
     def test_user_arrival_cancels_only_untriggered_silence_timer(self):
         store = self.make_store()
@@ -1037,6 +1079,7 @@ class GatewayStateContractsTest(unittest.TestCase):
             changes={
                 "keepalive_enabled": True,
                 "agent_wake_enabled": True,
+                "conversation_silence_enabled": True,
                 "conversation_silence_check_at": (
                     datetime.now(timezone.utc) + timedelta(minutes=10)
                 ).isoformat(timespec="seconds"),
@@ -1052,6 +1095,7 @@ class GatewayStateContractsTest(unittest.TestCase):
             changes={
                 "keepalive_enabled": False,
                 "agent_wake_enabled": False,
+                "conversation_silence_enabled": False,
                 "next_agent_wake_at": "",
                 "wake_reason": "",
                 "conversation_silence_check_at": "",
@@ -1061,6 +1105,7 @@ class GatewayStateContractsTest(unittest.TestCase):
         )
         self.assertFalse(stopped["keepalive_enabled"])
         self.assertFalse(stopped["agent_wake_enabled"])
+        self.assertFalse(stopped["conversation_silence_enabled"])
         self.assertEqual(stopped["conversation_silence_check_at"], "")
         self.assertEqual(stopped["silence_source_turn_id"], 0)
         self.assertEqual(stopped["due_at"], "")
@@ -1135,6 +1180,14 @@ class GatewayStateContractsTest(unittest.TestCase):
     def test_silence_wake_never_samples_a_followup_silence_timer(self):
         store = self.make_store()
         started = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc)
+        schedule = store.get_agent_wake_schedule(
+            profile_id="default", session_id="session-1", lane_id="subscription", create=True
+        )
+        store.patch_agent_wake_schedule(
+            profile_id="default", session_id="session-1", lane_id="subscription",
+            expected_version=schedule["schedule_version"],
+            changes={"conversation_silence_enabled": True},
+        )
         user = store.commit_conversation_turn(
             profile_id="default", session_id="session-1", persona_id="ombre",
             request_id="silence-source", expected_last_round_id=0,

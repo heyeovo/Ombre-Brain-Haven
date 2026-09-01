@@ -272,6 +272,8 @@ Gateway 会把成功完成的 user / assistant 轮次持久保存到 `conversati
 
 cc/selfhost 严格写入可以携带 `request_id`、`expected_last_round_id` 与 `persona_id`：Haven 在同一事务中检查幂等、窗口协作者归属和最后轮次，冲突时拒绝分叉。已提交轮次可通过 `GET /gateway/api/conversation/turn?request_id=...` 读回（含 `raw_json`），用于跨重启、跨设备的持久幂等重放。
 
+CC 主动唤醒复用同一严格写入：可见消息或无正文结果、wake event、下一次 wake、usage、cache refresh 和活动时间与轮次原子提交。正常用户 turn 成功提交时只采样一次持久 conversation silence timer，幂等重试不重抽；下一条用户消息进入模型前会原子取消仍未触发的 timer。该控制面只保存状态，实际 scheduler 回调仍由后续阶段接通。
+
 同一 Dashboard `session_id` 可在 CC Pro、CC API provider 与 selfhost 之间人工往返。selfhost 继续从 Haven 重放完整角色历史；CC Pro 与每个 API provider 各自拥有独立 Claude 原生 session 和已读游标，不共享凭据或隐藏上下文。进入某条 CC 线路时，Haven 中该线路尚未见过的成功 user/assistant 文字轮次会作为隐藏的 `<上次聊到这里>` 衔接块一次性补入；thinking、图片和文件内容不跨线路补入。只有目标线路成功写回后才推进其游标，不实现额度不足后的自动切换。
 
 cc 协作者可分别维护基础 system 提示词和长期提示词模块：基础提示词存于 `cc_personas.base_prompt`，由订阅、API 中转站和 selfhost 共用，默认采用原 cc 闲聊模式提示词；cc 闲聊不再另加写死副本，工作模式则在 Claude Code preset 后追加同一份配置。模块有独立名称、正文、顺序和默认启停，组装时以 `【模块名称】` 标明边界；旧的单块提示词会兼容为一个默认开启模块。每个聊天窗口只持久保存与协作者默认不同的启停覆盖；两种执行器都在下一轮按当前有效模块组装 system。selfhost 每轮直接重组，Claude Code 链路在组合变化时用原 SDK session 重建空闲 query，因此保留聊天上下文，同时让新提示词生效。

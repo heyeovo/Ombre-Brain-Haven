@@ -2753,7 +2753,10 @@ class GatewayService:
 
         user_text = str(body.get("user_text") or body.get("user") or "")
         assistant_text = str(body.get("assistant_text") or body.get("assistant") or "")
-        if not user_text.strip() and not assistant_text.strip():
+        turn_kind = str(body.get("turn_kind") or "user").strip() or "user"
+        if turn_kind not in {"user", "agent_wake"}:
+            return JSONResponse({"error": "turn_kind must be user or agent_wake"}, status_code=400)
+        if turn_kind != "agent_wake" and not user_text.strip() and not assistant_text.strip():
             return JSONResponse(
                 {"error": "user_text or assistant_text is required"}, status_code=400
             )
@@ -2827,10 +2830,17 @@ class GatewayService:
                     client=client,
                     route=route,
                     source=source,
+                    turn_kind=turn_kind,
                     raw_json=raw_json,
                     attachment_ids=string_list(body.get("attachment_ids")),
                     recalled_bucket_ids=string_list(body.get("recalled_bucket_ids")),
                     created_bucket_ids=string_list(body.get("created_bucket_ids")),
+                    lane_id=str(body.get("lane_id") or ""),
+                    agent_wake_update=(
+                        body.get("agent_wake_update")
+                        if isinstance(body.get("agent_wake_update"), dict)
+                        else None
+                    ),
                 )
             except ConversationConflictError as exc:
                 return JSONResponse(
@@ -2911,6 +2921,66 @@ class GatewayService:
                 "raw_chars": len(raw_json),
             }
         )
+
+    async def handle_agent_wake_schedule(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        profile_id = self._conversation_profile_id
+        try:
+            if request.method == "GET":
+                session_id = str(request.query_params.get("session_id") or "").strip()
+                lane_id = str(request.query_params.get("lane_id") or "").strip()
+                schedule = self.state_store.get_agent_wake_schedule(
+                    profile_id=profile_id,
+                    session_id=session_id,
+                    lane_id=lane_id,
+                    create=True,
+                )
+                return JSONResponse({"ok": True, "schedule": schedule})
+
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("invalid agent wake request")
+            session_id = str(body.get("session_id") or "").strip()
+            lane_id = str(body.get("lane_id") or "").strip()
+            if request.method == "POST":
+                if body.get("action") != "accept_user":
+                    raise ValueError("unsupported agent wake action")
+                schedule = self.state_store.accept_user_activity_and_cancel_silence(
+                    profile_id=profile_id,
+                    session_id=session_id,
+                    lane_id=lane_id,
+                    user_activity_at=body.get("user_activity_at"),
+                )
+                return JSONResponse({"ok": True, "schedule": schedule})
+
+            changes = body.get("changes")
+            if not isinstance(changes, dict):
+                raise ValueError("changes are required")
+            schedule = self.state_store.patch_agent_wake_schedule(
+                profile_id=profile_id,
+                session_id=session_id,
+                lane_id=lane_id,
+                expected_version=(
+                    int(body["expected_version"])
+                    if body.get("expected_version") is not None
+                    else None
+                ),
+                changes=changes,
+            )
+            return JSONResponse({"ok": True, "schedule": schedule})
+        except SessionStateConflictError as exc:
+            return JSONResponse(
+                {
+                    "error": "agent_wake_conflict",
+                    "expected_version": exc.expected_version,
+                    "actual_version": exc.actual_version,
+                },
+                status_code=409,
+            )
+        except (TypeError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
 
     async def handle_conversation_attachment(self, request: Request) -> Response:
         auth_result = self._authorize(request.headers.get("Authorization", ""))
@@ -22720,6 +22790,9 @@ def create_gateway_app(
     async def conversation_turn(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_conversation_turn(request)
 
+    async def agent_wake_schedule(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_agent_wake_schedule(request)
+
     async def conversation_attachment(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_conversation_attachment(request)
 
@@ -22785,6 +22858,7 @@ def create_gateway_app(
             # ⚠️ 加路由必须同时加进 server.py 的 /gateway/* 转发表，
             # 否则公网打过去 404（第 2 步已经踩过一次）。
             Route("/api/conversation/turn", conversation_turn, methods=["GET", "POST"]),
+            Route("/api/conversation/agent-wake", agent_wake_schedule, methods=["GET", "PATCH", "POST"]),
             Route("/api/conversation/attachment", conversation_attachment, methods=["GET", "POST", "DELETE"]),
             Route("/api/conversation/import/polaris", polaris_conversation_import, methods=["POST"]),
             Route("/api/conversation/sessions", conversation_sessions, methods=["GET"]),

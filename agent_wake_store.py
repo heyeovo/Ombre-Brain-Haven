@@ -70,6 +70,9 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
             last_heartbeat_at TEXT NOT NULL DEFAULT '',
             next_agent_wake_at TEXT NOT NULL DEFAULT '',
             wake_reason TEXT NOT NULL DEFAULT '',
+            conversation_silence_check_at TEXT NOT NULL DEFAULT '',
+            silence_source_turn_id INTEGER NOT NULL DEFAULT 0,
+            silence_policy_version TEXT NOT NULL DEFAULT '',
             cache_keepalive_deadline TEXT NOT NULL DEFAULT '',
             due_at TEXT NOT NULL DEFAULT '',
             cache_state TEXT NOT NULL DEFAULT 'unarmed',
@@ -77,6 +80,9 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
             lease_owner TEXT NOT NULL DEFAULT '',
             lease_until TEXT NOT NULL DEFAULT '',
             background_turn_limit INTEGER NOT NULL DEFAULT 48,
+            agent_wake_min_minutes INTEGER NOT NULL DEFAULT 10,
+            silence_min_minutes INTEGER NOT NULL DEFAULT 8,
+            silence_max_minutes INTEGER NOT NULL DEFAULT 25,
             consecutive_failures INTEGER NOT NULL DEFAULT 0,
             last_error TEXT NOT NULL DEFAULT '',
             gc_eligible_at TEXT NOT NULL DEFAULT '',
@@ -102,6 +108,9 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
             "last_heartbeat_at": "TEXT NOT NULL DEFAULT ''",
             "next_agent_wake_at": "TEXT NOT NULL DEFAULT ''",
             "wake_reason": "TEXT NOT NULL DEFAULT ''",
+            "conversation_silence_check_at": "TEXT NOT NULL DEFAULT ''",
+            "silence_source_turn_id": "INTEGER NOT NULL DEFAULT 0",
+            "silence_policy_version": "TEXT NOT NULL DEFAULT ''",
             "cache_keepalive_deadline": "TEXT NOT NULL DEFAULT ''",
             "due_at": "TEXT NOT NULL DEFAULT ''",
             "cache_state": "TEXT NOT NULL DEFAULT 'unarmed'",
@@ -109,6 +118,9 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
             "lease_owner": "TEXT NOT NULL DEFAULT ''",
             "lease_until": "TEXT NOT NULL DEFAULT ''",
             "background_turn_limit": "INTEGER NOT NULL DEFAULT 48",
+            "agent_wake_min_minutes": "INTEGER NOT NULL DEFAULT 10",
+            "silence_min_minutes": "INTEGER NOT NULL DEFAULT 8",
+            "silence_max_minutes": "INTEGER NOT NULL DEFAULT 25",
             "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
             "last_error": "TEXT NOT NULL DEFAULT ''",
             "gc_eligible_at": "TEXT NOT NULL DEFAULT ''",
@@ -209,13 +221,19 @@ class AgentWakeStore:
         "last_cache_refresh_at",
         "last_heartbeat_at",
         "next_agent_wake_at",
+        "conversation_silence_check_at",
         "cache_keepalive_deadline",
         "gc_eligible_at",
     }
     _WRITABLE_FIELDS = _BOOLEAN_FIELDS | _TIMESTAMP_FIELDS | {
         "wake_reason",
+        "silence_source_turn_id",
+        "silence_policy_version",
         "cache_state",
         "background_turn_limit",
+        "agent_wake_min_minutes",
+        "silence_min_minutes",
+        "silence_max_minutes",
         "consecutive_failures",
         "last_error",
     }
@@ -257,6 +275,8 @@ class AgentWakeStore:
             candidates.append(str(values["cache_keepalive_deadline"]))
         if bool(values.get("agent_wake_enabled")) and str(values.get("next_agent_wake_at") or ""):
             candidates.append(str(values["next_agent_wake_at"]))
+        if str(values.get("conversation_silence_check_at") or ""):
+            candidates.append(str(values["conversation_silence_check_at"]))
         return min(candidates) if candidates else ""
 
     @staticmethod
@@ -268,6 +288,10 @@ class AgentWakeStore:
             payload[key] = bool(payload.get(key))
         payload["schedule_version"] = int(payload.get("schedule_version") or 0)
         payload["background_turn_limit"] = int(payload.get("background_turn_limit") or 0)
+        payload["agent_wake_min_minutes"] = int(payload.get("agent_wake_min_minutes") or 10)
+        payload["silence_min_minutes"] = int(payload.get("silence_min_minutes") or 8)
+        payload["silence_max_minutes"] = int(payload.get("silence_max_minutes") or 25)
+        payload["silence_source_turn_id"] = int(payload.get("silence_source_turn_id") or 0)
         payload["consecutive_failures"] = int(payload.get("consecutive_failures") or 0)
         return payload
 
@@ -303,9 +327,15 @@ class AgentWakeStore:
             "last_heartbeat_at": "",
             "next_agent_wake_at": "",
             "wake_reason": "",
+            "conversation_silence_check_at": "",
+            "silence_source_turn_id": 0,
+            "silence_policy_version": "",
             "cache_keepalive_deadline": "",
             "cache_state": "unarmed",
             "background_turn_limit": 48,
+            "agent_wake_min_minutes": 10,
+            "silence_min_minutes": 8,
+            "silence_max_minutes": 25,
             "consecutive_failures": 0,
             "last_error": "",
             "gc_eligible_at": "",
@@ -322,11 +352,15 @@ class AgentWakeStore:
                      keepalive_paused_until_user, agent_wake_enabled,
                      last_user_activity_at, last_model_activity_at,
                      last_cache_refresh_at, last_heartbeat_at, next_agent_wake_at,
-                     wake_reason, cache_keepalive_deadline, due_at, cache_state,
+                     wake_reason, conversation_silence_check_at,
+                     silence_source_turn_id, silence_policy_version,
+                     cache_keepalive_deadline, due_at, cache_state,
                      schedule_version, lease_owner, lease_until,
-                     background_turn_limit, consecutive_failures, last_error,
+                     background_turn_limit, agent_wake_min_minutes,
+                     silence_min_minutes, silence_max_minutes,
+                     consecutive_failures, last_error,
                      gc_eligible_at, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', '', ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         profile, session, lane,
@@ -338,8 +372,13 @@ class AgentWakeStore:
                         defaults["last_cache_refresh_at"],
                         defaults["last_heartbeat_at"],
                         defaults["next_agent_wake_at"], defaults["wake_reason"],
+                        defaults["conversation_silence_check_at"],
+                        defaults["silence_source_turn_id"],
+                        defaults["silence_policy_version"],
                         defaults["cache_keepalive_deadline"], due_at,
                         defaults["cache_state"], defaults["background_turn_limit"],
+                        defaults["agent_wake_min_minutes"],
+                        defaults["silence_min_minutes"], defaults["silence_max_minutes"],
                         defaults["consecutive_failures"], defaults["last_error"],
                         defaults["gc_eligible_at"], now, now,
                     ),
@@ -411,11 +450,20 @@ class AgentWakeStore:
                 if len(reason.encode("utf-8")) > 90:
                     raise ValueError("wake_reason exceeds 30 Chinese characters or equivalent")
                 normalized[key] = reason
-            elif key in {"background_turn_limit", "consecutive_failures"}:
+            elif key in {
+                "background_turn_limit", "consecutive_failures", "silence_source_turn_id",
+                "agent_wake_min_minutes", "silence_min_minutes", "silence_max_minutes",
+            }:
                 number = int(value)
                 if number < 0:
                     raise ValueError(f"{key} cannot be negative")
+                if key == "agent_wake_min_minutes" and not 1 <= number <= 7 * 24 * 60:
+                    raise ValueError("agent_wake_min_minutes must be between 1 and 10080")
+                if key in {"silence_min_minutes", "silence_max_minutes"} and not 1 <= number <= 24 * 60:
+                    raise ValueError(f"{key} must be between 1 and 1440")
                 normalized[key] = number
+            elif key == "silence_policy_version":
+                normalized[key] = str(value or "").strip()[:80]
             elif key == "last_error":
                 normalized[key] = str(value or "")[:1000]
         return normalized
@@ -532,6 +580,8 @@ class AgentWakeStore:
     @staticmethod
     def _cause(row: sqlite3.Row) -> str:
         due_at = str(row["due_at"] or "")
+        if str(row["conversation_silence_check_at"] or "") == due_at:
+            return "conversation_silence"
         if str(row["next_agent_wake_at"] or "") == due_at:
             return "agent_schedule"
         return "cache_keepalive"

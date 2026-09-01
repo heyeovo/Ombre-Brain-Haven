@@ -3,6 +3,7 @@ import json
 import sqlite3
 import hashlib
 import io
+import random
 import uuid
 import zipfile
 from datetime import date, datetime, timedelta, timezone
@@ -89,6 +90,178 @@ class GatewayStateStore:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
             added.add(name)
         return added
+
+    @staticmethod
+    def _agent_wake_timestamp(value: datetime | str | None) -> str:
+        if value is None or value == "":
+            return ""
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("agent wake timestamp must include a timezone")
+        return parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+    @staticmethod
+    def _agent_wake_due_at(values: dict[str, Any]) -> str:
+        candidates: list[str] = []
+        if (
+            bool(values.get("keepalive_enabled"))
+            and not bool(values.get("keepalive_paused_until_user"))
+            and str(values.get("cache_keepalive_deadline") or "")
+        ):
+            candidates.append(str(values["cache_keepalive_deadline"]))
+        if bool(values.get("agent_wake_enabled")) and str(values.get("next_agent_wake_at") or ""):
+            candidates.append(str(values["next_agent_wake_at"]))
+        if str(values.get("conversation_silence_check_at") or ""):
+            candidates.append(str(values["conversation_silence_check_at"]))
+        return min(candidates) if candidates else ""
+
+    @staticmethod
+    def _agent_wake_payload(row: sqlite3.Row | None) -> dict[str, Any]:
+        if row is None:
+            return {}
+        payload = dict(row)
+        for key in ("keepalive_enabled", "keepalive_paused_until_user", "agent_wake_enabled"):
+            payload[key] = bool(payload.get(key))
+        for key, fallback in (
+            ("schedule_version", 0), ("background_turn_limit", 48),
+            ("agent_wake_min_minutes", 10), ("silence_min_minutes", 8),
+            ("silence_max_minutes", 25), ("silence_source_turn_id", 0),
+            ("consecutive_failures", 0),
+        ):
+            payload[key] = int(payload.get(key) or fallback)
+        return payload
+
+    @staticmethod
+    def _ensure_agent_wake_schedule(
+        conn: sqlite3.Connection,
+        *,
+        profile_id: str,
+        session_id: str,
+        lane_id: str,
+        now_iso: str,
+    ) -> sqlite3.Row:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO agent_wake_schedules
+            (profile_id, session_id, lane_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (profile_id, session_id, lane_id, now_iso, now_iso),
+        )
+        row = conn.execute(
+            """
+            SELECT * FROM agent_wake_schedules
+            WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+            """,
+            (profile_id, session_id, lane_id),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("failed to create agent wake schedule")
+        return row
+
+    @classmethod
+    def _apply_agent_wake_turn_update(
+        cls,
+        conn: sqlite3.Connection,
+        *,
+        profile_id: str,
+        session_id: str,
+        lane_id: str,
+        turn_id: int,
+        turn_kind: str,
+        update: dict[str, Any],
+        now_iso: str,
+    ) -> dict[str, Any]:
+        row = cls._ensure_agent_wake_schedule(
+            conn,
+            profile_id=profile_id,
+            session_id=session_id,
+            lane_id=lane_id,
+            now_iso=now_iso,
+        )
+        values = dict(row)
+        model_activity_at = cls._agent_wake_timestamp(update.get("model_activity_at"))
+        cache_refresh_at = cls._agent_wake_timestamp(update.get("cache_refresh_at"))
+        if model_activity_at:
+            values["last_model_activity_at"] = model_activity_at
+        if cache_refresh_at:
+            values["last_cache_refresh_at"] = cache_refresh_at
+            values["cache_keepalive_deadline"] = cls._agent_wake_timestamp(
+                datetime.fromisoformat(cache_refresh_at) + timedelta(minutes=55)
+            )
+            values["cache_state"] = "warm"
+
+        if turn_kind == "user":
+            values["last_user_activity_at"] = cls._agent_wake_timestamp(
+                update.get("user_activity_at") or model_activity_at or now_iso
+            )
+            values["keepalive_paused_until_user"] = 0
+            if update.get("sample_silence") is True:
+                minimum = max(1, min(1440, int(values.get("silence_min_minutes") or 8)))
+                maximum = max(minimum, min(1440, int(values.get("silence_max_minutes") or 25)))
+                mode = min(maximum, max(minimum, 14))
+                sampled_minutes = max(minimum, min(maximum, int(round(random.triangular(minimum, maximum, mode)))))
+                base = datetime.fromisoformat(now_iso)
+                values["conversation_silence_check_at"] = cls._agent_wake_timestamp(
+                    base + timedelta(minutes=sampled_minutes)
+                )
+                values["silence_source_turn_id"] = int(turn_id)
+                values["silence_policy_version"] = str(
+                    update.get("silence_policy_version") or "conversation-silence-v1"
+                )[:80]
+        else:
+            values["last_heartbeat_at"] = model_activity_at or now_iso
+            # A consumed silence timer is one-shot. Phase 4 will only call this after
+            # validating the persisted source turn.
+            if str(update.get("wake_cause") or "") == "conversation_silence":
+                values["conversation_silence_check_at"] = ""
+                values["silence_source_turn_id"] = 0
+                values["silence_policy_version"] = ""
+
+        decision = update.get("wake_decision")
+        if isinstance(decision, dict):
+            action = str(decision.get("action") or "")
+            if action == "cancel":
+                values["next_agent_wake_at"] = ""
+                values["wake_reason"] = ""
+            elif action == "schedule" and bool(values.get("agent_wake_enabled")):
+                values["next_agent_wake_at"] = cls._agent_wake_timestamp(decision.get("at"))
+                values["wake_reason"] = str(decision.get("reason") or "").strip()[:90]
+
+        values["due_at"] = cls._agent_wake_due_at(values)
+        conn.execute(
+            """
+            UPDATE agent_wake_schedules
+            SET keepalive_paused_until_user = ?, last_user_activity_at = ?,
+                last_model_activity_at = ?, last_cache_refresh_at = ?, last_heartbeat_at = ?,
+                next_agent_wake_at = ?, wake_reason = ?,
+                conversation_silence_check_at = ?, silence_source_turn_id = ?,
+                silence_policy_version = ?, cache_keepalive_deadline = ?, due_at = ?,
+                cache_state = ?, schedule_version = schedule_version + 1,
+                lease_owner = '', lease_until = '', updated_at = ?
+            WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+            """,
+            (
+                int(bool(values.get("keepalive_paused_until_user"))),
+                str(values.get("last_user_activity_at") or ""),
+                str(values.get("last_model_activity_at") or ""),
+                str(values.get("last_cache_refresh_at") or ""),
+                str(values.get("last_heartbeat_at") or ""),
+                str(values.get("next_agent_wake_at") or ""), str(values.get("wake_reason") or ""),
+                str(values.get("conversation_silence_check_at") or ""),
+                int(values.get("silence_source_turn_id") or 0),
+                str(values.get("silence_policy_version") or ""),
+                str(values.get("cache_keepalive_deadline") or ""), str(values.get("due_at") or ""),
+                str(values.get("cache_state") or "unarmed"), now_iso,
+                profile_id, session_id, lane_id,
+            ),
+        )
+        updated = conn.execute(
+            """SELECT * FROM agent_wake_schedules
+               WHERE profile_id = ? AND session_id = ? AND lane_id = ?""",
+            (profile_id, session_id, lane_id),
+        ).fetchone()
+        return cls._agent_wake_payload(updated)
 
     def _init_db(self) -> None:
         conn = self._connect()
@@ -1250,6 +1423,7 @@ class GatewayStateStore:
         client: str = "",
         route: str = "",
         source: str = "gateway",
+        turn_kind: str = "user",
         raw_json: str = "",
         created_at: datetime | None = None,
         max_entries: int = 0,
@@ -1704,6 +1878,199 @@ class GatewayStateStore:
             ),
         }
 
+    def get_agent_wake_schedule(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        lane_id: str,
+        create: bool = False,
+    ) -> dict[str, Any]:
+        profile = str(profile_id or "default").strip() or "default"
+        session = str(session_id or "").strip()
+        lane = str(lane_id or "").strip()
+        if not session or not lane:
+            raise ValueError("session_id and lane_id are required")
+        conn = self._connect()
+        try:
+            if create:
+                with conn:
+                    row = self._ensure_agent_wake_schedule(
+                        conn,
+                        profile_id=profile,
+                        session_id=session,
+                        lane_id=lane,
+                        now_iso=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    )
+            else:
+                row = conn.execute(
+                    """SELECT * FROM agent_wake_schedules
+                       WHERE profile_id = ? AND session_id = ? AND lane_id = ?""",
+                    (profile, session, lane),
+                ).fetchone()
+            return self._agent_wake_payload(row)
+        finally:
+            conn.close()
+
+    def patch_agent_wake_schedule(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        lane_id: str,
+        expected_version: int | None,
+        changes: dict[str, Any],
+    ) -> dict[str, Any]:
+        profile = str(profile_id or "default").strip() or "default"
+        session = str(session_id or "").strip()
+        lane = str(lane_id or "").strip()
+        if not session or not lane:
+            raise ValueError("session_id and lane_id are required")
+        allowed = {
+            "keepalive_enabled", "keepalive_paused_until_user", "agent_wake_enabled",
+            "next_agent_wake_at", "wake_reason", "agent_wake_min_minutes",
+            "silence_min_minutes", "silence_max_minutes", "background_turn_limit",
+            "conversation_silence_check_at", "silence_source_turn_id", "silence_policy_version",
+        }
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError(f"unsupported agent wake fields: {', '.join(sorted(unknown))}")
+        conn = self._connect()
+        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = self._ensure_agent_wake_schedule(
+                conn, profile_id=profile, session_id=session, lane_id=lane, now_iso=now_iso
+            )
+            actual_version = int(row["schedule_version"] or 0)
+            if expected_version is not None and int(expected_version) != actual_version:
+                raise SessionStateConflictError(int(expected_version), actual_version)
+            values = dict(row)
+            for key, value in changes.items():
+                if key in {"keepalive_enabled", "keepalive_paused_until_user", "agent_wake_enabled"}:
+                    values[key] = int(bool(value))
+                elif key in {"next_agent_wake_at", "conversation_silence_check_at"}:
+                    values[key] = self._agent_wake_timestamp(value)
+                elif key == "wake_reason":
+                    reason = str(value or "").strip()
+                    if len(reason.encode("utf-8")) > 90:
+                        raise ValueError("wake_reason exceeds 30 Chinese characters or equivalent")
+                    values[key] = reason
+                elif key == "silence_policy_version":
+                    values[key] = str(value or "").strip()[:80]
+                else:
+                    number = int(value)
+                    if key == "agent_wake_min_minutes" and not 1 <= number <= 10080:
+                        raise ValueError("agent_wake_min_minutes must be between 1 and 10080")
+                    if key in {"silence_min_minutes", "silence_max_minutes"} and not 1 <= number <= 1440:
+                        raise ValueError(f"{key} must be between 1 and 1440")
+                    if key == "background_turn_limit" and number < 0:
+                        raise ValueError("background_turn_limit cannot be negative")
+                    if key == "silence_source_turn_id" and number < 0:
+                        raise ValueError("silence_source_turn_id cannot be negative")
+                    values[key] = number
+            if int(values.get("silence_min_minutes") or 8) > int(values.get("silence_max_minutes") or 25):
+                raise ValueError("silence_min_minutes cannot exceed silence_max_minutes")
+            values["due_at"] = self._agent_wake_due_at(values)
+            conn.execute(
+                """
+                UPDATE agent_wake_schedules
+                SET keepalive_enabled = ?, keepalive_paused_until_user = ?, agent_wake_enabled = ?,
+                    next_agent_wake_at = ?, wake_reason = ?, agent_wake_min_minutes = ?,
+                    silence_min_minutes = ?, silence_max_minutes = ?, background_turn_limit = ?,
+                    conversation_silence_check_at = ?, silence_source_turn_id = ?, silence_policy_version = ?,
+                    due_at = ?, schedule_version = schedule_version + 1,
+                    lease_owner = '', lease_until = '', updated_at = ?
+                WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+                """,
+                (
+                    int(bool(values.get("keepalive_enabled"))),
+                    int(bool(values.get("keepalive_paused_until_user"))),
+                    int(bool(values.get("agent_wake_enabled"))),
+                    str(values.get("next_agent_wake_at") or ""), str(values.get("wake_reason") or ""),
+                    int(values.get("agent_wake_min_minutes") or 10),
+                    int(values.get("silence_min_minutes") or 8), int(values.get("silence_max_minutes") or 25),
+                    int(values.get("background_turn_limit") or 48),
+                    str(values.get("conversation_silence_check_at") or ""),
+                    int(values.get("silence_source_turn_id") or 0),
+                    str(values.get("silence_policy_version") or ""),
+                    str(values.get("due_at") or ""), now_iso,
+                    profile, session, lane,
+                ),
+            )
+            updated = conn.execute(
+                """SELECT * FROM agent_wake_schedules
+                   WHERE profile_id = ? AND session_id = ? AND lane_id = ?""",
+                (profile, session, lane),
+            ).fetchone()
+            conn.commit()
+            return self._agent_wake_payload(updated)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def accept_user_activity_and_cancel_silence(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        lane_id: str,
+        user_activity_at: datetime | str | None = None,
+    ) -> dict[str, Any]:
+        profile = str(profile_id or "default").strip() or "default"
+        session = str(session_id or "").strip()
+        lane = str(lane_id or "").strip()
+        if not session or not lane:
+            raise ValueError("session_id and lane_id are required")
+        activity_iso = self._agent_wake_timestamp(user_activity_at or datetime.now(timezone.utc))
+        activity_dt = datetime.fromisoformat(activity_iso)
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = self._ensure_agent_wake_schedule(
+                conn, profile_id=profile, session_id=session, lane_id=lane, now_iso=activity_iso
+            )
+            values = dict(row)
+            silence_at = str(values.get("conversation_silence_check_at") or "")
+            if silence_at and datetime.fromisoformat(silence_at) > activity_dt:
+                values["conversation_silence_check_at"] = ""
+                values["silence_source_turn_id"] = 0
+                values["silence_policy_version"] = ""
+            values["last_user_activity_at"] = activity_iso
+            values["keepalive_paused_until_user"] = 0
+            values["due_at"] = self._agent_wake_due_at(values)
+            conn.execute(
+                """
+                UPDATE agent_wake_schedules
+                SET last_user_activity_at = ?, keepalive_paused_until_user = 0,
+                    conversation_silence_check_at = ?, silence_source_turn_id = ?,
+                    silence_policy_version = ?, due_at = ?,
+                    schedule_version = schedule_version + 1,
+                    lease_owner = '', lease_until = '', updated_at = ?
+                WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+                """,
+                (
+                    activity_iso, str(values.get("conversation_silence_check_at") or ""),
+                    int(values.get("silence_source_turn_id") or 0),
+                    str(values.get("silence_policy_version") or ""), str(values.get("due_at") or ""),
+                    activity_iso, profile, session, lane,
+                ),
+            )
+            updated = conn.execute(
+                """SELECT * FROM agent_wake_schedules
+                   WHERE profile_id = ? AND session_id = ? AND lane_id = ?""",
+                (profile, session, lane),
+            ).fetchone()
+            conn.commit()
+            return self._agent_wake_payload(updated)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def commit_conversation_turn(
         self,
         *,
@@ -1718,10 +2085,13 @@ class GatewayStateStore:
         client: str = "",
         route: str = "",
         source: str = "gateway",
+        turn_kind: str = "user",
         raw_json: str = "",
         attachment_ids: list[str] | None = None,
         recalled_bucket_ids: list[str] | None = None,
         created_bucket_ids: list[str] | None = None,
+        lane_id: str = "",
+        agent_wake_update: dict[str, Any] | None = None,
         created_at: datetime | None = None,
     ) -> dict[str, Any]:
         """Strict idempotent compare-and-append for cc/selfhost conversation turns."""
@@ -1731,6 +2101,8 @@ class GatewayStateStore:
         safe_session_id = str(session_id or "").strip()
         safe_persona_id = str(persona_id or "").strip()
         safe_request_id = str(request_id or "").strip()
+        safe_turn_kind = str(turn_kind or "user").strip() or "user"
+        safe_lane_id = str(lane_id or "").strip()
         if not safe_session_id:
             raise ValueError("session_id is required")
         if not safe_persona_id:
@@ -1739,6 +2111,10 @@ class GatewayStateStore:
             raise ValueError("request_id is required")
         if len(safe_request_id) > 128:
             raise ValueError("request_id is too long")
+        if safe_turn_kind not in {"user", "agent_wake"}:
+            raise ValueError("turn_kind must be user or agent_wake")
+        if agent_wake_update is not None and not safe_lane_id:
+            raise ValueError("lane_id is required for agent wake state updates")
 
         try:
             expected_round = int(expected_last_round_id or 0)
@@ -1759,6 +2135,28 @@ class GatewayStateStore:
         if len(requested_attachment_ids) > 4:
             raise ValueError("no more than 4 attachments are allowed per turn")
 
+        wake_update = dict(agent_wake_update or {})
+        if wake_update:
+            raw_payload = self._json_object(raw_json)
+            raw_payload["turn_kind"] = safe_turn_kind
+            decision = wake_update.get("wake_decision")
+            if isinstance(decision, dict):
+                raw_payload["next_wake"] = (
+                    {
+                        "at": str(decision.get("at") or ""),
+                        "reason": str(decision.get("reason") or ""),
+                    }
+                    if decision.get("action") == "schedule"
+                    else {"action": "cancel"}
+                )
+            wake_metadata = wake_update.get("agent_wake")
+            if safe_turn_kind == "agent_wake" and isinstance(wake_metadata, dict):
+                raw_payload["agent_wake"] = {
+                    **wake_metadata,
+                    "outcome": "message" if str(assistant_text or "").strip() else "noop",
+                }
+            raw_json = json.dumps(raw_payload, ensure_ascii=False)
+
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -1776,8 +2174,7 @@ class GatewayStateStore:
                 if any(item not in by_id for item in requested_attachment_ids):
                     raise ValueError("attachment not found")
                 attachment_rows = [by_id[item] for item in requested_attachment_ids]
-            fingerprint = self._conversation_request_fingerprint(
-                {
+            legacy_fingerprint_payload = {
                     "session_id": safe_session_id,
                     "persona_id": safe_persona_id,
                     "expected_last_round_id": expected_round,
@@ -1793,8 +2190,15 @@ class GatewayStateStore:
                     ],
                     "recalled_bucket_ids": sorted(recalled_ids),
                     "created_bucket_ids": sorted(created_ids),
-                }
-            )
+            }
+            legacy_fingerprint = self._conversation_request_fingerprint(legacy_fingerprint_payload)
+            fingerprint = self._conversation_request_fingerprint({
+                **legacy_fingerprint_payload,
+                "turn_kind": safe_turn_kind,
+                "lane_id": safe_lane_id,
+                "agent_wake_update": wake_update,
+                "raw_json_sha256": hashlib.sha256(str(raw_json or "").encode("utf-8")).hexdigest(),
+            })
             existing = conn.execute(
                 """
                 SELECT id, profile_id, session_id, round_id, created_at,
@@ -1808,7 +2212,7 @@ class GatewayStateStore:
             if existing is not None:
                 if (
                     str(existing["session_id"]) != safe_session_id
-                    or str(existing["request_fingerprint"] or "") != fingerprint
+                    or str(existing["request_fingerprint"] or "") not in {fingerprint, legacy_fingerprint}
                 ):
                     raise RequestIdReuseError(safe_request_id)
                 conn.rollback()
@@ -1891,8 +2295,8 @@ class GatewayStateStore:
                 """
                 INSERT INTO conversation_turns
                 (profile_id, session_id, round_id, created_at, user_text, assistant_text,
-                 model, client, route, source, raw_json, request_id, request_fingerprint)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 model, client, route, source, turn_kind, raw_json, request_id, request_fingerprint)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     safe_profile_id,
@@ -1905,6 +2309,7 @@ class GatewayStateStore:
                     str(client or ""),
                     str(route or ""),
                     source_name,
+                    safe_turn_kind,
                     str(raw_json or ""),
                     safe_request_id,
                     fingerprint,
@@ -1999,6 +2404,17 @@ class GatewayStateStore:
                 )
 
             turn_id = int(cursor.lastrowid or 0)
+            if wake_update:
+                self._apply_agent_wake_turn_update(
+                    conn,
+                    profile_id=safe_profile_id,
+                    session_id=safe_session_id,
+                    lane_id=safe_lane_id,
+                    turn_id=turn_id,
+                    turn_kind=safe_turn_kind,
+                    update=wake_update,
+                    now_iso=created_iso,
+                )
             if requested_attachment_ids:
                 placeholders = ",".join("?" for _ in requested_attachment_ids)
                 conn.execute(

@@ -929,6 +929,180 @@ class GatewayStateContractsTest(unittest.TestCase):
             )
         )
 
+    def test_user_turn_atomically_samples_silence_and_updates_cache_clock_once(self):
+        store = self.make_store()
+        schedule = store.get_agent_wake_schedule(
+            profile_id="default", session_id="session-1", lane_id="subscription", create=True
+        )
+        schedule = store.patch_agent_wake_schedule(
+            profile_id="default",
+            session_id="session-1",
+            lane_id="subscription",
+            expected_version=schedule["schedule_version"],
+            changes={"keepalive_enabled": True, "agent_wake_enabled": True},
+        )
+        started = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc)
+        payload = dict(
+            profile_id="default",
+            session_id="session-1",
+            persona_id="ombre",
+            request_id="user-wake-state-1",
+            expected_last_round_id=0,
+            user_text="hello",
+            assistant_text="reply",
+            source="cc",
+            turn_kind="user",
+            lane_id="subscription",
+            raw_json=json.dumps({"display_segments": {"version": 1, "segments": [{"markdown": "reply"}]}}),
+            agent_wake_update={
+                "user_activity_at": started.isoformat(),
+                "model_activity_at": started.isoformat(),
+                "cache_refresh_at": started.isoformat(),
+                "sample_silence": True,
+                "silence_policy_version": "conversation-silence-v1",
+                "wake_decision": {
+                    "action": "schedule",
+                    "at": (started + timedelta(minutes=30)).isoformat(),
+                    "reason": "看看结果",
+                },
+            },
+            created_at=started + timedelta(seconds=4),
+        )
+        committed = store.commit_conversation_turn(**payload)
+        persisted = store.get_agent_wake_schedule(
+            profile_id="default", session_id="session-1", lane_id="subscription"
+        )
+        silence_at = datetime.fromisoformat(persisted["conversation_silence_check_at"])
+        self.assertGreaterEqual(silence_at, started + timedelta(minutes=8))
+        self.assertLessEqual(silence_at, started + timedelta(seconds=4, minutes=25))
+        self.assertEqual(persisted["silence_source_turn_id"], committed["turn"]["id"])
+        self.assertEqual(persisted["cache_keepalive_deadline"], (started + timedelta(minutes=55)).isoformat(timespec="seconds"))
+        self.assertEqual(persisted["next_agent_wake_at"], (started + timedelta(minutes=30)).isoformat(timespec="seconds"))
+        version = persisted["schedule_version"]
+
+        replay = store.commit_conversation_turn(**payload)
+        replayed = store.get_agent_wake_schedule(
+            profile_id="default", session_id="session-1", lane_id="subscription"
+        )
+        self.assertTrue(replay["idempotent_replay"])
+        self.assertEqual(replayed["schedule_version"], version)
+        self.assertEqual(replayed["conversation_silence_check_at"], persisted["conversation_silence_check_at"])
+
+    def test_user_arrival_cancels_only_untriggered_silence_timer(self):
+        store = self.make_store()
+        now = datetime.now(timezone.utc)
+        store.get_agent_wake_schedule(
+            profile_id="default", session_id="session-1", lane_id="subscription", create=True
+        )
+        current = store.get_agent_wake_schedule(
+            profile_id="default", session_id="session-1", lane_id="subscription"
+        )
+        store.patch_agent_wake_schedule(
+            profile_id="default",
+            session_id="session-1",
+            lane_id="subscription",
+            expected_version=current["schedule_version"],
+            changes={"keepalive_paused_until_user": True},
+        )
+        conn = sqlite3.connect(self.root / "gateway_state.db")
+        conn.execute(
+            """UPDATE agent_wake_schedules
+               SET conversation_silence_check_at = ?, silence_source_turn_id = 7,
+                   silence_policy_version = 'conversation-silence-v1'
+               WHERE profile_id = 'default' AND session_id = 'session-1' AND lane_id = 'subscription'""",
+            ((now + timedelta(minutes=10)).isoformat(timespec="seconds"),),
+        )
+        conn.commit()
+        conn.close()
+        updated = store.accept_user_activity_and_cancel_silence(
+            profile_id="default",
+            session_id="session-1",
+            lane_id="subscription",
+            user_activity_at=now,
+        )
+        self.assertEqual(updated["conversation_silence_check_at"], "")
+        self.assertEqual(updated["silence_source_turn_id"], 0)
+        self.assertFalse(updated["keepalive_paused_until_user"])
+
+    def test_stop_all_patch_clears_silence_timer(self):
+        store = self.make_store()
+        schedule = store.get_agent_wake_schedule(
+            profile_id="default", session_id="session-1", lane_id="subscription", create=True
+        )
+        armed = store.patch_agent_wake_schedule(
+            profile_id="default",
+            session_id="session-1",
+            lane_id="subscription",
+            expected_version=schedule["schedule_version"],
+            changes={
+                "keepalive_enabled": True,
+                "agent_wake_enabled": True,
+                "conversation_silence_check_at": (
+                    datetime.now(timezone.utc) + timedelta(minutes=10)
+                ).isoformat(timespec="seconds"),
+                "silence_source_turn_id": 7,
+                "silence_policy_version": "conversation-silence-v1",
+            },
+        )
+        stopped = store.patch_agent_wake_schedule(
+            profile_id="default",
+            session_id="session-1",
+            lane_id="subscription",
+            expected_version=armed["schedule_version"],
+            changes={
+                "keepalive_enabled": False,
+                "agent_wake_enabled": False,
+                "next_agent_wake_at": "",
+                "wake_reason": "",
+                "conversation_silence_check_at": "",
+                "silence_source_turn_id": 0,
+                "silence_policy_version": "",
+            },
+        )
+        self.assertFalse(stopped["keepalive_enabled"])
+        self.assertFalse(stopped["agent_wake_enabled"])
+        self.assertEqual(stopped["conversation_silence_check_at"], "")
+        self.assertEqual(stopped["silence_source_turn_id"], 0)
+        self.assertEqual(stopped["due_at"], "")
+
+    def test_empty_agent_wake_turn_and_next_wake_commit_together(self):
+        store = self.make_store()
+        schedule = store.get_agent_wake_schedule(
+            profile_id="default", session_id="session-1", lane_id="subscription", create=True
+        )
+        store.patch_agent_wake_schedule(
+            profile_id="default",
+            session_id="session-1",
+            lane_id="subscription",
+            expected_version=schedule["schedule_version"],
+            changes={"agent_wake_enabled": True},
+        )
+        at = datetime(2026, 8, 31, 13, 0, tzinfo=timezone.utc)
+        result = store.commit_conversation_turn(
+            profile_id="default",
+            session_id="session-1",
+            persona_id="ombre",
+            request_id="wake-1",
+            expected_last_round_id=0,
+            user_text="",
+            assistant_text="",
+            source="cc",
+            turn_kind="agent_wake",
+            lane_id="subscription",
+            agent_wake_update={
+                "model_activity_at": at.isoformat(),
+                "wake_cause": "cache_keepalive",
+                "agent_wake": {"wake_id": "wake-1", "cause": "cache_keepalive", "at": at.isoformat()},
+                "wake_decision": {"action": "schedule", "at": (at + timedelta(minutes=20)).isoformat(), "reason": "稍后再看"},
+            },
+            created_at=at + timedelta(seconds=3),
+        )
+        self.assertEqual(result["turn"]["turn_kind"], "agent_wake")
+        restored = store.get_conversation_turn_by_request_id(profile_id="default", request_id="wake-1")
+        raw = json.loads(restored["raw_json"])
+        self.assertEqual(raw["agent_wake"]["outcome"], "noop")
+        self.assertEqual(raw["next_wake"]["reason"], "稍后再看")
+
     def test_cooldown_normalizes_new_aware_timestamp_with_naive_now(self):
         store = self.make_store()
         store.record_success(

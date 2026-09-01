@@ -59,12 +59,34 @@ class AgentWakeStoreContractsTest(unittest.TestCase):
             {
                 "profile_id", "session_id", "lane_id", "due_at",
                 "schedule_version", "lease_until", "background_turn_limit",
+                "conversation_silence_check_at", "silence_source_turn_id",
+                "silence_policy_version", "agent_wake_min_minutes",
+                "silence_min_minutes", "silence_max_minutes",
             }.issubset(schedule_columns)
         )
         self.assertTrue(
             {"wake_id", "schedule_version", "status", "turn_id"}.issubset(run_columns)
         )
         self.assertIn("idx_agent_wake_schedule_scope", indexes)
+
+    def test_silence_timer_participates_in_due_at_and_is_claimed_once(self):
+        store = self.make_store()
+        silence_due = self.past(3)
+        cache_due = self.past(1)
+        schedule, _ = store.create_schedule(
+            profile_id="profile-a",
+            session_id="session-a",
+            lane_id="subscription",
+            keepalive_enabled=True,
+            cache_keepalive_deadline=cache_due,
+            conversation_silence_check_at=silence_due,
+            silence_source_turn_id=9,
+            silence_policy_version="conversation-silence-v1",
+        )
+        self.assertEqual(schedule["due_at"], silence_due.isoformat(timespec="seconds"))
+        claimed = store.claim_due_schedule(owner="owner-a", now=datetime.now(timezone.utc))
+        self.assertEqual(claimed["run"]["cause"], "conversation_silence")
+        self.assertEqual(claimed["schedule"]["silence_source_turn_id"], 9)
 
     def test_schedule_crud_derives_due_at_and_uses_version_cas(self):
         store = self.make_store()

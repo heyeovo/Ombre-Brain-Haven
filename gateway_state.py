@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from agent_wake_store import AgentWakeStore, delete_agent_wake_session_records, initialize_agent_wake_schema
+from bark_notifications import BarkNotificationStore, initialize_bark_notification_schema
 
 
 _LEGACY_SELFHOST_BASE_PROMPT = "\n".join(
@@ -125,7 +126,7 @@ class GatewayStateStore:
         payload = dict(row)
         for key in (
             "keepalive_enabled", "keepalive_paused_until_user", "agent_wake_enabled",
-            "conversation_silence_enabled",
+            "conversation_silence_enabled", "bark_notification_enabled",
         ):
             payload[key] = bool(payload.get(key))
         for key, fallback in (
@@ -766,6 +767,7 @@ class GatewayStateStore:
             """
         )
         initialize_agent_wake_schema(conn)
+        initialize_bark_notification_schema(conn)
         try:
             conn.execute(
                 """
@@ -1966,7 +1968,7 @@ class GatewayStateStore:
             raise ValueError("session_id and lane_id are required")
         allowed = {
             "keepalive_enabled", "keepalive_paused_until_user", "agent_wake_enabled",
-            "conversation_silence_enabled",
+            "conversation_silence_enabled", "bark_notification_enabled",
             "next_agent_wake_at", "wake_reason", "agent_wake_min_minutes",
             "silence_min_minutes", "silence_max_minutes", "background_turn_limit",
             "conversation_silence_check_at", "silence_source_turn_id", "silence_policy_version",
@@ -1988,7 +1990,7 @@ class GatewayStateStore:
             for key, value in changes.items():
                 if key in {
                     "keepalive_enabled", "keepalive_paused_until_user", "agent_wake_enabled",
-                    "conversation_silence_enabled",
+                    "conversation_silence_enabled", "bark_notification_enabled",
                 }:
                     values[key] = int(bool(value))
                 elif key in {"next_agent_wake_at", "conversation_silence_check_at"}:
@@ -2022,7 +2024,7 @@ class GatewayStateStore:
                 """
                 UPDATE agent_wake_schedules
                 SET keepalive_enabled = ?, keepalive_paused_until_user = ?, agent_wake_enabled = ?,
-                    conversation_silence_enabled = ?,
+                    conversation_silence_enabled = ?, bark_notification_enabled = ?,
                     next_agent_wake_at = ?, wake_reason = ?, agent_wake_min_minutes = ?,
                     silence_min_minutes = ?, silence_max_minutes = ?, background_turn_limit = ?,
                     conversation_silence_check_at = ?, silence_source_turn_id = ?, silence_policy_version = ?,
@@ -2036,6 +2038,7 @@ class GatewayStateStore:
                     int(bool(values.get("keepalive_paused_until_user"))),
                     int(bool(values.get("agent_wake_enabled"))),
                     int(bool(values.get("conversation_silence_enabled"))),
+                    int(bool(values.get("bark_notification_enabled"))),
                     str(values.get("next_agent_wake_at") or ""), str(values.get("wake_reason") or ""),
                     int(values.get("agent_wake_min_minutes") or 10),
                     int(values.get("silence_min_minutes") or 8), int(values.get("silence_max_minutes") or 25),
@@ -2464,6 +2467,17 @@ class GatewayStateStore:
                     turn_kind=safe_turn_kind,
                     update=wake_update,
                     now_iso=created_iso,
+                )
+            if safe_turn_kind == "agent_wake" and str(assistant_text or "").strip():
+                BarkNotificationStore.enqueue_agent_wake_for_turn(
+                    conn,
+                    profile_id=safe_profile_id,
+                    session_id=safe_session_id,
+                    lane_id=safe_lane_id,
+                    turn_id=turn_id,
+                    assistant_text=str(assistant_text or ""),
+                    raw_json=str(raw_json or ""),
+                    created_at=created_iso,
                 )
             if requested_attachment_ids:
                 placeholders = ",".join("?" for _ in requested_attachment_ids)

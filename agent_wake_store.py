@@ -66,6 +66,7 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
             keepalive_paused_until_user INTEGER NOT NULL DEFAULT 0,
             agent_wake_enabled INTEGER NOT NULL DEFAULT 0,
             conversation_silence_enabled INTEGER NOT NULL DEFAULT 0,
+            bark_notification_enabled INTEGER NOT NULL DEFAULT 0,
             last_user_activity_at TEXT NOT NULL DEFAULT '',
             last_model_activity_at TEXT NOT NULL DEFAULT '',
             last_cache_refresh_at TEXT NOT NULL DEFAULT '',
@@ -106,6 +107,7 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
             "keepalive_paused_until_user": "INTEGER NOT NULL DEFAULT 0",
             "agent_wake_enabled": "INTEGER NOT NULL DEFAULT 0",
             "conversation_silence_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "bark_notification_enabled": "INTEGER NOT NULL DEFAULT 0",
             "last_user_activity_at": "TEXT NOT NULL DEFAULT ''",
             "last_model_activity_at": "TEXT NOT NULL DEFAULT ''",
             "last_cache_refresh_at": "TEXT NOT NULL DEFAULT ''",
@@ -252,6 +254,7 @@ class AgentWakeStore:
         "keepalive_paused_until_user",
         "agent_wake_enabled",
         "conversation_silence_enabled",
+        "bark_notification_enabled",
     }
     _TIMESTAMP_FIELDS = {
         "last_user_activity_at",
@@ -364,6 +367,7 @@ class AgentWakeStore:
             "keepalive_paused_until_user": False,
             "agent_wake_enabled": False,
             "conversation_silence_enabled": False,
+            "bark_notification_enabled": False,
             "last_user_activity_at": "",
             "last_model_activity_at": "",
             "last_cache_refresh_at": "",
@@ -398,6 +402,7 @@ class AgentWakeStore:
                     INSERT OR IGNORE INTO agent_wake_schedules
                     (profile_id, session_id, lane_id, keepalive_enabled,
                      keepalive_paused_until_user, agent_wake_enabled, conversation_silence_enabled,
+                     bark_notification_enabled,
                      last_user_activity_at, last_model_activity_at,
                      last_cache_refresh_at, last_heartbeat_at, next_agent_wake_at,
                      wake_reason, conversation_silence_check_at,
@@ -408,7 +413,7 @@ class AgentWakeStore:
                      silence_min_minutes, silence_max_minutes,
                      consecutive_failures, last_error,
                      gc_eligible_at, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         profile, session, lane,
@@ -416,6 +421,7 @@ class AgentWakeStore:
                         int(defaults["keepalive_paused_until_user"]),
                         int(defaults["agent_wake_enabled"]),
                         int(defaults["conversation_silence_enabled"]),
+                        int(defaults["bark_notification_enabled"]),
                         defaults["last_user_activity_at"],
                         defaults["last_model_activity_at"],
                         defaults["last_cache_refresh_at"],

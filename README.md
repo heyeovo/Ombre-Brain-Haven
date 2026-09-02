@@ -274,6 +274,8 @@ cc/selfhost 严格写入可以携带 `request_id`、`expected_last_round_id` 与
 
 CC 主动唤醒复用同一严格写入：可见消息或无正文结果、wake event、下一次 wake、usage、cache refresh 和活动时间与轮次原子提交。正常用户 turn 成功提交时只采样一次持久 conversation silence timer，幂等重试不重抽；下一条用户消息进入模型前会原子取消仍未触发的 timer。Haven Brain 每 30 秒按持久 `due_at` 原子领取到期任务，通过独立 Bearer callback 调用 Dashboard；Dashboard 取得同一 `SessionTurnCoordinator` 的后台执行权后才原子确认 run 并请求模型。Run、lease、重试和滚动 24 小时上限均保存在 `gateway_state.db`，服务重启不会重新采样或重复已落库的 `wake_id`。
 
+Bark 是可见 agent wake 成功落库后的服务端副作用，不进入模型 Context，也不是 MCP。当前窗口开启 Bark 后，Haven 在保存正式 `assistant_text` 的同一事务中读取该轮版本化 `display_segments` 并创建持久 outbox；no-op、普通前台回复、模型失败和未落库消息不入队。首段使用正常提醒，后续段使用 passive 提示，默认间隔 1 秒、每轮最多 8 条；超出部分收束为打开会话查看的提示。worker 以持久 lease、唯一幂等键和指数退避保证失败重试及重启恢复，通知失败不回滚聊天。Profile 级 Bark server、device key 与可选 16 字节 AES-128-CBC key 只保存在 `gateway_state.db`，读取接口只返回掩码；点击通知通过 `/cc?session_id=...` 打开对应 Dashboard 窗口。
+
 同一 Dashboard `session_id` 可在 CC Pro、CC API provider 与 selfhost 之间人工往返。selfhost 继续从 Haven 重放完整角色历史；CC Pro 与每个 API provider 各自拥有独立 Claude 原生 session 和已读游标，不共享凭据或隐藏上下文。进入某条 CC 线路时，Haven 中该线路尚未见过的成功 user/assistant 文字轮次会作为隐藏的 `<上次聊到这里>` 衔接块一次性补入；thinking、图片和文件内容不跨线路补入。只有目标线路成功写回后才推进其游标，不实现额度不足后的自动切换。
 
 cc 协作者可分别维护基础 system 提示词和长期提示词模块：基础提示词存于 `cc_personas.base_prompt`，由订阅、API 中转站和 selfhost 共用，默认采用原 cc 闲聊模式提示词；cc 闲聊不再另加写死副本，工作模式则在 Claude Code preset 后追加同一份配置。模块有独立名称、正文、顺序和默认启停，组装时以 `【模块名称】` 标明边界；旧的单块提示词会兼容为一个默认开启模块。每个聊天窗口只持久保存与协作者默认不同的启停覆盖；两种执行器都在下一轮按当前有效模块组装 system。selfhost 每轮直接重组，Claude Code 链路在组合变化时用原 SDK session 重建空闲 query，因此保留聊天上下文，同时让新提示词生效。

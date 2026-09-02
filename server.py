@@ -146,6 +146,7 @@ from automation_scheduler import (
 from automation_executor import AutomationExecutor
 from agent_wake_scheduler import AgentWakeScheduler
 from agent_wake_store import AgentWakeStore
+from bark_notifications import BarkNotificationStore, BarkNotificationWorker
 from journey_weekly_engine import (
     TASK_TYPE as WEEKLY_JOURNEY_TASK_TYPE,
     WEEKLY_JOURNEY_HARD_CONSTRAINTS,
@@ -16724,6 +16725,33 @@ if __name__ == "__main__":
         elif wake_runner_url or wake_runner_token:
             logger.warning("Agent wake scheduler disabled: runner URL/token must both be configured")
 
+        async def _bark_notification_loop():
+            await asyncio.sleep(5)
+            owner = f"bark-notification-worker:{os.getpid()}:{threading.get_ident()}"
+            worker = BarkNotificationWorker(
+                BarkNotificationStore(os.path.join(config["buckets_dir"], "gateway_state.db")),
+                owner=owner,
+            )
+            while True:
+                try:
+                    result = await worker.run_once()
+                    if result.get("status") != "idle":
+                        logger.info(
+                            "Bark notification worker result / Bark 通知结果: status=%s outbox_id=%s",
+                            result.get("status"), result.get("outbox_id"),
+                        )
+                except Exception as e:
+                    logger.warning("Bark notification worker failed / Bark 通知 worker 失败: %s", e)
+                await asyncio.sleep(1)
+
+        def _start_bark_notification_worker():
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(_bark_notification_loop())
+
+        bnt = threading.Thread(target=_start_bark_notification_worker, daemon=True)
+        bnt.start()
+        logger.info("Persistent Bark notification worker enabled / Bark 持久通知 worker 已启用")
+
         async def _portrait_loop():
             await asyncio.sleep(25)
             local_bucket_mgr = BucketManager(config)
@@ -16881,6 +16909,8 @@ if __name__ == "__main__":
                 return await _gw_service.handle_conversation_turn(request)
             async def _gw_agent_wake_schedule(request):
                 return await _gw_service.handle_agent_wake_schedule(request)
+            async def _gw_bark_notifications(request):
+                return await _gw_service.handle_bark_notifications(request)
             async def _gw_conversation_attachment(request):
                 return await _gw_service.handle_conversation_attachment(request)
             async def _gw_polaris_conversation_import(request):
@@ -16930,6 +16960,7 @@ if __name__ == "__main__":
                 _GwRoute("/gateway/api/debug/upstream-usage", _gw_upstream_usage_debug, methods=["GET"]),
                 _GwRoute("/gateway/api/conversation/turn", _gw_conversation_turn, methods=["GET", "POST"]),
                 _GwRoute("/gateway/api/conversation/agent-wake", _gw_agent_wake_schedule, methods=["GET", "PATCH", "POST"]),
+                _GwRoute("/gateway/api/notifications/bark", _gw_bark_notifications, methods=["GET", "PATCH", "POST"]),
                 _GwRoute("/gateway/api/conversation/attachment", _gw_conversation_attachment, methods=["GET", "POST", "DELETE"]),
                 _GwRoute("/gateway/api/conversation/import/polaris", _gw_polaris_conversation_import, methods=["POST"]),
                 _GwRoute("/gateway/api/conversation/sessions", _gw_conversation_sessions, methods=["GET"]),

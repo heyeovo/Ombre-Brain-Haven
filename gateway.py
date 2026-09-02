@@ -23,6 +23,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from bucket_manager import BucketManager
+from bark_notifications import BarkNotificationStore
 from dehydrator import Dehydrator
 from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
@@ -2994,6 +2995,40 @@ class GatewayService:
             return JSONResponse({"error": str(exc)}, status_code=400)
         except KeyError as exc:
             return JSONResponse({"error": str(exc)}, status_code=404)
+
+    async def handle_bark_notifications(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        store = BarkNotificationStore(self.state_store.db_path)
+        profile_id = self._conversation_profile_id
+        try:
+            if request.method == "GET":
+                session_id = str(request.query_params.get("session_id") or "").strip()
+                lane_id = str(request.query_params.get("lane_id") or "").strip()
+                return JSONResponse({
+                    "ok": True,
+                    "config": store.get_public_config(profile_id=profile_id),
+                    "recent": store.recent_status(
+                        profile_id=profile_id, session_id=session_id, lane_id=lane_id,
+                    ),
+                })
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("invalid Bark notification request")
+            if request.method == "POST":
+                if str(body.get("action") or "") != "test":
+                    raise ValueError("unsupported Bark notification action")
+                return JSONResponse({"ok": True, **store.enqueue_test(profile_id=profile_id)})
+            changes = body.get("changes")
+            if not isinstance(changes, dict):
+                raise ValueError("changes are required")
+            return JSONResponse({
+                "ok": True,
+                "config": store.save_config(profile_id=profile_id, changes=changes),
+            })
+        except (TypeError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
 
     async def handle_conversation_attachment(self, request: Request) -> Response:
         auth_result = self._authorize(request.headers.get("Authorization", ""))
@@ -22806,6 +22841,9 @@ def create_gateway_app(
     async def agent_wake_schedule(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_agent_wake_schedule(request)
 
+    async def bark_notifications(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_bark_notifications(request)
+
     async def conversation_attachment(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_conversation_attachment(request)
 
@@ -22872,6 +22910,7 @@ def create_gateway_app(
             # 否则公网打过去 404（第 2 步已经踩过一次）。
             Route("/api/conversation/turn", conversation_turn, methods=["GET", "POST"]),
             Route("/api/conversation/agent-wake", agent_wake_schedule, methods=["GET", "PATCH", "POST"]),
+            Route("/api/notifications/bark", bark_notifications, methods=["GET", "PATCH", "POST"]),
             Route("/api/conversation/attachment", conversation_attachment, methods=["GET", "POST", "DELETE"]),
             Route("/api/conversation/import/polaris", polaris_conversation_import, methods=["POST"]),
             Route("/api/conversation/sessions", conversation_sessions, methods=["GET"]),

@@ -116,6 +116,8 @@ async def recovery_chat(request: Request) -> Response:
         "CLAUDE_CONFIG_DIR": "/home/cc/.claude",
     }
 
+    logger.warning("recovery chat: spawning claude CLI, prompt=%r", prompt[:100])
+
     async def stream():
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -126,12 +128,16 @@ async def recovery_chat(request: Request) -> Response:
                 cwd="/app",
             )
 
+            stderr_lines = []
+
             async def read_stderr():
                 while True:
                     line = await proc.stderr.readline()
                     if not line:
                         break
-                    logger.debug("claude stderr: %s", line.decode(errors="replace").rstrip())
+                    text = line.decode(errors="replace").rstrip()
+                    stderr_lines.append(text)
+                    logger.warning("claude stderr: %s", text)
 
             stderr_task = asyncio.create_task(read_stderr())
 
@@ -163,6 +169,11 @@ async def recovery_chat(request: Request) -> Response:
 
             await proc.wait()
             await stderr_task
+            rc = proc.returncode
+            logger.warning("claude CLI exited with code %s", rc)
+            if rc != 0 and stderr_lines:
+                err_msg = "\n".join(stderr_lines[-10:])
+                yield f"data: {json.dumps({'type': 'error', 'error': f'claude exited with code {rc}: {err_msg}'})}\n\n"
             yield "data: [DONE]\n\n"
 
         except Exception as exc:

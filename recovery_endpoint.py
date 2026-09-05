@@ -4,6 +4,10 @@ Recovery Console endpoint — completely independent of the Next.js dashboard.
 Spawns the Claude Code CLI binary directly in --print mode with stream-json
 output, so the recovery channel works even when the dashboard is down.
 
+Auth: reads the Pro subscription OAuth token from the shared
+/home/cc/.claude/.credentials.json volume and passes it as ANTHROPIC_API_KEY
+with --bare mode.
+
 Routes:
   GET  /recovery       → serve the self-contained HTML console
   GET  /recovery/ping  → auth check (returns 200 if token valid)
@@ -15,6 +19,7 @@ import json
 import logging
 import os
 import secrets
+import time
 from pathlib import Path
 
 from starlette.requests import Request
@@ -25,6 +30,8 @@ logger = logging.getLogger("ombre_brain.recovery")
 RECOVERY_HTML = (Path(__file__).parent / "recovery.html").read_text(encoding="utf-8")
 
 CLAUDE_BINARY = "/usr/local/bin/claude"
+
+CREDENTIALS_PATH = "/home/cc/.claude/.credentials.json"
 
 RECOVERY_SYSTEM_PROMPT = """\
 You are in RECOVERY MODE inside the Haven container. The main dashboard frontend may be broken.
@@ -51,6 +58,29 @@ What you CANNOT do:
 
 Keep responses concise. Focus on diagnosing and fixing.\
 """
+
+
+def _read_oauth_token() -> str | None:
+    """Read the Pro subscription OAuth access token from the shared credentials file."""
+    try:
+        with open(CREDENTIALS_PATH) as f:
+            creds = json.load(f)
+        oauth = creds.get("claudeAiOauth", {})
+        token = oauth.get("accessToken", "")
+        expires_at = oauth.get("expiresAt", 0)
+        if not token:
+            logger.warning("recovery: no accessToken in credentials file")
+            return None
+        if expires_at and (expires_at / 1000) < time.time():
+            logger.warning("recovery: OAuth token expired at %s", expires_at)
+            return None
+        return token
+    except FileNotFoundError:
+        logger.warning("recovery: credentials file not found at %s", CREDENTIALS_PATH)
+        return None
+    except Exception as exc:
+        logger.warning("recovery: failed to read credentials: %s", exc)
+        return None
 
 
 def _authorize(request: Request, gateway_token: str) -> JSONResponse | None:
@@ -98,12 +128,25 @@ async def recovery_chat(request: Request) -> Response:
             status_code=500,
         )
 
+    # Try Pro OAuth token first, fall back to relay API key
+    api_key = _read_oauth_token()
+    auth_source = "pro_oauth"
+    if not api_key:
+        api_key = os.environ.get("OMBRE_GATEWAY_UPSTREAM_API_KEY", "")
+        auth_source = "relay"
+    if not api_key:
+        return JSONResponse(
+            {"error": "No API key available (OAuth token not found, no relay key configured)"},
+            status_code=500,
+        )
+
     cmd = [
         CLAUDE_BINARY,
         "--print",
         "--output-format", "stream-json",
         "--verbose",
         "--dangerously-skip-permissions",
+        "--bare",
         "--no-session-persistence",
         "--system-prompt", RECOVERY_SYSTEM_PROMPT,
         prompt,
@@ -112,7 +155,7 @@ async def recovery_chat(request: Request) -> Response:
     child_env = {
         **os.environ,
         "HOME": "/home/cc",
-        "CLAUDE_CONFIG_DIR": "/home/cc/.claude",
+        "ANTHROPIC_API_KEY": api_key,
     }
 
     # Run as non-root 'recovery' user (claude CLI refuses --dangerously-skip-permissions as root)
@@ -124,7 +167,7 @@ async def recovery_chat(request: Request) -> Response:
         os.setgid(recovery_gid)
         os.setuid(recovery_uid)
 
-    logger.warning("recovery chat: spawning claude CLI, prompt=%r", prompt[:100])
+    logger.warning("recovery chat: spawning claude CLI (auth=%s), prompt=%r", auth_source, prompt[:100])
 
     async def stream():
         try:
@@ -161,7 +204,6 @@ async def recovery_chat(request: Request) -> Response:
                     text = line.decode(errors="replace").strip()
                     if not text:
                         continue
-                    # Parse the stream-json line and re-emit as SSE
                     try:
                         event = json.loads(text)
                         yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"

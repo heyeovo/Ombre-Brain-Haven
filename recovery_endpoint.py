@@ -106,15 +106,23 @@ async def recovery_chat(request: Request) -> Response:
         "--dangerously-skip-permissions",
         "--no-session-persistence",
         "--system-prompt", RECOVERY_SYSTEM_PROMPT,
+        prompt,
     ]
-
-    cmd.append(prompt)
 
     child_env = {
         **os.environ,
-        "HOME": "/home/cc",
+        "HOME": "/home/recovery",
         "CLAUDE_CONFIG_DIR": "/home/cc/.claude",
     }
+
+    # Run as non-root 'recovery' user (claude CLI refuses --dangerously-skip-permissions as root)
+    import pwd
+    recovery_uid = pwd.getpwnam("recovery").pw_uid
+    recovery_gid = pwd.getpwnam("recovery").pw_gid
+
+    def set_recovery_user():
+        os.setgid(recovery_gid)
+        os.setuid(recovery_uid)
 
     logger.warning("recovery chat: spawning claude CLI, prompt=%r", prompt[:100])
 
@@ -126,6 +134,7 @@ async def recovery_chat(request: Request) -> Response:
                 stderr=asyncio.subprocess.PIPE,
                 env=child_env,
                 cwd="/app",
+                preexec_fn=set_recovery_user,
             )
 
             stderr_lines = []

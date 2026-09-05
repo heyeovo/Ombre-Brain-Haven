@@ -111,7 +111,7 @@ async def recovery_chat(request: Request) -> Response:
 
     child_env = {
         **os.environ,
-        "HOME": "/home/recovery",
+        "HOME": "/home/cc",
         "CLAUDE_CONFIG_DIR": "/home/cc/.claude",
     }
 

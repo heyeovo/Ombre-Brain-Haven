@@ -30,9 +30,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Claude CLI binary for recovery console
 COPY --from=claude-cli /tmp/claude-pkg/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude /usr/local/bin/claude
 RUN chmod +x /usr/local/bin/claude \
-    && useradd --create-home --shell /bin/bash recovery \
-    && mkdir -p /home/cc/.claude \
-    && chmod -R a+rX /home/cc
+    && groupadd --gid 10001 cc \
+    && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/cc --shell /bin/bash recovery
 
 # Copy project files / 复制项目文件
 COPY *.py .

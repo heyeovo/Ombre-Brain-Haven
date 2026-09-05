@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Recovery Console</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #1a1b26;
+  --bg-surface: #1e2030;
+  --bg-input: #24283b;
+  --border: #414868;
+  --text: #c0caf5;
+  --text-dim: #565f89;
+  --text-bright: #a9b1d6;
+  --accent: #7aa2f7;
+  --accent-dim: #3d59a1;
+  --green: #9ece6a;
+  --yellow: #e0af68;
+  --red: #f7768e;
+  --orange: #ff9e64;
+  --cyan: #7dcfff;
+  --purple: #bb9af7;
+}
+
+html, body { height: 100%; }
+body {
+  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', Menlo, Monaco, 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Auth Screen ── */
+#auth-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  flex-direction: column;
+  gap: 16px;
+}
+#auth-screen .logo {
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+#auth-screen input {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  padding: 8px 16px;
+  border-radius: 6px;
+  width: 320px;
+  outline: none;
+}
+#auth-screen input:focus { border-color: var(--accent); }
+#auth-screen .error { color: var(--red); font-size: 12px; }
+
+/* ── Main Layout ── */
+#main { display: none; flex-direction: column; height: 100%; }
+#main.active { display: flex; }
+
+/* ── Header ── */
+header {
+  display: flex;
+  align-items: center;
+  padding: 8px 16px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  gap: 12px;
+  flex-shrink: 0;
+}
+header .title {
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 13px;
+}
+header .status {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-left: auto;
+}
+header .dot {
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  margin-right: 4px;
+  vertical-align: middle;
+}
+header .dot.busy { background: var(--yellow); animation: pulse 1s infinite; }
+@keyframes pulse { 50% { opacity: 0.4; } }
+
+/* ── Chat Area ── */
+#chat {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.msg { padding: 2px 0; white-space: pre-wrap; word-break: break-word; }
+.msg.user { color: var(--accent); }
+.msg.user::before { content: '❯ '; color: var(--accent-dim); }
+.msg.assistant { color: var(--text); }
+.msg.thinking {
+  color: var(--text-dim);
+  font-style: italic;
+  border-left: 2px solid var(--border);
+  padding-left: 12px;
+  margin: 4px 0;
+}
+.msg.system { color: var(--yellow); font-size: 12px; }
+.msg.error { color: var(--red); }
+
+/* ── Tool blocks ── */
+.tool-block {
+  margin: 4px 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.tool-header {
+  display: flex;
+  align-items: center;
+  padding: 4px 10px;
+  background: var(--bg-surface);
+  cursor: pointer;
+  font-size: 12px;
+  gap: 8px;
+  user-select: none;
+}
+.tool-header .tool-icon { color: var(--cyan); }
+.tool-header .tool-name { color: var(--purple); font-weight: 600; }
+.tool-header .tool-summary { color: var(--text-dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-header .chevron { color: var(--text-dim); transition: transform 0.15s; font-size: 10px; }
+.tool-block.open .chevron { transform: rotate(90deg); }
+.tool-body {
+  display: none;
+  padding: 8px 10px;
+  background: var(--bg);
+  font-size: 12px;
+  max-height: 300px;
+  overflow-y: auto;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.tool-block.open .tool-body { display: block; }
+.tool-body .tool-input { color: var(--text-bright); }
+.tool-body .tool-output { color: var(--text-dim); border-top: 1px solid var(--border); margin-top: 6px; padding-top: 6px; }
+
+/* ── Streaming cursor ── */
+.cursor { display: inline-block; width: 7px; height: 14px; background: var(--accent); animation: blink 0.8s step-end infinite; vertical-align: text-bottom; margin-left: 1px; }
+@keyframes blink { 50% { opacity: 0; } }
+
+/* ── Input ── */
+#input-bar {
+  display: flex;
+  padding: 12px 16px;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border);
+  gap: 8px;
+  flex-shrink: 0;
+}
+#input-bar textarea {
+  flex: 1;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  resize: none;
+  outline: none;
+  min-height: 38px;
+  max-height: 200px;
+  line-height: 1.5;
+}
+#input-bar textarea:focus { border-color: var(--accent); }
+#input-bar button {
+  background: var(--accent);
+  border: none;
+  color: var(--bg);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 0 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+#input-bar button:hover { opacity: 0.9; }
+#input-bar button:disabled { opacity: 0.4; cursor: default; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<!-- Auth -->
+<div id="auth-screen">
+  <div class="logo">⚡ Recovery Console</div>
+  <input id="auth-input" type="password" placeholder="Gateway Token" autofocus />
+  <div id="auth-error" class="error"></div>
+</div>
+
+<!-- Main -->
+<div id="main">
+  <header>
+    <span class="title">⚡ Recovery Console</span>
+    <span class="status"><span class="dot" id="status-dot"></span><span id="status-text">ready</span></span>
+  </header>
+  <div id="chat">
+    <div class="msg system">Recovery mode — dashboard 解耦通道，可检查代码、查日志、修改文件、重启部署。</div>
+  </div>
+  <div id="input-bar">
+    <textarea id="prompt" rows="1" placeholder="输入指令..." autofocus></textarea>
+    <button id="send-btn" onclick="sendMessage()">Send</button>
+  </div>
+</div>
+
+<script>
+// API base = same directory as this page (works at /recovery or /gateway/recovery)
+const API_BASE = location.href.replace(/\/?$/, '');
+let TOKEN = '';
+let busy = false;
+
+// ── Auth ──
+const authInput = document.getElementById('auth-input');
+const authError = document.getElementById('auth-error');
+authInput.addEventListener('keydown', e => { if (e.key === 'Enter') tryAuth(); });
+
+async function tryAuth() {
+  const tk = authInput.value.trim();
+  if (!tk) return;
+  try {
+    const r = await fetch(API_BASE + '/ping', {
+      headers: { 'Authorization': 'Bearer ' + tk }
+    });
+    if (r.ok) {
+      TOKEN = tk;
+      document.getElementById('auth-screen').style.display = 'none';
+      const main = document.getElementById('main');
+      main.classList.add('active');
+      document.getElementById('prompt').focus();
+    } else {
+      authError.textContent = 'token 不对';
+    }
+  } catch (err) {
+    authError.textContent = '连接失败: ' + err.message;
+  }
+}
+
+// ── Chat ──
+const chat = document.getElementById('chat');
+const promptEl = document.getElementById('prompt');
+const sendBtn = document.getElementById('send-btn');
+const statusDot = document.getElementById('status-dot');
+const statusText = document.getElementById('status-text');
+
+promptEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+promptEl.addEventListener('input', autoResize);
+
+function autoResize() {
+  promptEl.style.height = 'auto';
+  promptEl.style.height = Math.min(promptEl.scrollHeight, 200) + 'px';
+}
+
+function scrollBottom() {
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function addMsg(cls, text) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + cls;
+  div.textContent = text;
+  chat.appendChild(div);
+  scrollBottom();
+  return div;
+}
+
+function addToolBlock(name, input, summary) {
+  const block = document.createElement('div');
+  block.className = 'tool-block';
+  const inputPreview = summary || (typeof input === 'string' ? input : JSON.stringify(input)).slice(0, 120);
+  block.innerHTML = `
+    <div class="tool-header" onclick="this.parentElement.classList.toggle('open')">
+      <span class="tool-icon">⚙</span>
+      <span class="tool-name">${esc(name)}</span>
+      <span class="tool-summary">${esc(inputPreview)}</span>
+      <span class="chevron">▶</span>
+    </div>
+    <div class="tool-body">
+      <div class="tool-input"></div>
+    </div>`;
+  const inputDiv = block.querySelector('.tool-input');
+  if (typeof input === 'string') {
+    inputDiv.textContent = input;
+  } else {
+    inputDiv.textContent = JSON.stringify(input, null, 2);
+  }
+  chat.appendChild(block);
+  scrollBottom();
+  return block;
+}
+
+function setToolOutput(block, output) {
+  let outDiv = block.querySelector('.tool-output');
+  if (!outDiv) {
+    outDiv = document.createElement('div');
+    outDiv.className = 'tool-output';
+    block.querySelector('.tool-body').appendChild(outDiv);
+  }
+  outDiv.textContent = typeof output === 'string' ? output : JSON.stringify(output, null, 2);
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function setBusy(b) {
+  busy = b;
+  sendBtn.disabled = b;
+  statusDot.className = 'dot' + (b ? ' busy' : '');
+  statusText.textContent = b ? 'thinking...' : 'ready';
+}
+
+async function sendMessage() {
+  if (busy) return;
+  const text = promptEl.value.trim();
+  if (!text) return;
+  promptEl.value = '';
+  autoResize();
+  addMsg('user', text);
+  setBusy(true);
+
+  let assistantDiv = null;
+  let assistantText = '';
+  const toolBlocks = new Map();
+
+  try {
+    const r = await fetch(API_BASE + '/chat', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + TOKEN,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ prompt: text }),
+    });
+
+    if (!r.ok) {
+      const err = await r.text();
+      addMsg('error', 'Error: ' + err);
+      setBusy(false);
+      return;
+    }
+
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const raw = line.slice(6);
+        if (raw === '[DONE]') continue;
+        let ev;
+        try { ev = JSON.parse(raw); } catch { continue; }
+        handleEvent(ev);
+      }
+    }
+    if (buf.startsWith('data: ')) {
+      try { handleEvent(JSON.parse(buf.slice(6))); } catch {}
+    }
+
+  } catch (err) {
+    addMsg('error', 'Connection error: ' + err.message);
+  }
+  setBusy(false);
+
+  function handleEvent(ev) {
+    const t = ev.type;
+
+    if (t === 'system') {
+      // Init event — ignored (no session resume in recovery mode)
+
+    } else if (t === 'assistant') {
+      // Full assistant message — contains message.content[] array
+      const content = ev.message?.content || [];
+      for (const block of content) {
+        if (block.type === 'text' && block.text) {
+          assistantDiv = addMsg('assistant', block.text);
+          assistantText = block.text;
+        } else if (block.type === 'thinking' && block.thinking) {
+          addMsg('thinking', block.thinking);
+        } else if (block.type === 'tool_use') {
+          const name = block.name || 'tool';
+          const input = block.input || {};
+          const summary = toolSummary(name, input);
+          const tb = addToolBlock(name, input, summary);
+          if (block.id) toolBlocks.set(block.id, tb);
+        }
+      }
+      // Reset for next assistant message
+      assistantDiv = null;
+      assistantText = '';
+
+    } else if (t === 'user') {
+      // Tool result — message.content[] contains tool_result items
+      const content = ev.message?.content || [];
+      for (const item of content) {
+        if (item.type === 'tool_result' && item.tool_use_id) {
+          const tb = toolBlocks.get(item.tool_use_id);
+          if (tb) {
+            setToolOutput(tb, item.content || '(no output)');
+          }
+        }
+      }
+
+    } else if (t === 'result') {
+      if (ev.is_error && ev.result) {
+        addMsg('error', ev.result);
+      }
+
+    } else if (t === 'error') {
+      addMsg('error', ev.error || ev.message || JSON.stringify(ev));
+    }
+    // Ignore: rate_limit_event, etc.
+  }
+}
+
+function toolSummary(name, input) {
+  if (name === 'Bash') return input.command || '';
+  if (name === 'Read') return input.file_path || '';
+  if (name === 'Edit') return input.file_path || '';
+  if (name === 'Write') return input.file_path || '';
+  if (name === 'Grep') return (input.pattern || '') + ' ' + (input.path || '');
+  if (name === 'Glob') return input.pattern || '';
+  return '';
+}
+</script>
+</body>
+</html>

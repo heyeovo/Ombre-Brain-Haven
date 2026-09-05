@@ -20,6 +20,7 @@ COPY *.py .
 COPY resources ./resources
 COPY scripts ./scripts
 COPY dashboard.html .
+COPY recovery.html .
 COPY dashboard_assets ./dashboard_assets
 COPY config.example.yaml ./config.yaml
 RUN chmod +x scripts/*.sh

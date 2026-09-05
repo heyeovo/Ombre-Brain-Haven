@@ -16976,6 +16976,18 @@ if __name__ == "__main__":
                 _GwRoute("/gateway/api/preview-handoff", _gw_preview_handoff, methods=["GET"]),
                 _GwRoute("/gateway/debug", _gw_debug_dashboard, methods=["GET"]),
             ])
+            # Recovery console — independent of dashboard, uses standalone handlers
+            try:
+                from recovery_endpoint import recovery_page as _rc_page, recovery_ping as _rc_ping, recovery_chat as _rc_chat
+                _app.state.gateway_token = _gw_service.gateway_token
+                _app.routes.extend([
+                    _GwRoute("/gateway/recovery", _rc_page, methods=["GET"]),
+                    _GwRoute("/gateway/recovery/ping", _rc_ping, methods=["GET"]),
+                    _GwRoute("/gateway/recovery/chat", _rc_chat, methods=["POST"]),
+                ])
+                logger.info("Recovery console mounted on /gateway/recovery")
+            except Exception as _rc_exc:
+                logger.warning("Recovery console init failed: %s", _rc_exc)
             # warm_recall_runtime will happen lazily on first gateway request
             _gw_ok = True
             logger.info("Gateway mounted on /gateway/* / Gateway 已挂载")

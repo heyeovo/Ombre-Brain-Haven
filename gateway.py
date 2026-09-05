@@ -130,6 +130,7 @@ from utils import (
     strip_wikilinks,
 )
 from word_map import WordMapStore
+from recovery_endpoint import recovery_page, recovery_ping, recovery_chat
 
 logger = logging.getLogger("ombre_brain.gateway")
 GENERIC_LEXICAL_STOPWORD_KEYS = frozenset(
@@ -22804,6 +22805,7 @@ def create_gateway_app(
     @asynccontextmanager
     async def lifespan(app: Starlette):
         app.state.gateway_service = service
+        app.state.gateway_token = service.gateway_token
         await service.warm_recall_runtime()
         yield
         await service.close()
@@ -22926,6 +22928,10 @@ def create_gateway_app(
             Route("/v1/models", models, methods=["GET"]),
             Route("/v1/chat/completions", chat_completions, methods=["POST"]),
             Route("/v1/messages", anthropic_messages, methods=["POST"]),
+            # Recovery console — independent of Next.js dashboard
+            Route("/recovery", recovery_page, methods=["GET"]),
+            Route("/recovery/ping", recovery_ping, methods=["GET"]),
+            Route("/recovery/chat", recovery_chat, methods=["POST"]),
         ],
         lifespan=lifespan,
     )

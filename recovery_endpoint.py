@@ -14,10 +14,12 @@ Routes:
 """
 
 import asyncio
+import glob as _glob
 import json
 import logging
 import os
 import secrets
+import shutil
 from pathlib import Path
 
 from starlette.requests import Request
@@ -54,6 +56,25 @@ What you CANNOT do:
 
 Keep responses concise. Focus on diagnosing and fixing.\
 """
+
+
+def _ensure_claude_config():
+    """Restore .claude.json from backup if missing — CLI needs it for auth."""
+    config_path = "/home/cc/.claude.json"
+    if os.path.isfile(config_path):
+        return
+    backup_dir = "/home/cc/.claude/backups"
+    if not os.path.isdir(backup_dir):
+        return
+    backups = sorted(
+        _glob.glob(os.path.join(backup_dir, ".claude.json.backup.*")),
+        key=os.path.getmtime,
+        reverse=True,
+    )
+    if backups:
+        shutil.copy2(backups[0], config_path)
+        os.chown(config_path, 10001, 10001)
+        logger.info("recovery: restored %s from %s", config_path, backups[0])
 
 
 def _authorize(request: Request, gateway_token: str) -> JSONResponse | None:
@@ -101,13 +122,14 @@ async def recovery_chat(request: Request) -> Response:
             status_code=500,
         )
 
+    _ensure_claude_config()
+
     cmd = [
         CLAUDE_BINARY,
         "--print",
         "--output-format", "stream-json",
         "--verbose",
         "--dangerously-skip-permissions",
-        "--bare",
         "--no-session-persistence",
         "--system-prompt", RECOVERY_SYSTEM_PROMPT,
         prompt,
@@ -117,7 +139,6 @@ async def recovery_chat(request: Request) -> Response:
         **os.environ,
         "HOME": "/home/cc",
     }
-    # Don't pass ANTHROPIC_API_KEY — let CLI use OAuth from credentials file
     child_env.pop("ANTHROPIC_API_KEY", None)
 
     import pwd

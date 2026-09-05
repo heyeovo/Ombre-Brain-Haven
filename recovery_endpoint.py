@@ -24,30 +24,32 @@ logger = logging.getLogger("ombre_brain.recovery")
 
 RECOVERY_HTML = (Path(__file__).parent / "recovery.html").read_text(encoding="utf-8")
 
-CLAUDE_BINARY = "/workspace/dashboard/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude"
+CLAUDE_BINARY = "/usr/local/bin/claude"
 
 RECOVERY_SYSTEM_PROMPT = """\
-You are in RECOVERY MODE. The main dashboard frontend may be broken.
+You are in RECOVERY MODE inside the Haven container. The main dashboard frontend may be broken.
 
-Your job: diagnose and fix issues in the deployment so the dashboard comes back online.
+Your job: diagnose and fix issues so the system comes back online.
 
 Environment:
-- Dashboard project: /workspace/dashboard (Next.js, TypeScript)
-- Haven backend: /workspace/haven (Python, Starlette + MCP)
-- Claude config: /home/cc/.claude
-- Node.js available, npm available
-- The dashboard runs as a Docker container (see /workspace/dashboard/Dockerfile)
-- Haven runs as a separate process/container (see /workspace/haven/Dockerfile)
+- You are inside the Haven (Ombre Brain) container.
+- Haven code: /app (Python, Starlette + MCP server)
+- Dashboard code is in a SEPARATE container and git repo (github.com/heyeovo/ob-dashboard2).
+  To inspect dashboard code, clone it: git clone https://github.com/heyeovo/ob-dashboard2.git /tmp/dashboard
+- The dashboard is a Next.js app deployed via Coolify.
+- Haven and Dashboard are separate Docker services in the same Coolify stack.
 
 What you can do:
-- Read files, grep, glob — diagnose issues
-- Edit/write files — fix code
-- Run bash commands — check logs, restart services, rebuild
-- Run `npm run build` in /workspace/dashboard to rebuild the frontend
-- Check git status/log for recent changes that may have caused the issue
+- Read/edit Haven code at /app
+- Run bash commands — check logs, inspect state
+- Clone and inspect the dashboard repo if the issue is there
+- Guide the user on what to do in Coolify (restart, rollback commit SHA, etc.)
 
-Keep responses concise. Focus on diagnosing and fixing.
-Do NOT use any MCP tools (Ombre Brain, agent wake, etc.) — they are not available in recovery mode.\
+What you CANNOT do:
+- Directly restart the dashboard container (it's a separate service)
+- Access MCP tools (Ombre Brain, agent wake, etc.)
+
+Keep responses concise. Focus on diagnosing and fixing.\
 """
 
 
@@ -96,19 +98,31 @@ async def recovery_chat(request: Request) -> Response:
             status_code=500,
         )
 
+    api_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OMBRE_GATEWAY_UPSTREAM_API_KEY", "")
+    base_url = os.environ.get("ANTHROPIC_BASE_URL") or os.environ.get("OMBRE_GATEWAY_UPSTREAM_BASE_URL", "")
+
+    if not api_key:
+        return JSONResponse(
+            {"error": "No API key configured (set ANTHROPIC_API_KEY or OMBRE_GATEWAY_UPSTREAM_API_KEY)"},
+            status_code=500,
+        )
+
     cmd = [
         CLAUDE_BINARY,
         "--print",
         "--output-format", "stream-json",
         "--verbose",
         "--dangerously-skip-permissions",
+        "--bare",
         "--no-session-persistence",
         "--system-prompt", RECOVERY_SYSTEM_PROMPT,
-        "--add-dir", "/workspace/dashboard",
-        "--add-dir", "/workspace/haven",
     ]
 
     cmd.append(prompt)
+
+    child_env = {**os.environ, "ANTHROPIC_API_KEY": api_key}
+    if base_url:
+        child_env["ANTHROPIC_BASE_URL"] = base_url.rstrip("/")
 
     async def stream():
         try:
@@ -116,12 +130,8 @@ async def recovery_chat(request: Request) -> Response:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env={
-                    **os.environ,
-                    "HOME": "/home/cc",
-                    "CLAUDE_CONFIG_DIR": "/home/cc/.claude",
-                },
-                cwd="/workspace/dashboard",
+                env=child_env,
+                cwd="/app",
             )
 
             async def read_stderr():

@@ -98,31 +98,23 @@ async def recovery_chat(request: Request) -> Response:
             status_code=500,
         )
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OMBRE_GATEWAY_UPSTREAM_API_KEY", "")
-    base_url = os.environ.get("ANTHROPIC_BASE_URL") or os.environ.get("OMBRE_GATEWAY_UPSTREAM_BASE_URL", "")
-
-    if not api_key:
-        return JSONResponse(
-            {"error": "No API key configured (set ANTHROPIC_API_KEY or OMBRE_GATEWAY_UPSTREAM_API_KEY)"},
-            status_code=500,
-        )
-
     cmd = [
         CLAUDE_BINARY,
         "--print",
         "--output-format", "stream-json",
         "--verbose",
         "--dangerously-skip-permissions",
-        "--bare",
         "--no-session-persistence",
         "--system-prompt", RECOVERY_SYSTEM_PROMPT,
     ]
 
     cmd.append(prompt)
 
-    child_env = {**os.environ, "ANTHROPIC_API_KEY": api_key}
-    if base_url:
-        child_env["ANTHROPIC_BASE_URL"] = base_url.rstrip("/")
+    child_env = {
+        **os.environ,
+        "HOME": "/home/cc",
+        "CLAUDE_CONFIG_DIR": "/home/cc/.claude",
+    }
 
     async def stream():
         try:

@@ -131,12 +131,33 @@ async def recovery_chat(request: Request) -> Response:
     # Try Pro OAuth token first, fall back to relay API key
     api_key = _read_oauth_token()
     auth_source = "pro_oauth"
+    oauth_debug = ""
     if not api_key:
+        # Collect diagnostics
+        diag = []
+        diag.append(f"creds_path={CREDENTIALS_PATH}")
+        diag.append(f"exists={os.path.isfile(CREDENTIALS_PATH)}")
+        if os.path.isfile(CREDENTIALS_PATH):
+            try:
+                with open(CREDENTIALS_PATH) as f:
+                    raw = json.load(f)
+                diag.append(f"keys={list(raw.keys())}")
+                oauth = raw.get("claudeAiOauth", {})
+                diag.append(f"oauth_keys={list(oauth.keys())}")
+                diag.append(f"has_token={bool(oauth.get('accessToken'))}")
+                exp = oauth.get("expiresAt", 0)
+                diag.append(f"expiresAt={exp}, now={int(time.time()*1000)}, expired={exp and exp < time.time()*1000}")
+            except Exception as e:
+                diag.append(f"read_error={e}")
+        else:
+            diag.append(f"dir_contents={os.listdir(os.path.dirname(CREDENTIALS_PATH)) if os.path.isdir(os.path.dirname(CREDENTIALS_PATH)) else 'dir_missing'}")
+        oauth_debug = "; ".join(diag)
+
         api_key = os.environ.get("OMBRE_GATEWAY_UPSTREAM_API_KEY", "")
         auth_source = "relay"
     if not api_key:
         return JSONResponse(
-            {"error": "No API key available (OAuth token not found, no relay key configured)"},
+            {"error": f"No API key available. OAuth: {oauth_debug}. Relay key: not configured."},
             status_code=500,
         )
 

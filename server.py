@@ -7856,19 +7856,36 @@ async def breath(
     if domain.strip().lower() == "journal":
         try:
             journal_entries = await bucket_mgr.list_journal()
-            journal_entries.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+            def _journal_sort_key(b: dict) -> str:
+                m = b.get("metadata", {})
+                return m.get("event_time") or m.get("date") or m.get("created") or ""
+            journal_entries.sort(key=_journal_sort_key, reverse=True)
+            if date_key:
+                journal_entries = [
+                    j for j in journal_entries
+                    if _bucket_matches_breath_date(j, date_key)
+                ]
+            if query and query.strip():
+                q_lower = query.strip().lower()
+                def _journal_matches_query(j: dict) -> bool:
+                    meta = j.get("metadata", {})
+                    name = str(meta.get("name") or "").lower()
+                    content = str(j.get("content") or "").lower()
+                    return q_lower in name or q_lower in content
+                journal_entries = [j for j in journal_entries if _journal_matches_query(j)]
             journal_entries = journal_entries[:max_results]
             if not journal_entries:
+                if date_key or (query and query.strip()):
+                    return "没有找到匹配的日记。"
                 return "日记本是空的。"
             results = []
             for j in journal_entries:
                 meta = j["metadata"]
                 name = meta.get("name", j["id"])
                 author = meta.get("author", "共同")
-                created = meta.get("created", "")
+                display_date = _journal_sort_key(j)
                 if meta.get("locked"):
                     hint = meta.get("unlock_hint", "")
-                    # --- 日期形式的 hint：到点自动解锁；非日期形式视为密码，保持锁定 ---
                     auto_unlocked = False
                     try:
                         unlock_date = datetime.fromisoformat(str(hint))
@@ -7885,7 +7902,7 @@ async def breath(
                             break
                         continue
                 entry = (
-                    f"[{created}] [{name}] [作者:{author}] [bucket_id:{j['id']}]\n"
+                    f"[{display_date}] [{name}] [作者:{author}] [bucket_id:{j['id']}]\n"
                     f"{strip_wikilinks(j['content'])}"
                 )
                 results.append(entry)

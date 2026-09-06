@@ -13,7 +13,7 @@
 
 | 能力 | 场景 |
 |------|-----------|
-| `breath` | **每次对话最开头**调用一次（`is_session_start=True`）——先恢复自我入口、用户画像、关系画像、近期连续性和少量必要锚点。有明确话题时传 `query` 关键词检索；有明确日期时可传 `date` 或在 query 里写日期。传 `domain="pinned"` 一次读取全部钉选桶；传 `domain="feel"` 读取独立 feel；传 `domain="daily_impression"` 才读取日印象；传 `domain="journal"` 读取日记（含上锁检测）；传 `domain="journey"` 只读取轨迹目录，选中后再 `read_bucket(bucket_id)` 读全文；传 `domain="self_anchor"` 读取你自己留下的锚点。`max_tokens` 控制返回总 token 上限（默认 10000）；普通读取的 `max_results` 默认 20，`domain="pinned"` 不受该条数限制 |
+| `breath` | **每次对话最开头**调用一次（`is_session_start=True`）——先恢复自我入口、用户画像、关系画像、近期连续性和少量必要锚点。有明确话题时传 `query` 关键词检索；有明确日期时可传 `date` 或在 query 里写日期。传 `domain="pinned"` 一次读取全部钉选桶；传 `domain="feel"` 读取独立 feel；传 `domain="daily_impression"` 才读取日印象；传 `domain="journal"` 读取日记（按 event_time 倒序，支持 `date` 过滤和 `query` 关键词匹配标题/正文）；传 `domain="journey"` 只读取轨迹目录，选中后再 `read_bucket(bucket_id)` 读全文；传 `domain="self_anchor"` 读取你自己留下的锚点。`max_tokens` 控制返回总 token 上限（默认 10000）；普通读取的 `max_results` 默认 20，`domain="pinned"` 不受该条数限制 |
 | `read_bucket` | 按 bucket_id 精确读取完整记忆；journey 会附带证据桶名称和 ID，需要核实时再读取证据桶；准备追细节、写年轮、修改或删除前先读 |
 | `read_daily_reviews` | 只读独立日回顾。用 `start_date + end_date` 查闭区间，或用 `last_days` 查截至昨天的最近若干香港日历日；多协作者时传 `persona_id`。返回当前正文、编辑状态、更新时间和缺失日期，不返回来源窗口，也不写任何记忆 |
 | `comment_bucket` | 给已有记忆追加年轮/评论；读到旧记忆后的新感受或补充，用它挂回源 bucket。`kind="feel"` 时 content 只写第一人称感受，不写分段标题 |
@@ -66,7 +66,7 @@
 - `domain`：如果明确知道话题领域可以传（如 "编程" 或 "恋爱"），缩小搜索范围
 - `domain="daily_impression"`：显式读取日印象；普通日期查询不会混入日印象。可与 `date` 一起用
 - `domain="feel"`：读取独立 feel，不包含日印象或历史 whisper；`max_results` 限制条数，`max_tokens` 限制总 token
-- `domain="journal"`：读取日记（含上锁检测）；`domain="journey"` 只返回轨迹目录（阶段、时间、标题、摘要、bucket_id），选中后用 `read_bucket(bucket_id)` 读取全文和证据桶名称/ID，需要核实时再读取证据桶。journey 不参与普通检索、浮现或关联扩散
+- `domain="journal"`：读取日记，按 `event_time` 倒序排列；可同时传 `date` 过滤特定日期、`query` 按关键词匹配标题和正文；含上锁检测。`domain="journey"` 只返回轨迹目录（阶段、时间、标题、摘要、bucket_id），选中后用 `read_bucket(bucket_id)` 读取全文和证据桶名称/ID，需要核实时再读取证据桶。journey 不参与普通检索、浮现或关联扩散
 - 普通聊天窗口不能通过 `hold`、`comment_bucket` 或 `trace` 创建、追加、修改或删除 journey；发现可能的阶段变化时，只在对话中提出候选
 - `domain="self_anchor"`：读取你的自我总入口；`domain="自我"` / `domain="self_identity"` 兼容
 - `domain="self_anchor", query="欲望"`：只在自我分段里按 query 查，返回相关分段，不走普通扩散

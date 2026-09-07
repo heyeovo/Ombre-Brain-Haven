@@ -7,8 +7,8 @@
 - 已确认未来计划加入家族聚类；Haven 虽有关系边机制，但桶之间目前基本没有可用于召回的真实关系。
 - 已完成总体方案：`docs/recall-rebuild-plan.md`。
 - Phase 0 召回透镜最小版已在 Dashboard 实现并通过本地真实数据验收。
-- Phase 1 已完成第二轮本地修正：召回必要性、候选独立 relevance、planner 降级 shadow、语义状态 Debug 和召回透镜对比均已接通。
-- 正式 admission gate、排序和线上注入行为仍未改变；Phase 1 只记录 `affects_recall=false` 的 shadow 结果。
+- Phase 1 的召回必要性、候选独立 relevance、planner 降级、utility 和召回透镜线上验收均已完成。
+- 2026-09-07 已在本地完成 Phase 2：重构 relevance + utility 默认接管正式桶结果，保留 `legacy` 紧急回滚；待用户 commit/push/deploy 后做线上 smoke。
 
 ## 已确认的产品决定
 
@@ -243,16 +243,41 @@ Dashboard 本地验证：utility 中文映射测试 6/6 通过；目标文件 ES
 部署后视觉与真实数据验收仍须使用已登录页面和新 session。本次未修改其他页面、API、
 Gateway Debug 或正式召回。
 
-下一步只做：用户 commit/push Dashboard 等待 Vercel 发布，同时确认 Haven Coolify 已采用
-上述完整 SHA；随后用新 session 完全在召回透镜验收三档结果和单卡 Shadow。真实数据
-稳定前不进入 Phase 2 正式 admission 切换，也不处理 source-record、称呼、家族、关系边
-或额外 LLM。
+Dashboard 与 Haven 后续均已发布，并由用户通过召回透镜截图完成 Utility MVP 真实验收：
+
+- Round 1 的召回测试语境并明确“不要搜”，正确判为不召回；
+- Round 2“今天下雨了”找到相关雨桶，Utility 为 `neutral`，Shadow 允许进入；
+- Round 3“好久没约会了”找到两个合理的 `neutral` 候选，最终只选择一张卡；
+- Round 4 明确回忆请求判为 `promote`，并选中“第一次正式外出约会”；
+- Round 8“趁周末快点收尾”没有可靠候选进入最终召回，符合保守基线。
+
+因此 Utility MVP 判定通过，基础版暂时没有需要立刻修改的问题。已接受保留两个观察项：
+多个 `neutral` 候选之间仍主要依赖 relevance 排序；明确回忆会把所有通过 relevance 的
+候选升为 `promote`，该轮曾出现 11 个 promote，但最终排序选桶正确。
+
+真实数据尚未覆盖“那后来呢”一类上下文指代型 `promote`，以及候选正文与用户原句完全
+相同的 `reject`。其中上下文指代是进入 Phase 2 讨论前建议补做的短测；原样重复已有单元
+测试，不作为阻塞项。当前上下文实现只识别指代标记、确认上一轮用户消息存在，并将已经
+通过 relevance 的候选升为 promote；尚未把前文事件合并进候选检索，也不能判断候选是否
+真正回答了“后来发生什么”。
+
+## Phase 2 本地完成：重构规则正式接管（2026-09-07）
+
+- `gateway.py` 新增 `OMBRE_RECALL_DECISION_MODE`，默认 `rebuilt`；重构 relevance + utility 的单卡投影成为正式桶结果。设为 `legacy` 可紧急恢复旧结果，旧代码暂不删除。
+- Debug 保留三组事实：`legacy_bucket_ids`、`shadow_bucket_ids`、`effective_bucket_ids`；重构接管时 `affects_recall=true`。
+- auto-vague 的明确请求可采用重构投影；planner disabled/degraded/not-run 的 contextual 仍保持保守不扩张。
+- 旧 source-record 后置追加在 rebuilt 模式停用，不能绕过 Utility 或最多一张桶卡的上限。
+- Dashboard 完整窗口排除契约保持不变：已返回桶与本窗口真正新建的 hold 桶由 `exclude_ids` 先从候选池移除，再在最终出卡前硬过滤，不会返回或抢占单卡位。
+- Hook 返回的桶卡可在正文下附一行显式关联桶名称与 ID，按关系边 confidence 排序，最多两个；不附关联正文，不使用语义相似猜测关系。
+- Hook 每轮重复的英文说明和 Dashboard 动态中文说明已移除；等价使用规则进入 CC/selfhost 共用的稳定 persona system prompt。动态部分只保留边界标签与本轮正文。
+- Dashboard 召回按钮和详情改为“约 N token”。外层表示完整注入，内层表示卡片/日期正文，因此数值可以不同但含义明确；灰色弹窗说明仍只在前端显示，不进入 prompt。
+- 本地验证：Haven `py_compile` 与全套 unittest 189/189 通过；Dashboard 召回/token/提示词相关测试 31/31 通过，生产 build 通过。Dashboard 全套测试除一条既存的 `display_segments` 版本断言外均通过（测试期待 v1、代码长期输出 v2）；另有一条认证 cookie 用例曾偶发失败，单独重跑通过，两者均与本次改动无关。
 
 ## 发布后仍需继续核查
 
 1. **Embedding 内容新鲜度**：线上 318 个桶已确认没有缺失或模型/维度过期向量，因此不执行 backfill。现有检查不包含正文内容哈希；只有后续出现“桶正文已改但向量未刷新”的具体证据时，再单独审计内容新鲜度。
 2. **Semantic 查询状态**：新记录已能区分 `scored`、`indexed_not_in_semantic_top_k`、`query_embedding_unavailable/failed`、`query_timeout/failed` 和 engine disabled；下一窗口把这些已有字段完整呈现在召回透镜，不做视觉重构。
-3. **Session 去重真实契约**：用户预期“同一窗口已召回桶不会再次召回”，但当前代码默认 `skip_recent_rounds=5`，且强证据存在 bypass。发布后先用实际 session 验证；在结论明确前，不依赖“全窗口绝不重复”作为放宽 explicit 的唯一安全条件，也不在本 Phase 顺手改去重。
+3. **Session 去重真实契约**：Dashboard 每轮从 Haven 读取 `injected_buckets ∪ session_created_buckets` 并作为 `exclude_ids` 传给 Hook；Hook 先从候选池移除，再在最终出卡前硬过滤，不存在强证据 bypass。因此同一窗口已经返回的桶不重复，当前窗口真正新建的 hold 桶也不参与后续召回或抢占单卡位。`skip_recent_rounds=5` 是另一条旧内部去重路径，不代表 Dashboard 的完整窗口契约。
 4. **Planner 实际可用性**：按新记录统计 normal / not_triggered / disabled / degraded，以及 dehydration 鉴权错误；确认用户当前线上是否确有可用 dehydration 配置。Planner 不可用时 contextual 必须保持“不新增”。
 5. **Shadow relevance 泛化**：继续收集自然话题、明确过去指向、系统复盘和 keyword-only 噪声案例。重点观察 `semantic >= 0.50 + keyword >= 0.65 + specific topic` 的第一版组合证据是否放过无关桶或漏掉真正相关桶；该阈值只用于 Shadow，线上验收后再决定是否调整。
 6. **缺少目标桶的明确请求**：旧 Round 25、54 若对应桶当前不存在，无法证明“明确请求不会整轮误杀”；必须另找已有真实桶的 explicit 案例替代，不把“候选不存在”误判为 gate 失败。
@@ -263,23 +288,23 @@ Gateway Debug 或正式召回。
 1. Dashboard 召回透镜的单页 Debug 信息、中文映射、部署及 `ob2-20260827-r1bpf2` Round 25 / Round 12 第一组真实验收均已完成。
 2. Phase 1 “测试召回 / 观测召回 / 不用搜东西”组合意图优先判 `none` 的修复、回归、完整 SHA 发布和新 session 验收均已完成。
 3. 继续用固定案例验收 necessity、候选独立审核、planner 降级不扩召回和 `semantic_status`；embedding 覆盖统计已完成，不做 backfill。
-4. Recall utility 与候选 relevance 已按 `promote / neutral / reject` 分离并完成本地 Shadow；下一步发布后以“周末快点收尾”等灰区基线验收三档和单卡投影。
+4. Recall utility 与候选 relevance 已按 `promote / neutral / reject` 分离；Dashboard 真实数据已完成三档基础行为和 Shadow 单卡投影验收，Utility MVP 判定通过。
 5. 称呼作为明确讨论对象的语境区分另开后续窗口，不与上述 necessity / utility 问题混做。
-6. 只有 Shadow 验收稳定后才进入 Phase 2，把统一 relevance/admission 渐进接入正式召回；仍不在 Phase 2 顺手处理家族聚类、关系边或额外 LLM agent。
+6. Phase 2 已选择直接接管而非渐进放量：默认最多一张正式桶卡，保留环境变量回滚；不处理家族聚类、自动建边或额外 LLM agent。
 
-Phase 1 necessity/relevance 修正已 commit/push/deploy；组合意图优先级线上 SHA 为 `59a49ad8f5aaca332ef747ed1407e346949333c1`，新 session necessity 验收通过。轻量 utility Shadow 仍只有本地改动，尚未 commit/push/deploy。后续仍可用原固定 Round 9、12、25、54、57、61 与 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24 继续观察候选泛化，但历史 Debug 不会自动补算新字段。在 Shadow 整体稳定前不进入 Phase 2 正式 gate 切换。
+Phase 1 necessity/relevance 修正与轻量 utility Shadow 均已 commit/push/deploy，Dashboard 召回透镜展示也已发布；新 session 的 necessity 与 Utility MVP 验收通过。后续仍可用原固定 Round 9、12、25、54、57、61 与 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24 继续观察候选泛化，但历史 Debug 不会自动补算新字段。在 Shadow 正式接管前，先补一次“那后来呢”上下文指代短测并明确 Phase 2 的渐进开关、回退和验收门槛。
 
 ## 下一窗口唯一范围
 
-下一窗口唯一范围是发布并用新 session 验收轻量 utility Shadow：确认明确回忆/接续指代为 promote，自然 contextual 的相关桶为 neutral 且仍可单卡入选，确定完全重复为 reject。先记录真实结果，不在验收窗口调整 source-record、称呼语境、候选阈值、正式 admission、家族聚类或额外 LLM。utility Shadow 稳定前不进入 Phase 2 正式切换。
+Phase 2 发布后只做新 session smoke：复测 `none`、自然 `contextual`、明确 `explicit`、完全重复 `reject`，并确认正式结果最多一张、召回透镜能同时看到 legacy/rebuilt/effective ID、同窗口已召回桶和新建 hold 桶不再返回。上下文指代测试若前一句已经返回目标桶，则“那后来呢”因窗口排除而为空是正确结果，不能据此判定 contextual promote 失败；要覆盖 promote，需选一个前句只建立话题但尚未召回目标桶的案例。
 
 ## 不得扩散的边界
 
-- Phase 1 不直接切换正式召回路径，只新增可观测的 shadow 结果。
+- `OMBRE_RECALL_DECISION_MODE=rebuilt` 默认正式接管；出现严重回归时只切为 `legacy` 回滚，不现场改阈值。
 - Phase 1 不创建家族表、关系边或自动聚类任务。
 - 下一窗口只用召回透镜验收 utility 三档和单卡结果；不再要求打开 Gateway Debug，也不扩大其他页面视觉。
 - 不用 `localStorage` 作为未来人工标注的唯一存储。
-- 不在未对比固定验收集前删除现有召回规则。
+- 旧召回规则暂不删除，作为 `legacy` 回滚路径保留。
 
 ## 后续窗口顺序
 

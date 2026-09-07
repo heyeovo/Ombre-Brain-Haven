@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sqlite3
 import sys
@@ -243,6 +244,103 @@ class RecallShadowContractsTest(unittest.TestCase):
             debug["selected_candidates"][0]["shadow_utility"]["status"],
             "promote",
         )
+
+    def test_rebuilt_mode_marks_shadow_as_effective_and_legacy_is_rollback(self):
+        service = self.make_service()
+        service.recall_decision_mode = "rebuilt"
+        rebuilt = service._build_recall_shadow_debug(
+            "今天下雨了",
+            RecallNecessityPlan("contextual", True),
+            [self.item("rain", "topic_evidence")],
+            [],
+            {"errors": [], "triggered": False},
+        )
+        self.assertTrue(rebuilt["affects_recall"])
+        self.assertEqual(rebuilt["decision_mode"], "rebuilt")
+
+        service.recall_decision_mode = "legacy"
+        legacy = service._build_recall_shadow_debug(
+            "今天下雨了",
+            RecallNecessityPlan("contextual", True),
+            [self.item("rain", "topic_evidence")],
+            [],
+            {"errors": [], "triggered": False},
+        )
+        self.assertFalse(legacy["affects_recall"])
+
+    def test_effective_bucket_mapping_preserves_rebuilt_order_and_one_card(self):
+        items = [self.item("neutral", "topic_evidence"), self.item("promoted", "topic_evidence")]
+        selected = GatewayService._recall_items_for_bucket_ids(["promoted"], items)
+        self.assertEqual([item["bucket"]["id"] for item in selected], ["promoted"])
+
+    def test_rebuilt_auto_vague_branch_returns_shadow_projection(self):
+        service = self.make_service()
+        service.recall_decision_mode = "rebuilt"
+        service.recall_policy = RecallPolicy()
+        service.inject_max_cards = 2
+        service._query_planner_debug_base = lambda _query: {"errors": [], "triggered": False, "timing_ms": {}}
+        service._shadow_previous_user_query = lambda _session_id, _query: ""
+        service._auto_query_too_vague = lambda _query: True
+        service._has_named_exact_anchor_candidate = lambda _query, _buckets: False
+        service._normalized_recall_query = lambda query: query
+        service._bucket_with_recall_signal = lambda item: dict(item["bucket"])
+
+        async def candidates(*_args, **_kwargs):
+            return [self.item("rain", "topic_evidence")], []
+
+        service._dynamic_bucket_candidate_items = candidates
+        selected, _suppressed, debug = asyncio.run(service._select_dynamic_buckets(
+            "你还记得下雨吗",
+            "session",
+            [],
+            include_query_planner_debug=True,
+        ))
+        self.assertEqual([bucket["id"] for bucket in selected], ["rain"])
+        self.assertEqual(debug["recall_shadow_debug"]["effective_bucket_ids"], ["rain"])
+
+
+class RecallCardRenderingContractsTest(unittest.TestCase):
+    def test_window_exclusions_are_removed_before_candidate_selection(self):
+        buckets = [{"id": "returned"}, {"id": "new-hold"}, {"id": "eligible"}]
+        candidates = GatewayService._without_excluded_recall_buckets(
+            buckets,
+            {"returned", "new-hold"},
+        )
+        self.assertEqual(candidates, [{"id": "eligible"}])
+
+    def test_explicit_related_edges_render_as_one_short_line_with_names_and_ids(self):
+        service = GatewayService.__new__(GatewayService)
+        service.memory_edge_store = type(
+            "EdgeStore",
+            (),
+            {"list_edges": lambda _self: [
+                {"source": "main", "target": "peer-b", "confidence": 0.8},
+                {"source": "peer-a", "target": "main", "confidence": 0.9},
+                {"source": "main", "target": "peer-c", "confidence": 0.7},
+            ]},
+        )()
+        buckets = [
+            {"id": "main", "metadata": {"name": "主桶"}},
+            {"id": "peer-a", "metadata": {"name": "关联甲"}},
+            {"id": "peer-b", "metadata": {"name": "关联乙"}},
+            {"id": "peer-c", "metadata": {"name": "关联丙"}},
+        ]
+        enriched = service._with_recall_related_refs([buckets[0]], buckets)
+        card = {
+            "id": "ombre:main",
+            "source_kind": "direct",
+            "title": "主桶",
+            "text": "正文",
+            "related_buckets": enriched[0]["_recall_related_refs"],
+        }
+        rendered = service._render_hook_recall_additional_context([card])
+        related_lines = [line for line in rendered.splitlines() if line.startswith("关联记忆：")]
+        self.assertEqual(len(related_lines), 1)
+        self.assertIn("「关联甲」[bucket_id:peer-a]", related_lines[0])
+        self.assertIn("「关联乙」[bucket_id:peer-b]", related_lines[0])
+        self.assertNotIn("关联丙", rendered)
+        self.assertNotIn("Retrieved memory notes", rendered)
+        self.assertNotIn("how_to_apply:", rendered)
 
 
 class RecallShadowUtilityTest(unittest.TestCase):

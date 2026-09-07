@@ -178,6 +178,7 @@ Webhook 推送格式（JSON）：
 | `OMBRE_RECALL_DIAGNOSTICS_ENABLED` | 启用召回诊断日志（默认关闭） |
 | `OMBRE_RECALL_DIAGNOSTICS_PATH` | 诊断日志路径 |
 | `OMBRE_RECALL_DIAGNOSTICS_MAX_CANDIDATES` | 诊断日志最大候选数 |
+| `OMBRE_RECALL_DECISION_MODE` | 正式召回决策模式：`rebuilt`（默认，统一 relevance + utility 接管）或 `legacy`（紧急回滚旧路径） |
 | `OMBRE_SCORING_WARMTH_BOOST` | 评分暖度加成（见 `bucket_manager.py`） |
 
 ## Dashboard 持久配置

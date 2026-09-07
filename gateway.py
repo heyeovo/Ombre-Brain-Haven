@@ -806,6 +806,14 @@ class GatewayService:
             self.gateway_cfg.get("phase1_recall_shadow_enabled"),
             True,
         )
+        recall_decision_mode = str(
+            os.environ.get("OMBRE_RECALL_DECISION_MODE")
+            or self.gateway_cfg.get("recall_decision_mode")
+            or "rebuilt"
+        ).strip().lower()
+        self.recall_decision_mode = (
+            recall_decision_mode if recall_decision_mode in {"rebuilt", "legacy"} else "rebuilt"
+        )
         self.phase1_shadow_ignored_address_terms = (
             self._phase1_shadow_ignored_address_terms_from_env()
         )
@@ -10050,6 +10058,10 @@ class GatewayService:
         selected_buckets: list[dict],
         all_buckets: list[dict],
     ) -> list[dict]:
+        # Rebuilt mode owns the final one-card decision. The legacy source-record
+        # extension would otherwise append cards after Utility and bypass its cap.
+        if self._rebuilt_recall_enabled():
+            return selected_buckets
         if not query:
             return selected_buckets
         output = list(selected_buckets or [])
@@ -15023,7 +15035,8 @@ class GatewayService:
         debug: dict[str, Any] = {
             "version": 1,
             "enabled": bool(self.phase1_recall_shadow_enabled),
-            "affects_recall": False,
+            "affects_recall": self._rebuilt_recall_enabled(),
+            "decision_mode": str(getattr(self, "recall_decision_mode", "legacy") or "legacy"),
             "planner_status": planner_status,
             "necessity": necessity_plan.necessity,
             "targetable": bool(necessity_plan.targetable),
@@ -15168,6 +15181,24 @@ class GatewayService:
         debug["rejected_candidates"] = rejected_rows[:20]
         debug["utility_candidates"] = utility_rows[:20]
         return debug
+
+    def _rebuilt_recall_enabled(self) -> bool:
+        return bool(
+            getattr(self, "phase1_recall_shadow_enabled", False)
+            and str(getattr(self, "recall_decision_mode", "legacy") or "legacy") == "rebuilt"
+        )
+
+    @staticmethod
+    def _recall_items_for_bucket_ids(bucket_ids: list[str], candidate_items: list[dict]) -> list[dict]:
+        wanted = [str(item) for item in bucket_ids if str(item or "").strip()]
+        by_id: dict[str, dict] = {}
+        for item in candidate_items or []:
+            if not isinstance(item, dict):
+                continue
+            bucket_id = str((item.get("bucket") or {}).get("id") or "")
+            if bucket_id and bucket_id not in by_id:
+                by_id[bucket_id] = item
+        return [by_id[bucket_id] for bucket_id in wanted if bucket_id in by_id]
 
     @staticmethod
     def _recall_shadow_with_formal_ids(
@@ -17485,7 +17516,7 @@ class GatewayService:
                     {**item, "shadow_candidate_admitted": True}
                     for item in shadow_admitted
                 ]
-            planner_debug["recall_shadow_debug"] = self._build_recall_shadow_debug(
+            recall_shadow_debug = self._build_recall_shadow_debug(
                 query,
                 necessity_plan,
                 [],
@@ -17494,9 +17525,27 @@ class GatewayService:
                 additional_candidate_items=shadow_admitted,
                 recent_context=shadow_recent_context,
             )
+            if self._rebuilt_recall_enabled():
+                selected_items = self._recall_items_for_bucket_ids(
+                    list(recall_shadow_debug.get("shadow_bucket_ids") or []),
+                    [*shadow_admitted, *shadow_suppressed],
+                )
+                selected_buckets = [
+                    self._bucket_with_recall_signal(item)
+                    for item in selected_items
+                    if isinstance(item.get("bucket"), dict)
+                ]
+            else:
+                selected_buckets = []
+            recall_shadow_debug["legacy_bucket_ids"] = []
+            recall_shadow_debug["effective_bucket_ids"] = [
+                str(bucket.get("id") or "") for bucket in selected_buckets if bucket.get("id")
+            ]
+            planner_debug["recall_shadow_debug"] = recall_shadow_debug
+            planner_debug["final_bucket_ids"] = list(recall_shadow_debug["effective_bucket_ids"])
             if include_query_planner_debug:
-                return [], [], planner_debug
-            return [], []
+                return selected_buckets, shadow_suppressed, planner_debug
+            return selected_buckets, shadow_suppressed
 
         stage_started_at = time.perf_counter()
         active_pool, suppressed_candidates = await self._dynamic_bucket_candidate_items(
@@ -17720,7 +17769,7 @@ class GatewayService:
         elif self.query_planner_enabled:
             planner_debug["skip_reason"] = "direct_recall_ok_or_query_short"
 
-        planner_debug["final_bucket_ids"] = [
+        legacy_bucket_ids = [
             str((item.get("bucket") or {}).get("id") or "")
             for item in selected_items
             if (item.get("bucket") or {}).get("id")
@@ -17728,9 +17777,9 @@ class GatewayService:
         planner_debug["structural_activation_debug"] = self._structural_activation_shadow_debug(
             query,
             structural_activation_items,
-            planner_debug["final_bucket_ids"],
+            legacy_bucket_ids,
         )
-        planner_debug["recall_shadow_debug"] = self._build_recall_shadow_debug(
+        recall_shadow_debug = self._build_recall_shadow_debug(
             query,
             necessity_plan,
             selected_items,
@@ -17738,6 +17787,20 @@ class GatewayService:
             planner_debug,
             recent_context=shadow_recent_context,
         )
+        if self._rebuilt_recall_enabled():
+            selected_items = self._recall_items_for_bucket_ids(
+                list(recall_shadow_debug.get("shadow_bucket_ids") or []),
+                [*selected_items, *active_pool, *suppressed_candidates],
+            )
+        effective_bucket_ids = [
+            str((item.get("bucket") or {}).get("id") or "")
+            for item in selected_items
+            if (item.get("bucket") or {}).get("id")
+        ]
+        recall_shadow_debug["legacy_bucket_ids"] = legacy_bucket_ids
+        recall_shadow_debug["effective_bucket_ids"] = effective_bucket_ids
+        planner_debug["recall_shadow_debug"] = recall_shadow_debug
+        planner_debug["final_bucket_ids"] = effective_bucket_ids
         selected_buckets = [
             self._bucket_with_recall_signal(item)
             for item in selected_items
@@ -21001,10 +21064,11 @@ class GatewayService:
                 },
             })
         search_query = self._dynamic_recall_search_query(domain_query or query, memory_sentinel_debug)
+        recall_candidate_buckets = self._without_excluded_recall_buckets(all_buckets, exclude_ids)
         selected_buckets, suppressed_buckets, query_planner_debug = await self._select_dynamic_buckets(
             query,
             session_id,
-            all_buckets,
+            recall_candidate_buckets,
             search_query=search_query,
             include_query_planner_debug=True,
             allow_semantic=allow_semantic,
@@ -21016,8 +21080,9 @@ class GatewayService:
         selected_buckets = self._with_explicit_source_record_buckets(
             query,
             selected_buckets,
-            all_buckets,
+            recall_candidate_buckets,
         )
+        selected_buckets = self._with_recall_related_refs(selected_buckets, all_buckets)
 
         cards: list[dict[str, Any]] = []
         recalled_ids: list[str] = []
@@ -21117,7 +21182,7 @@ class GatewayService:
             "score": bucket.get("score") or signal.get("semantic_score") or signal.get("keyword_score") or 0.0,
             "reading_note": note,
         }
-        return self._hook_recall_card(
+        card = self._hook_recall_card(
             source="direct",
             bucket_id=bucket_id,
             moment_id="",
@@ -21127,6 +21192,68 @@ class GatewayService:
             row=row,
             max_chars=max_chars,
         )
+        card["related_buckets"] = list(bucket.get("_recall_related_refs") or [])[:2]
+        return card
+
+    def _with_recall_related_refs(
+        self,
+        selected_buckets: list[dict],
+        all_buckets: list[dict],
+        *,
+        limit: int = 2,
+    ) -> list[dict]:
+        if not selected_buckets or limit <= 0:
+            return selected_buckets
+        bucket_map = {
+            str(bucket.get("id") or ""): bucket
+            for bucket in all_buckets or []
+            if isinstance(bucket, dict) and bucket.get("id")
+        }
+        try:
+            edges = list(self.memory_edge_store.list_edges() or [])
+        except Exception as exc:
+            logger.warning("Gateway recall related refs unavailable: %s", exc)
+            return selected_buckets
+        output: list[dict] = []
+        for bucket in selected_buckets:
+            bucket_id = str(bucket.get("id") or "")
+            peers: list[tuple[float, str]] = []
+            seen: set[str] = set()
+            for edge in edges:
+                source = str(edge.get("source") or "")
+                target = str(edge.get("target") or "")
+                peer_id = target if source == bucket_id else source if target == bucket_id else ""
+                if not peer_id or peer_id == bucket_id or peer_id in seen or peer_id not in bucket_map:
+                    continue
+                seen.add(peer_id)
+                peers.append((self._safe_float(edge.get("confidence"), 0.0), peer_id))
+            peers.sort(key=lambda item: (-item[0], item[1]))
+            enriched = dict(bucket)
+            enriched["_recall_related_refs"] = [
+                {
+                    "bucket_id": peer_id,
+                    "bucket_name": str(
+                        (bucket_map[peer_id].get("metadata") or {}).get("name")
+                        or bucket_map[peer_id].get("name")
+                        or peer_id
+                    ).strip(),
+                }
+                for _confidence, peer_id in peers[:limit]
+            ]
+            output.append(enriched)
+        return output
+
+    @staticmethod
+    def _without_excluded_recall_buckets(
+        all_buckets: list[dict],
+        exclude_ids: list[str] | tuple[str, ...] | set[str] | None,
+    ) -> list[dict]:
+        excluded = {str(item) for item in (exclude_ids or ()) if str(item or "").strip()}
+        return [
+            bucket
+            for bucket in all_buckets or []
+            if isinstance(bucket, dict) and str(bucket.get("id") or "") not in excluded
+        ]
 
     def _hook_recall_cards_from_debug(
         self,
@@ -21430,12 +21557,7 @@ class GatewayService:
         date_block = str(date_recall or "").strip()
         if not cards and not date_block:
             return ""
-        how_to_apply = GatewayService._hook_recall_how_to_apply()
-        parts = [
-            "[Ombre Gateway Hook Recall]",
-            "Retrieved memory notes. Treat them as private context.",
-            f"how_to_apply: {how_to_apply}",
-        ]
+        parts: list[str] = []
         if date_block:
             parts.append("[date_recall]")
             parts.extend(date_block.splitlines())
@@ -21455,6 +21577,16 @@ class GatewayService:
             if text:
                 parts.append("text: |")
                 parts.extend(f"  {line}" for line in text.splitlines())
+            related = [item for item in (card.get("related_buckets") or []) if isinstance(item, dict)][:2]
+            if related:
+                refs = "、".join(
+                    f"「{str(item.get('bucket_name') or item.get('bucket_id') or '').strip()}」"
+                    f"[bucket_id:{str(item.get('bucket_id') or '').strip()}]"
+                    for item in related
+                    if str(item.get("bucket_id") or "").strip()
+                )
+                if refs:
+                    parts.append(f"关联记忆：可能相关{refs}")
             parts.append("[/memory_card]")
         return "\n".join(parts).strip()
 

@@ -84,7 +84,7 @@ AI 对这段经历的理解、关系侧学习或以后应怎样做。
 
 `bucket` 模式可用于对照测试：它跳过 moment 图刷新和扩散，但仍执行可靠性门控。
 
-Gateway 还会并行记录 Phase 1 召回 shadow：先把本轮分成 `none`、`explicit` 或 `contextual`，再独立审核正式与被拒候选。否定/复盘召回和系统测试语境归为 `none`；同轮同时说明召回测试、召回观测和“不用搜/不用回忆”时，组合意图优先判 `none`，但“你还记得我们第一次测试记忆召回的窗口吗”这类真正指向过去事件的请求仍为 `explicit`；没有触发词但有具体自然话题的消息可归为 `contextual`，由候选证据决定是否值得自然召回。Shadow 要求具体话题与语义证据一致，普通关键词单独命中不能靠 `0.55` 选卡门槛证明相关，唯一名称等直接证据例外；非明确请求在 query planner 降级时不会新增桶。候选 Debug 另用 `semantic_status` 区分真实已评分、未进向量 Top K、缺失/过期 embedding 和查询不可用。该路径只写入 injection Debug 的 `recall_necessity_debug` 与 `recall_shadow_debug`，标记 `affects_recall=false`，不改变当前 admission gate、排序或实际注入。可用 `gateway.phase1_recall_shadow_enabled` 整体关闭。
+Gateway 默认由重构后的召回决策接管正式结果：先把本轮分成 `none`、`explicit` 或 `contextual`，再对旧路径放行与抑制的候选统一执行 relevance 和 `promote / neutral / reject` utility，最终最多注入一张桶卡。普通关键词单独命中不能证明相关；明确回忆和可用前文的接续指代可优先，无法确定增量价值的自然 contextual 保持 neutral，完全重复才 reject。`recall_shadow_debug` 继续保存旧结果、重构结果和最终生效结果供召回透镜对比。环境变量 `OMBRE_RECALL_DECISION_MODE=legacy` 可紧急恢复旧正式决策；默认 `rebuilt`。`phase1_recall_shadow_enabled=false` 也会令接管失效。Dashboard 提供的 session 排除 ID 会先从候选池移除，并在最终出卡时再次硬过滤：本窗口已召回桶和本窗口真正新建的 hold 桶都不会再次参与召回，也不会抢占唯一候选位。Hook 卡片会在正文后附最多一行显式关联边的桶名与 ID，不展开关联正文。
 
 ### 4. Word Map Lite
 

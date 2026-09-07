@@ -289,9 +289,9 @@ GET /api/debug/injections             # 注入调试（见 README「Gateway 注�
 
 ## 关键实现细节
 
-### 召回必要性 Shadow
+### 重构召回正式决策
 
-`recall_policy.py` 的 `RecallNecessityPlan` 在候选桶相关性之前独立判断 `none / explicit / contextual`，并用 `targetable` 防止“你还记得吗”这类无目标请求扩大检索。召回否定/复盘和 Shadow 测试语境优先为 `none`；同轮组合表达召回测试、召回观测和“不用搜/不用回忆”时，以 `recall_test_observation_search_negated` 在明确回忆与自然话题之前判 `none`，但真正指向过去测试事件的“你还记得……”仍判 `explicit`；无触发词但有具体自然话题也可为 `contextual`。`gateway.py` 保留原 admission gate、排序和正式注入，只在 `phase1_recall_shadow_enabled=true` 时对正式/被拒候选统一执行 shadow relevance：具体话题须得到语义或唯一直接证据支持，普通 keyword-only 候选不能靠 `first_card_min_score=0.55` 证明相关。Planner degraded 时 contextual 可删除正式噪声但不得新增桶。通过 relevance 的候选再进入代码版 `promote / neutral / reject` utility：明确回忆和有可用上一轮上下文的接续指代优先，自然 contextual 无法确定增量价值时保持 neutral 且仍可入选，只有确定无增量的完全重复才拒绝；Shadow 最终最多投影一张卡。候选 `semantic_status` 区分 scored、未进 Top K、embedding 缺失/过期和查询不可用；necessity、relevance、utility 与单卡结果均标记为不影响正式召回。
+`recall_policy.py` 的 `RecallNecessityPlan` 在候选相关性之前判断 `none / explicit / contextual`，并用 `targetable` 防止无目标明确请求扩大检索。`gateway.py` 默认以 `OMBRE_RECALL_DECISION_MODE=rebuilt` 让统一 relevance 与代码版 `promote / neutral / reject` utility 接管正式桶结果，最多一张卡；`legacy` 为紧急回滚。Planner degraded 时 contextual 不扩张候选，普通 keyword-only 不能靠分数下限证明相关。Debug 的 `formal_bucket_ids` / `legacy_bucket_ids` 保留旧路径，`shadow_bucket_ids` 保留重构投影，`effective_bucket_ids` 记录实际结果，接管时 `affects_recall=true`。旧 source-record 后置追加不得绕过 Utility 或单卡上限。Dashboard session 的 `injected_buckets ∪ session_created_buckets` 排除集合会先从 Hook 候选池移除，并在输出前再次硬过滤；排除桶不能返回，也不能抢占单卡位。Hook 卡片正文后只可附一行最多两个显式关系边的桶名与 ID，不附关联正文。
 
 ### 噪声系统
 噪声 = `resolved=true AND importance=1`。标记时写入 `importance_before_noise` 备份；撤销时自动恢复。`search()` 默认排除，`include_noise=true` 可包含。各 API 响应含 `"noise": bool` 字段。

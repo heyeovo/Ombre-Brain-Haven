@@ -273,10 +273,20 @@ Dashboard 与 Haven 后续均已发布，并由用户通过召回透镜截图完
 - Dashboard 召回按钮和详情改为“约 N token”。外层表示完整注入，内层表示卡片/日期正文，因此数值可以不同但含义明确；灰色弹窗说明仍只在前端显示，不进入 prompt。
 - 本地验证：Haven `py_compile` 与全套 unittest 189/189 通过；Dashboard 召回/token/提示词相关测试 31/31 通过，生产 build 通过。Dashboard 全套测试除一条既存的 `display_segments` 版本断言外均通过（测试期待 v1、代码长期输出 v2）；另有一条认证 cookie 用例曾偶发失败，单独重跑通过，两者均与本次改动无关。
 
+## 明确回忆的语义查询超时降级（2026-09-07 本地完成）
+
+- 真实召回透镜已证明部分正确候选不是“语义分低”，而是 `query_timeout` 后完全没有语义分；同一桶在语义成功轮次可正常得到分数并被选中。
+- Gateway 的 `embedding.query_timeout_seconds` 默认值从 3 秒调整为 5 秒，降低正常 4–6 秒语义查询被过早切断的概率；召回仍在 Claude 请求前完成，因此最坏情况下首字等待会比原来增加约 2 秒。
+- 新增窄降级：仅 `explicit` 且语义状态为 `query_timeout / query_failed / query_embedding_unavailable / query_embedding_failed` 时，候选标题直接命中清理后的可信主题、正式关键词分 `>= 0.65`，才可进入 Utility。原因码为 `shadow_explicit_query_unavailable_title_keyword`。
+- `disabled_for_request` 不属于故障；自然 `contextual`、只在正文命中主题、或低于门槛的候选仍不会借此进入，原先“正式候选 + keyword >= 0.85”的保守降级保持不变。
+- Dashboard 召回透镜新增标题命中主题、明确回忆标题降级开关和门槛，并为新原因码提供中文解释。
+- 本地验证：Haven `py_compile` 通过，召回专项 33/33、全套 unittest 191/191 通过；Dashboard 原因码测试 6/6、生产 build 通过。
+- 本轮仍需在发布后用新 session 做真实验收；历史 Debug 不会补算新字段。
+
 ## 发布后仍需继续核查
 
 1. **Embedding 内容新鲜度**：线上 318 个桶已确认没有缺失或模型/维度过期向量，因此不执行 backfill。现有检查不包含正文内容哈希；只有后续出现“桶正文已改但向量未刷新”的具体证据时，再单独审计内容新鲜度。
-2. **Semantic 查询状态**：新记录已能区分 `scored`、`indexed_not_in_semantic_top_k`、`query_embedding_unavailable/failed`、`query_timeout/failed` 和 engine disabled；下一窗口把这些已有字段完整呈现在召回透镜，不做视觉重构。
+2. **Semantic 查询状态**：召回透镜已能区分 `scored`、`indexed_not_in_semantic_top_k`、`query_embedding_unavailable/failed`、`query_timeout/failed` 和 engine disabled，并显示明确回忆标题降级证据；发布后需核对真实超时轮次是否命中新原因码。
 3. **Session 去重真实契约**：Dashboard 每轮从 Haven 读取 `injected_buckets ∪ session_created_buckets` 并作为 `exclude_ids` 传给 Hook；Hook 先从候选池移除，再在最终出卡前硬过滤，不存在强证据 bypass。因此同一窗口已经返回的桶不重复，当前窗口真正新建的 hold 桶也不参与后续召回或抢占单卡位。`skip_recent_rounds=5` 是另一条旧内部去重路径，不代表 Dashboard 的完整窗口契约。
 4. **Planner 实际可用性**：按新记录统计 normal / not_triggered / disabled / degraded，以及 dehydration 鉴权错误；确认用户当前线上是否确有可用 dehydration 配置。Planner 不可用时 contextual 必须保持“不新增”。
 5. **Shadow relevance 泛化**：继续收集自然话题、明确过去指向、系统复盘和 keyword-only 噪声案例。重点观察 `semantic >= 0.50 + keyword >= 0.65 + specific topic` 的第一版组合证据是否放过无关桶或漏掉真正相关桶；该阈值只用于 Shadow，线上验收后再决定是否调整。
@@ -296,7 +306,7 @@ Phase 1 necessity/relevance 修正与轻量 utility Shadow 均已 commit/push/de
 
 ## 下一窗口唯一范围
 
-Phase 2 发布后只做新 session smoke：复测 `none`、自然 `contextual`、明确 `explicit`、完全重复 `reject`，并确认正式结果最多一张、召回透镜能同时看到 legacy/rebuilt/effective ID、同窗口已召回桶和新建 hold 桶不再返回。上下文指代测试若前一句已经返回目标桶，则“那后来呢”因窗口排除而为空是正确结果，不能据此判定 contextual promote 失败；要覆盖 promote，需选一个前句只建立话题但尚未召回目标桶的案例。
+Phase 2 发布后只做新 session smoke：复测 `none`、自然 `contextual`、明确 `explicit`、完全重复 `reject`，并确认正式结果最多一张、召回透镜能同时看到 legacy/rebuilt/effective ID、同窗口已召回桶和新建 hold 桶不再返回。另用一个标题含明确主题的真实桶重复 explicit 请求，确认语义正常时照常计分；若出现 `query_timeout/query_failed`，应显示新降级并让 keyword `>= 0.65` 的标题直命中候选进入 Utility。`disabled_for_request` 与自然 contextual 不得触发该降级。上下文指代测试若前一句已经返回目标桶，则“那后来呢”因窗口排除而为空是正确结果，不能据此判定 contextual promote 失败；要覆盖 promote，需选一个前句只建立话题但尚未召回目标桶的案例。
 
 ## 不得扩散的边界
 

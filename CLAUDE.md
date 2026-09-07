@@ -291,7 +291,7 @@ GET /api/debug/injections             # 注入调试（见 README「Gateway 注�
 
 ### 重构召回正式决策
 
-`recall_policy.py` 的 `RecallNecessityPlan` 在候选相关性之前判断 `none / explicit / contextual`，并用 `targetable` 防止无目标明确请求扩大检索。`gateway.py` 默认以 `OMBRE_RECALL_DECISION_MODE=rebuilt` 让统一 relevance 与代码版 `promote / neutral / reject` utility 接管正式桶结果，最多一张卡；`legacy` 为紧急回滚。Planner degraded 时 contextual 不扩张候选，普通 keyword-only 不能靠分数下限证明相关。Debug 的 `formal_bucket_ids` / `legacy_bucket_ids` 保留旧路径，`shadow_bucket_ids` 保留重构投影，`effective_bucket_ids` 记录实际结果，接管时 `affects_recall=true`。旧 source-record 后置追加不得绕过 Utility 或单卡上限。Dashboard session 的 `injected_buckets ∪ session_created_buckets` 排除集合会先从 Hook 候选池移除，并在输出前再次硬过滤；排除桶不能返回，也不能抢占单卡位。Hook 卡片正文后只可附一行最多两个显式关系边的桶名与 ID，不附关联正文。
+`recall_policy.py` 的 `RecallNecessityPlan` 在候选相关性之前判断 `none / explicit / contextual`，并用 `targetable` 防止无目标明确请求扩大检索。`gateway.py` 默认以 `OMBRE_RECALL_DECISION_MODE=rebuilt` 让统一 relevance 与代码版 `promote / neutral / reject` utility 接管正式桶结果，最多一张卡；`legacy` 为紧急回滚。Planner degraded 时 contextual 不扩张候选，普通 keyword-only 不能靠分数下限证明相关。语义查询默认超时为 5 秒；`explicit` 在 `query_timeout/query_failed/query_embedding_unavailable/query_embedding_failed` 时，可凭“可信主题直接命中桶标题 + keyword >= 0.65”保守进入 Utility，但 `disabled_for_request`、contextual 和仅正文命中不能使用该降级。Debug 的 `formal_bucket_ids` / `legacy_bucket_ids` 保留旧路径，`shadow_bucket_ids` 保留重构投影，`effective_bucket_ids` 记录实际结果，接管时 `affects_recall=true`。旧 source-record 后置追加不得绕过 Utility 或单卡上限。Dashboard session 的 `injected_buckets ∪ session_created_buckets` 排除集合会先从 Hook 候选池移除，并在输出前再次硬过滤；排除桶不能返回，也不能抢占单卡位。Hook 卡片正文后只可附一行最多两个显式关系边的桶名与 ID，不附关联正文。
 
 ### 噪声系统
 噪声 = `resolved=true AND importance=1`。标记时写入 `importance_before_noise` 备份；撤销时自动恢复。`search()` 默认排除，`include_noise=true` 可包含。各 API 响应含 `"noise": bool` 字段。

@@ -76,6 +76,7 @@ Gateway 先生成轮级 `RecallNecessityPlan`，再让统一 relevance 与 utili
 - Shadow 保留正式候选池同一口径的 `keyword_score`，不再对单桶建立第二套 BM25 分数；称呼只是不允许成为 `matched_topic_terms` 或直接证据，不会给候选加分或扣分。rare-name、身份名候选和“query 词命中桶标题”必须同时命中清理后的可信主题；用户明确给出桶 ID 仍属于直接证据。
 - 候选 debug 同时记录 `raw_topic_terms`、`topic_terms`、`ignored_address_terms`、`ignored_identity_terms`、`ignored_configured_address_terms`、`ignored_topic_terms`、`formal_keyword_score`、`shadow_keyword_score` 以及各直接证据是否实际生效。当前两个 keyword 字段同值，保留命名仅为兼容已发布 Debug。
 - 当 query 语义阶段返回 `query_timeout / query_failed / query_embedding_unavailable / query_embedding_failed` 时，Shadow 可用正式关键词分 `>= 0.85` 且命中清理称呼后的可信主题词做保守降级；该降级只保留正式结果中已经存在的桶，不从 additional/suppressed 候选新增，因此 contextual 不会因语义故障扩大召回。`indexed_not_in_semantic_top_k` 不属于查询故障，不能触发此降级。
+- 同一组 query 语义故障下，`explicit` 还可使用更窄的新增候选降级：可信主题必须直接出现在桶标题，且正式关键词分 `>= 0.65`，原因码为 `shadow_explicit_query_unavailable_title_keyword`。仅正文命中主题不够；`contextual` 不适用；`disabled_for_request` 表示调用方主动关闭语义，也不属于故障降级。
 
 - `none` 的 shadow 结果为空；
 - `explicit/contextual` 都重新审核正式候选，不再无条件继承正式 admission；
@@ -90,8 +91,8 @@ Gateway 先生成轮级 `RecallNecessityPlan`，再让统一 relevance 与 utili
 `promote`；自然 `contextual` 在本地规则无法确认增量价值时保持 `neutral`，仍有
 召回资格，不会默认沉默；只有候选正文与当前原句完全相同等确定无增量情况才
 `reject`。Shadow 优先从 `promote` 候选中选择，否则从 `neutral` 候选中选择，
-当前投影最多保留一张卡。该 utility 与单卡结果均只写 Debug，仍不改变正式
-admission、排序或注入。
+当前投影最多保留一张卡。`OMBRE_RECALL_DECISION_MODE=rebuilt` 时该 utility 与单卡结果
+就是正式结果；`legacy` 时只保留 Debug 对照。
 
 Debug 顶层新增：
 
@@ -117,6 +118,7 @@ Debug 顶层新增：
 | `keyword_weight` | `0.35` | 非 dynamic 模式下关键词权重 |
 | `cooldown_hours` | — | 同桶冷却时间 |
 | `semantic_session_dedupe_threshold` | `0.90` | 会话语义去重阈值 |
+| `embedding.query_timeout_seconds` | `5` | 单轮语义查询最多等待秒数；超时后只允许上述保守降级 |
 | `_RECALL_EXCLUDED_DOMAINS` | `journey, journal` | 动态召回排除的域 |
 | `phase1_recall_shadow_enabled` | `true` | 开启重构 relevance / utility 计算；关闭时正式接管自动失效 |
 | `OMBRE_RECALL_DECISION_MODE` | `rebuilt` | `rebuilt` 使用重构正式结果；`legacy` 紧急恢复旧正式结果 |

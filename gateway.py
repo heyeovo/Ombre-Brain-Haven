@@ -402,6 +402,7 @@ MOMENT_CHUNK_SHADOW_TARGET_CHARS = 320
 MOMENT_CHUNK_SHADOW_MAX_CHARS = 520
 MOMENT_CHUNK_SHADOW_MIN_TAIL_CHARS = 100
 SHADOW_QUERY_UNAVAILABLE_KEYWORD_MIN = 0.85
+SHADOW_EXPLICIT_QUERY_UNAVAILABLE_KEYWORD_MIN = 0.65
 SHADOW_QUERY_UNAVAILABLE_STATUSES = frozenset(
     {
         "query_timeout",
@@ -765,11 +766,11 @@ class GatewayService:
             embedding_timeout = float(
                 self.gateway_cfg.get(
                     "embedding_query_timeout_seconds",
-                    embedding_cfg.get("query_timeout_seconds", 3),
+                    embedding_cfg.get("query_timeout_seconds", 5),
                 )
             )
         except (TypeError, ValueError):
-            embedding_timeout = 3.0
+            embedding_timeout = 5.0
         self.embedding_query_timeout_seconds = max(0.0, min(30.0, embedding_timeout))
         self.first_card_min_score = float(self.gateway_cfg.get("first_card_min_score", 0.55))
         self.second_card_min_score = float(self.gateway_cfg.get("second_card_min_score", 0.50))
@@ -14864,6 +14865,15 @@ class GatewayService:
             if self._bucket_matches_any_planner_term(bucket, [term])
         ]
         has_topic = bool(matched_topic_terms)
+        bucket_metadata = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+        bucket_title_key = self._compact_lookup_key(
+            str(bucket_metadata.get("name") or bucket.get("name") or "")
+        )
+        matched_title_topic_terms = [
+            term
+            for term in topic_terms
+            if self._compact_lookup_key(term) in bucket_title_key
+        ]
         bucket_id = str(bucket.get("id") or "")
         identity_keys = set(self._identity_match_terms(compact=True))
         rare_name_terms = [
@@ -14901,6 +14911,13 @@ class GatewayService:
             and keyword_score >= SHADOW_QUERY_UNAVAILABLE_KEYWORD_MIN
             and has_topic
         )
+        explicit_query_unavailable_title_fallback = bool(
+            necessity == "explicit"
+            and semantic_raw is None
+            and query_semantic_unavailable
+            and keyword_score >= SHADOW_EXPLICIT_QUERY_UNAVAILABLE_KEYWORD_MIN
+            and matched_title_topic_terms
+        )
         details = {
             "semantic_status": semantic_status,
             "semantic_score": semantic_score,
@@ -14916,6 +14933,7 @@ class GatewayService:
             ],
             "ignored_topic_terms": topic_term_plan["ignored_topic_terms"],
             "matched_topic_terms": matched_topic_terms,
+            "matched_title_topic_terms": matched_title_topic_terms,
             "rare_name_terms": rare_name_terms,
             "rare_name_direct": rare_name_direct,
             "identity_name_direct": identity_name_direct,
@@ -14928,6 +14946,8 @@ class GatewayService:
             "query_semantic_unavailable": query_semantic_unavailable,
             "query_unavailable_keyword_min": SHADOW_QUERY_UNAVAILABLE_KEYWORD_MIN,
             "query_unavailable_keyword_fallback": query_unavailable_keyword_fallback,
+            "explicit_query_unavailable_keyword_min": SHADOW_EXPLICIT_QUERY_UNAVAILABLE_KEYWORD_MIN,
+            "explicit_query_unavailable_title_fallback": explicit_query_unavailable_title_fallback,
         }
 
         if unique_direct:
@@ -14942,6 +14962,8 @@ class GatewayService:
             return True, "shadow_explicit_exact_topic", details
         if query_unavailable_keyword_fallback:
             return True, "shadow_query_unavailable_formal_topic_keyword", details
+        if explicit_query_unavailable_title_fallback:
+            return True, "shadow_explicit_query_unavailable_title_keyword", details
         if semantic_raw is None:
             return False, "shadow_semantic_not_scored", details
         if semantic_score <= 0 and keyword_score > 0:

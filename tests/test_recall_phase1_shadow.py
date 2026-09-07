@@ -615,6 +615,79 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
         self.assertFalse(admitted)
         self.assertEqual(reason, "shadow_semantic_not_scored")
 
+    def test_explicit_query_timeout_can_use_trusted_title_topic_and_keyword(self):
+        service = self.make_service()
+        item = self.item(
+            "生日与遗忘的和解",
+            "那次因为生日的事情吵架，后来认真说开了。",
+            semantic=None,
+            keyword=0.706,
+            semantic_status="query_timeout",
+        )
+        admitted, reason, debug = service._shadow_candidate_relevance(
+            "你还记得那次因为生日的事跟你吵架吗",
+            "explicit",
+            item,
+            formal_candidate=False,
+        )
+        self.assertTrue(admitted)
+        self.assertEqual(reason, "shadow_explicit_query_unavailable_title_keyword")
+        self.assertEqual(debug["matched_title_topic_terms"], ["生日"])
+        self.assertTrue(debug["explicit_query_unavailable_title_fallback"])
+
+    def test_query_timeout_title_fallback_does_not_expand_contextual_or_content_only_match(self):
+        service = self.make_service()
+        title_match = self.item(
+            "生日与遗忘的和解",
+            "那次生日后来认真说开了。",
+            semantic=None,
+            keyword=0.706,
+            semantic_status="query_timeout",
+        )
+        admitted, reason, _debug = service._shadow_candidate_relevance(
+            "最近又想起生日了",
+            "contextual",
+            title_match,
+            formal_candidate=False,
+        )
+        self.assertFalse(admitted)
+        self.assertEqual(reason, "shadow_semantic_not_scored")
+
+        content_only = self.item(
+            "一次争吵",
+            "那次因为生日的事情吵架。",
+            semantic=None,
+            keyword=0.706,
+            semantic_status="query_timeout",
+        )
+        admitted, reason, debug = service._shadow_candidate_relevance(
+            "你还记得那次因为生日的事跟你吵架吗",
+            "explicit",
+            content_only,
+            formal_candidate=False,
+        )
+        self.assertFalse(admitted)
+        self.assertEqual(reason, "shadow_semantic_not_scored")
+        self.assertEqual(debug["matched_title_topic_terms"], [])
+
+        semantic_disabled = self.item(
+            "生日与遗忘的和解",
+            "那次因为生日的事情吵架。",
+            semantic=None,
+            keyword=0.706,
+            semantic_status="disabled_for_request",
+        )
+        admitted, reason, debug = service._shadow_candidate_relevance(
+            "你还记得那次因为生日的事跟你吵架吗",
+            "explicit",
+            semantic_disabled,
+            formal_candidate=False,
+        )
+        self.assertFalse(admitted)
+        self.assertEqual(reason, "shadow_semantic_not_scored")
+        self.assertFalse(debug["query_semantic_unavailable"])
+        self.assertFalse(debug["explicit_query_unavailable_title_fallback"])
+
         completed = self.item(
             "每一场雨都跟你在一起",
             "那天早上下雨了",

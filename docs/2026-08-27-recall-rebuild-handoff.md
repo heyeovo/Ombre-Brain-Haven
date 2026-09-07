@@ -292,6 +292,14 @@ Dashboard 与 Haven 后续均已发布，并由用户通过召回透镜截图完
 - Debug 新增 `reviewed_candidate_count`、`candidate_debug_truncated`，候选记录 `candidate_origin / legacy_score / rebuilt_score / rebuilt_freshness_ignored`。召回透镜合并显示正式抑制和新规则拒绝项，明确标注“旧规则已准入未选”，并区分旧分与新分。
 - 本地验证：Haven `py_compile`、召回专项 36/36、全套 unittest 194/194 通过；Dashboard 原因码测试 6/6、生产 build 通过。发布后需用新的“纪念日”轮次确认两个标题直命中桶至少进入完整候选列表；是否最终注入仍由 relevance、utility 和单卡排序决定。
 
+## Utility 保留未选候选可见性（2026-09-07 本地完成）
+
+- 线上“纪念日”轮次确认 rebuilt 实际审核 16 个候选、旧链路 Debug 为 12 个，候选池补全已经生效；三个桶通过 Utility，最终按单卡上限只注入一个。
+- 此轮同时暴露 Debug 缺口：通过 Utility 后未获得单卡位的 neutral 桶既不属于 selected，也不属于 rejected；旧 `utility_candidates` 又只保存 ID，导致召回透镜只能显示 ID，且下方候选区无法定位完整候选。
+- Haven 现为 `utility_candidates` 补齐桶名，并新增 `eligible_unselected_candidates` 保存完整候选、旧/新分、来源、Utility 与 `shadow_promote_priority / shadow_single_card_limit` 未选原因。该字段只增强观测，不改变 relevance、utility、排序、单卡上限或正式注入。
+- Dashboard 新增“保留资格但未入选”独立区域；Utility 顶部同时显示桶名和 ID。未入选 neutral 不再错误落入“被拒候选”。
+- 发布后用新的自然“纪念日”轮次验收：所有进入 Utility 的桶都应显示桶名和 ID；最终注入仍最多一个；其余通过 Utility 的桶应出现在“保留资格但未入选”，而非“被拒候选”。
+
 ## 发布后仍需继续核查
 
 1. **Embedding 内容新鲜度**：线上 318 个桶已确认没有缺失或模型/维度过期向量，因此不执行 backfill。现有检查不包含正文内容哈希；只有后续出现“桶正文已改但向量未刷新”的具体证据时，再单独审计内容新鲜度。

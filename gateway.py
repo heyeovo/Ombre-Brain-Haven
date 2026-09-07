@@ -15068,6 +15068,7 @@ class GatewayService:
             "added_bucket_ids": [],
             "removed_bucket_ids": [],
             "selected_candidates": [],
+            "eligible_unselected_candidates": [],
             "rejected_candidates": [],
             "utility_candidates": [],
             "utility_contract": "promote_neutral_reject_code_v1",
@@ -15147,9 +15148,16 @@ class GatewayService:
                         "reason_codes": list(utility.reason_codes),
                         **dict(utility.debug or {}),
                     }
+                    utility_bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
+                    utility_metadata = (
+                        utility_bucket.get("metadata")
+                        if isinstance(utility_bucket.get("metadata"), dict)
+                        else {}
+                    )
                     utility_rows.append(
                         {
                             "bucket_id": bucket_id,
+                            "bucket_name": str(utility_metadata.get("name") or bucket_id),
                             "status": utility.status,
                             "reason_codes": list(utility.reason_codes),
                         }
@@ -15226,6 +15234,51 @@ class GatewayService:
             row["rebuilt_score"] = item.get("rebuilt_score")
             row["rebuilt_freshness_ignored"] = item.get("rebuilt_freshness_ignored")
             selected_rows.append(row)
+        selected_id_set = {
+            str((item.get("bucket") or {}).get("id") or "")
+            for item in shadow_items
+            if (item.get("bucket") or {}).get("id")
+        }
+        eligible_unselected_rows: list[dict[str, Any]] = []
+        ranked_shadow_pool = sorted(
+            shadow_pool,
+            key=lambda item: (
+                0
+                if str((item.get("shadow_utility") or {}).get("status") or "") == "promote"
+                else 1,
+                self._bucket_final_candidate_rank(query, item),
+            ),
+        )
+        for item in ranked_shadow_pool:
+            bucket_id = str((item.get("bucket") or {}).get("id") or "")
+            if not bucket_id or bucket_id in selected_id_set:
+                continue
+            row = self._format_suppressed_bucket_debug(
+                item,
+                query=query,
+                status="shadow_eligible_unselected",
+            )
+            row["formal_admission_reason"] = str(
+                item.get("shadow_original_admission_reason")
+                or item.get("admission_reason")
+                or "admitted_bucket"
+            )
+            row["shadow_admission_reason"] = str(
+                item.get("admission_reason") or "shadow_eligible_unselected"
+            )
+            row["shadow_relevance_debug"] = dict(item.get("shadow_relevance_debug") or {})
+            row["shadow_utility"] = dict(item.get("shadow_utility") or {})
+            row["candidate_origin"] = str(item.get("rebuilt_candidate_origin") or "")
+            row["legacy_score"] = item.get("legacy_score")
+            row["rebuilt_score"] = item.get("rebuilt_score")
+            row["rebuilt_freshness_ignored"] = item.get("rebuilt_freshness_ignored")
+            utility_status = str((item.get("shadow_utility") or {}).get("status") or "")
+            row["shadow_selection_reason"] = (
+                "shadow_promote_priority"
+                if promoted_pool and utility_status != "promote"
+                else "shadow_single_card_limit"
+            )
+            eligible_unselected_rows.append(row)
         debug["shadow_bucket_ids"] = shadow_bucket_ids
         debug["added_bucket_ids"] = [item for item in shadow_bucket_ids if item not in formal_bucket_ids]
         debug["removed_bucket_ids"] = [item for item in formal_bucket_ids if item not in shadow_bucket_ids]
@@ -15236,10 +15289,14 @@ class GatewayService:
         debug["reviewed_candidate_count"] = len(seen_ids)
         debug["candidate_debug_truncated"] = bool(
             len(selected_rows) > candidate_debug_limit
+            or len(eligible_unselected_rows) > candidate_debug_limit
             or len(rejected_rows) > candidate_debug_limit
             or len(utility_rows) > candidate_debug_limit
         )
         debug["selected_candidates"] = selected_rows[:candidate_debug_limit]
+        debug["eligible_unselected_candidates"] = eligible_unselected_rows[
+            :candidate_debug_limit
+        ]
         debug["rejected_candidates"] = rejected_rows[:candidate_debug_limit]
         debug["utility_candidates"] = utility_rows[:candidate_debug_limit]
         return debug

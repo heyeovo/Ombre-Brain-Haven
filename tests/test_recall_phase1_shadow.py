@@ -118,6 +118,9 @@ class RecallShadowContractsTest(unittest.TestCase):
         service._pick_dynamic_cards = lambda items, *, query="": list(items)[:2]
         service._format_suppressed_bucket_debug = lambda item, **_kwargs: {
             "bucket_id": str((item.get("bucket") or {}).get("id") or ""),
+            "bucket_name": str(
+                ((item.get("bucket") or {}).get("metadata") or {}).get("name") or ""
+            ),
             "admission_reason": str(item.get("admission_reason") or "suppressed"),
         }
         return service
@@ -284,6 +287,42 @@ class RecallShadowContractsTest(unittest.TestCase):
         self.assertEqual(selected["legacy_score"], 0.68)
         self.assertEqual(selected["rebuilt_score"], 0.68)
         self.assertTrue(selected["rebuilt_freshness_ignored"])
+        self.assertEqual(
+            [candidate["bucket_id"] for candidate in debug["eligible_unselected_candidates"]],
+            ["fresh"],
+        )
+        self.assertEqual(
+            debug["eligible_unselected_candidates"][0]["shadow_selection_reason"],
+            "shadow_single_card_limit",
+        )
+        self.assertEqual(
+            {candidate["bucket_id"]: candidate["bucket_name"] for candidate in debug["utility_candidates"]},
+            {"fresh": "fresh", "older": "older"},
+        )
+
+    def test_promote_priority_keeps_neutral_candidate_visible_without_rejecting_it(self):
+        service = self.make_service()
+        promoted = self.item("promoted", "topic_evidence", utility="promote")
+        neutral = self.item("neutral", "topic_evidence", utility="neutral")
+
+        debug = service._build_recall_shadow_debug(
+            "你还记得纪念日吗",
+            RecallNecessityPlan("explicit", True),
+            [promoted, neutral],
+            [],
+            {"errors": [], "triggered": False},
+        )
+
+        self.assertEqual(debug["shadow_bucket_ids"], ["promoted"])
+        self.assertEqual(debug["rejected_candidates"], [])
+        self.assertEqual(
+            debug["eligible_unselected_candidates"][0]["bucket_id"],
+            "neutral",
+        )
+        self.assertEqual(
+            debug["eligible_unselected_candidates"][0]["shadow_selection_reason"],
+            "shadow_promote_priority",
+        )
 
     def test_rebuilt_reranker_candidate_priority_ignores_freshness_but_legacy_keeps_it(self):
         service = self.make_service()

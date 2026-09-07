@@ -100,7 +100,8 @@ Debug 顶层新增：
 
 - `recall_necessity_debug`：必要性、是否可定位、理由码和上下文是否可用；
 - `recall_shadow_debug`：planner 状态、降级策略、正式/shadow 桶 ID、增减桶和 shadow 候选；
-- `recall_shadow_debug.utility_candidates`：通过 relevance 后每个候选的 utility 三档与原因码；选中/utility 拒绝候选还分别保留 `shadow_utility` 详情；
+- `recall_shadow_debug.utility_candidates`：通过 relevance 后每个候选的桶名、ID、utility 三档与原因码；选中/utility 拒绝候选还分别保留 `shadow_utility` 详情；
+- `recall_shadow_debug.eligible_unselected_candidates`：已经通过 relevance/utility、但因 promote 优先或单卡上限未入选的完整候选；它们保持召回资格，不并入拒绝候选；
 - `reviewed_candidate_count` 记录新规则实际审核总数；候选的 `candidate_origin` 区分旧规则最终选中、旧规则已准入未选中和旧规则抑制，`legacy_score / rebuilt_score` 说明 freshness 移除前后的排序分数。
 - `formal_bucket_ids` / `legacy_bucket_ids` 是旧路径结果，`shadow_bucket_ids` 是重构投影，`effective_bucket_ids` 是最终结果；`rebuilt` 时 `recall_shadow_debug.affects_recall=true`。
 - 重构正式结果最多一张桶卡；旧 source-record 后置扩展不能绕过 utility 或单卡上限。

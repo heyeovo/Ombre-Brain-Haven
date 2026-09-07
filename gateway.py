@@ -15072,6 +15072,8 @@ class GatewayService:
             "utility_candidates": [],
             "utility_contract": "promote_neutral_reject_code_v1",
             "shadow_max_cards": 1,
+            "reviewed_candidate_count": 0,
+            "candidate_debug_truncated": False,
         }
         if not self.phase1_recall_shadow_enabled:
             debug["fallback_strategy"] = "shadow_disabled"
@@ -15080,6 +15082,7 @@ class GatewayService:
         shadow_pool: list[dict] = []
         rejected_rows: list[dict[str, Any]] = []
         utility_rows: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
         if necessity_plan.necessity == "none":
             debug["fallback_strategy"] = "necessity_none"
         elif not necessity_plan.targetable:
@@ -15101,17 +15104,29 @@ class GatewayService:
                 for item in formal_items
                 if (item.get("bucket") or {}).get("id")
             }
+            additional_ids = {
+                str((item.get("bucket") or {}).get("id") or "")
+                for item in additional_candidate_items
+                if (item.get("bucket") or {}).get("id")
+            }
             candidates = [*formal_items]
             if not conservative_contextual:
                 candidates.extend(additional_candidate_items)
                 candidates.extend(suppressed_items)
-            seen_ids: set[str] = set()
             for raw_item in candidates:
-                item = dict(raw_item)
+                item = self._rebuilt_recall_candidate_item(raw_item)
                 bucket_id = str((item.get("bucket") or {}).get("id") or "")
                 if not bucket_id or bucket_id in seen_ids:
                     continue
                 seen_ids.add(bucket_id)
+                candidate_origin = (
+                    "legacy_selected"
+                    if bucket_id in formal_ids
+                    else "retrieved_admitted_unselected"
+                    if bucket_id in additional_ids
+                    else "legacy_suppressed"
+                )
+                item["rebuilt_candidate_origin"] = candidate_origin
                 admitted, shadow_reason, relevance_debug = self._shadow_candidate_relevance(
                     query,
                     necessity_plan.necessity,
@@ -15151,6 +15166,10 @@ class GatewayService:
                         row["shadow_relevance_debug"] = relevance_debug
                         row["shadow_utility"] = utility_debug
                         row["was_formal_candidate"] = bucket_id in formal_ids
+                        row["candidate_origin"] = candidate_origin
+                        row["legacy_score"] = item.get("legacy_score")
+                        row["rebuilt_score"] = item.get("rebuilt_score")
+                        row["rebuilt_freshness_ignored"] = item.get("rebuilt_freshness_ignored")
                         rejected_rows.append(row)
                         continue
                     item["shadow_original_admission_reason"] = original_reason
@@ -15165,6 +15184,10 @@ class GatewayService:
                 row["shadow_admission_reason"] = shadow_reason
                 row["shadow_relevance_debug"] = relevance_debug
                 row["was_formal_candidate"] = bucket_id in formal_ids
+                row["candidate_origin"] = candidate_origin
+                row["legacy_score"] = item.get("legacy_score")
+                row["rebuilt_score"] = item.get("rebuilt_score")
+                row["rebuilt_freshness_ignored"] = item.get("rebuilt_freshness_ignored")
                 rejected_rows.append(row)
 
         promoted_pool = [
@@ -15172,7 +15195,10 @@ class GatewayService:
             for item in shadow_pool
             if str((item.get("shadow_utility") or {}).get("status") or "") == "promote"
         ]
-        selection_pool = promoted_pool or shadow_pool
+        selection_pool = sorted(
+            promoted_pool or shadow_pool,
+            key=lambda item: self._bucket_final_candidate_rank(query, item),
+        )
         shadow_items = (
             self._pick_dynamic_cards(selection_pool, query=query)[:1]
             if selection_pool
@@ -15195,14 +15221,42 @@ class GatewayService:
             row["shadow_softened_reasons"] = list(item.get("shadow_softened_reasons") or [])
             row["shadow_relevance_debug"] = dict(item.get("shadow_relevance_debug") or {})
             row["shadow_utility"] = dict(item.get("shadow_utility") or {})
+            row["candidate_origin"] = str(item.get("rebuilt_candidate_origin") or "")
+            row["legacy_score"] = item.get("legacy_score")
+            row["rebuilt_score"] = item.get("rebuilt_score")
+            row["rebuilt_freshness_ignored"] = item.get("rebuilt_freshness_ignored")
             selected_rows.append(row)
         debug["shadow_bucket_ids"] = shadow_bucket_ids
         debug["added_bucket_ids"] = [item for item in shadow_bucket_ids if item not in formal_bucket_ids]
         debug["removed_bucket_ids"] = [item for item in formal_bucket_ids if item not in shadow_bucket_ids]
-        debug["selected_candidates"] = selected_rows[:20]
-        debug["rejected_candidates"] = rejected_rows[:20]
-        debug["utility_candidates"] = utility_rows[:20]
+        candidate_debug_limit = 100
+        rejected_rows.sort(
+            key=lambda row: -self._safe_float(row.get("rebuilt_score"), row.get("score")),
+        )
+        debug["reviewed_candidate_count"] = len(seen_ids)
+        debug["candidate_debug_truncated"] = bool(
+            len(selected_rows) > candidate_debug_limit
+            or len(rejected_rows) > candidate_debug_limit
+            or len(utility_rows) > candidate_debug_limit
+        )
+        debug["selected_candidates"] = selected_rows[:candidate_debug_limit]
+        debug["rejected_candidates"] = rejected_rows[:candidate_debug_limit]
+        debug["utility_candidates"] = utility_rows[:candidate_debug_limit]
         return debug
+
+    def _rebuilt_recall_candidate_item(self, raw_item: dict) -> dict:
+        item = dict(raw_item)
+        legacy_score = self._safe_float(item.get("score"), 0.0)
+        has_freshness_free_score = item.get("score_without_freshness") is not None
+        rebuilt_score = self._safe_float(
+            item.get("score_without_freshness"),
+            legacy_score,
+        )
+        item["legacy_score"] = legacy_score
+        item["rebuilt_score"] = rebuilt_score
+        item["rebuilt_freshness_ignored"] = has_freshness_free_score
+        item["score"] = rebuilt_score
+        return item
 
     def _rebuilt_recall_enabled(self) -> bool:
         return bool(
@@ -17299,6 +17353,15 @@ class GatewayService:
                     ),
                     4,
                 )
+                score_without_freshness = round(
+                    self._clamp(
+                        fusion_score
+                        + word_map_adjustment
+                        + round(0.02 * importance_score, 4)
+                        - cooldown_penalty
+                    ),
+                    4,
+                )
             else:
                 fusion_score = (
                     semantic_score * self.semantic_weight
@@ -17309,8 +17372,25 @@ class GatewayService:
                     + freshness_score * self.freshness_weight
                 ) * relevance_score
                 final_score = round(fusion_score * cooldown_multiplier, 4)
+                freshness_free_fusion_score = (
+                    semantic_score * self.semantic_weight
+                    + keyword_score * self.keyword_weight
+                    + word_map_adjustment
+                    + entity_edge_score * 0.08
+                    + importance_score * self.importance_weight
+                ) * relevance_score
+                score_without_freshness = round(
+                    freshness_free_fusion_score * cooldown_multiplier,
+                    4,
+                )
             if entity_edge_score > 0:
                 final_score = round(self._clamp(final_score + min(0.08, entity_edge_score * 0.08)), 4)
+                score_without_freshness = round(
+                    self._clamp(
+                        score_without_freshness + min(0.08, entity_edge_score * 0.08)
+                    ),
+                    4,
+                )
             if (
                 planner_lexical_direct_match
                 or exact_match
@@ -17318,10 +17398,20 @@ class GatewayService:
                 or dynamic_anchor.get("category_overview_item")
             ):
                 final_score = max(final_score, self.first_card_min_score)
+                score_without_freshness = max(
+                    score_without_freshness,
+                    self.first_card_min_score,
+                )
+            freshness_adjustment = round(
+                max(0.0, final_score - score_without_freshness),
+                4,
+            )
             scored_candidates.append(
                 {
                     "bucket": bucket,
                     "score": final_score,
+                    "score_without_freshness": score_without_freshness,
+                    "freshness_adjustment": freshness_adjustment,
                     "semantic_score": (
                         semantic_score if raw_semantic_score is not None else None
                     ),
@@ -17581,6 +17671,7 @@ class GatewayService:
             timing_debug=timing_debug,
             timing_prefix="direct",
         )
+        rebuilt_admitted_candidates = list(active_pool)
         structural_activation_items = list(active_pool) + list(suppressed_candidates)
         self._add_timing_ms(timing_debug, "direct.candidate_items_total", stage_started_at)
         stage_started_at = time.perf_counter()
@@ -17618,6 +17709,7 @@ class GatewayService:
                     rescued_item = rescued_items[0]
                     rescued_bucket_id = str((rescued_item.get("bucket") or {}).get("id") or "")
                     active_pool.append(rescued_item)
+                    rebuilt_admitted_candidates.append(rescued_item)
                     direct_selected.append(rescued_item)
                     selected_items = list(direct_selected)
                     structural_activation_items.append(rescued_item)
@@ -17666,6 +17758,7 @@ class GatewayService:
                     stage_started_at,
                 )
                 relation_axis_items.extend(admitted)
+                rebuilt_admitted_candidates.extend(admitted)
                 suppressed_candidates.extend(suppressed)
                 structural_activation_items.extend(admitted)
                 structural_activation_items.extend(suppressed)
@@ -17743,6 +17836,7 @@ class GatewayService:
                             stage_started_at,
                         )
                         supplemental_items.extend(admitted)
+                        rebuilt_admitted_candidates.extend(admitted)
                         suppressed_candidates.extend(suppressed)
                         structural_activation_items.extend(admitted)
                         structural_activation_items.extend(suppressed)
@@ -17807,12 +17901,13 @@ class GatewayService:
             selected_items,
             suppressed_candidates,
             planner_debug,
+            additional_candidate_items=rebuilt_admitted_candidates,
             recent_context=shadow_recent_context,
         )
         if self._rebuilt_recall_enabled():
             selected_items = self._recall_items_for_bucket_ids(
                 list(recall_shadow_debug.get("shadow_bucket_ids") or []),
-                [*selected_items, *active_pool, *suppressed_candidates],
+                [*selected_items, *rebuilt_admitted_candidates, *suppressed_candidates],
             )
         effective_bucket_ids = [
             str((item.get("bucket") or {}).get("id") or "")
@@ -18192,6 +18287,10 @@ class GatewayService:
         for index, item in enumerate(head):
             new_item = dict(item)
             rerank_score = by_index.get(index)
+            freshness_free_score = self._safe_float(
+                item.get("score_without_freshness"),
+                item.get("score"),
+            )
             if rerank_score is None:
                 new_item["rerank_score"] = None
                 new_item["combined_score"] = item["score"]
@@ -18199,6 +18298,15 @@ class GatewayService:
                 new_item["rerank_score"] = round(rerank_score, 4)
                 new_item["combined_score"] = round(item["score"] * (1.0 - weight) + rerank_score * weight, 4)
                 new_item["score"] = new_item["combined_score"]
+                freshness_free_score = round(
+                    freshness_free_score * (1.0 - weight) + rerank_score * weight,
+                    4,
+                )
+            new_item["score_without_freshness"] = freshness_free_score
+            new_item["freshness_adjustment"] = round(
+                max(0.0, self._safe_float(new_item.get("score"), 0.0) - freshness_free_score),
+                4,
+            )
             reranked.append(new_item)
         reranked.sort(
             key=lambda item: self._bucket_reranked_candidate_rank(query, item),
@@ -18239,6 +18347,12 @@ class GatewayService:
         )
 
     def _bucket_rerank_candidate_priority(self, query: str, item: dict) -> tuple:
+        priority_score = self._safe_float(
+            item.get("score_without_freshness")
+            if self._rebuilt_recall_enabled()
+            else item.get("score"),
+            0.0,
+        )
         return (
             not bool(item.get("exact_anchor_match")),
             not bool(self._planner_lexical_direct_signal(item)),
@@ -18247,8 +18361,8 @@ class GatewayService:
             -self._safe_float(item.get("semantic_score"), 0.0),
             -self._safe_float(item.get("keyword_score"), 0.0),
             -self._safe_float(item.get("word_map_score"), 0.0),
-            self._bucket_recall_rank(query, item.get("bucket") or {}, item.get("score", 0.0))[0],
-            -self._safe_float(item.get("score"), 0.0),
+            self._bucket_recall_rank(query, item.get("bucket") or {}, priority_score)[0],
+            -priority_score,
         )
 
     def _get_entity_edge_boosts(self, query: str, candidate_ids: set[str]) -> dict[str, dict[str, Any]]:

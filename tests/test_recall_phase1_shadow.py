@@ -100,6 +100,10 @@ class RecallShadowContractsTest(unittest.TestCase):
         service = GatewayService.__new__(GatewayService)
         service.phase1_recall_shadow_enabled = True
         service.query_planner_enabled = planner_enabled
+        service.recall_policy = RecallPolicy()
+        service.recall_fusion_mode = "dynamic"
+        service.high_confidence_keyword_score = 0.85
+        service.relevance_options = None
         service._shadow_candidate_relevance = lambda _query, _necessity, item, **_kwargs: (
             bool(item.get("reliable")),
             "shadow_test_reliable" if item.get("reliable") else "shadow_test_unreliable",
@@ -204,10 +208,101 @@ class RecallShadowContractsTest(unittest.TestCase):
             formal,
             suppressed,
             {"errors": ["query_planner_timeout"], "triggered": True},
+            additional_candidate_items=[
+                self.item("admitted-but-unselected", "topic_evidence", reliable=True)
+            ],
         )
         self.assertEqual(debug["fallback_strategy"], "conservative_no_expansion")
         self.assertEqual(debug["shadow_bucket_ids"], ["formal"])
         self.assertEqual(debug["added_bucket_ids"], [])
+        self.assertEqual(debug["reviewed_candidate_count"], 1)
+
+    def test_rebuilt_reviews_retrieved_candidates_that_legacy_admitted_but_did_not_select(self):
+        service = self.make_service(planner_enabled=False)
+        service.recall_decision_mode = "rebuilt"
+        service.inject_max_cards = 2
+        service.semantic_rescue_enabled = False
+        service._query_planner_debug_base = lambda _query: {"errors": [], "triggered": False, "timing_ms": {}}
+        service._shadow_previous_user_query = lambda _session_id, _query: ""
+        service._auto_query_too_vague = lambda _query: False
+        service._merge_word_map_hint_debug = lambda *_args, **_kwargs: None
+        service._merge_exact_anchor_debug = lambda *_args, **_kwargs: None
+        service._merge_dynamic_anchor_debug = lambda *_args, **_kwargs: None
+        service._relation_axis_supplemental_queries = lambda _query: []
+        service._query_planner_trigger_reason = lambda _query, _selected: ""
+        service._structural_activation_shadow_debug = lambda *_args, **_kwargs: {}
+        service._bucket_with_recall_signal = lambda item: dict(item["bucket"])
+        service._pick_dynamic_cards = lambda items, *, query="": list(items)[:1]
+
+        legacy_selected = self.item("legacy-selected", "topic_evidence", utility="neutral")
+        admitted_unselected = self.item(
+            "admitted-unselected",
+            "topic_evidence",
+            utility="promote",
+        )
+
+        async def candidates(*_args, **_kwargs):
+            return [legacy_selected, admitted_unselected], []
+
+        service._dynamic_bucket_candidate_items = candidates
+        selected, _suppressed, debug = asyncio.run(service._select_dynamic_buckets(
+            "你还记得纪念日吗",
+            "session",
+            [],
+            include_query_planner_debug=True,
+        ))
+
+        shadow = debug["recall_shadow_debug"]
+        self.assertEqual(shadow["legacy_bucket_ids"], ["legacy-selected"])
+        self.assertEqual(shadow["shadow_bucket_ids"], ["admitted-unselected"])
+        self.assertEqual(shadow["effective_bucket_ids"], ["admitted-unselected"])
+        self.assertEqual(shadow["reviewed_candidate_count"], 2)
+        self.assertFalse(shadow["candidate_debug_truncated"])
+        self.assertEqual([bucket["id"] for bucket in selected], ["admitted-unselected"])
+        self.assertEqual(
+            shadow["selected_candidates"][0]["candidate_origin"],
+            "retrieved_admitted_unselected",
+        )
+
+    def test_rebuilt_selection_uses_score_without_freshness(self):
+        service = self.make_service()
+        freshness_favored = self.item("fresh", "topic_evidence")
+        freshness_favored.update({"score": 0.72, "score_without_freshness": 0.52})
+        older_but_more_relevant = self.item("older", "topic_evidence")
+        older_but_more_relevant.update({"score": 0.68, "score_without_freshness": 0.68})
+
+        debug = service._build_recall_shadow_debug(
+            "纪念日",
+            RecallNecessityPlan("contextual", True),
+            [freshness_favored, older_but_more_relevant],
+            [],
+            {"errors": [], "triggered": False},
+        )
+
+        self.assertEqual(debug["shadow_bucket_ids"], ["older"])
+        selected = debug["selected_candidates"][0]
+        self.assertEqual(selected["legacy_score"], 0.68)
+        self.assertEqual(selected["rebuilt_score"], 0.68)
+        self.assertTrue(selected["rebuilt_freshness_ignored"])
+
+    def test_rebuilt_reranker_candidate_priority_ignores_freshness_but_legacy_keeps_it(self):
+        service = self.make_service()
+        freshness_favored = self.item("fresh", "topic_evidence")
+        freshness_favored.update({"score": 0.72, "score_without_freshness": 0.52})
+        older_but_more_relevant = self.item("older", "topic_evidence")
+        older_but_more_relevant.update({"score": 0.68, "score_without_freshness": 0.68})
+
+        service.recall_decision_mode = "rebuilt"
+        self.assertLess(
+            service._bucket_rerank_candidate_priority("纪念日", older_but_more_relevant),
+            service._bucket_rerank_candidate_priority("纪念日", freshness_favored),
+        )
+
+        service.recall_decision_mode = "legacy"
+        self.assertLess(
+            service._bucket_rerank_candidate_priority("纪念日", freshness_favored),
+            service._bucket_rerank_candidate_priority("纪念日", older_but_more_relevant),
+        )
 
     def test_explicit_shadow_rechecks_formal_candidates(self):
         service = self.make_service()

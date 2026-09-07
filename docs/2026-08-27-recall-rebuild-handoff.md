@@ -281,7 +281,16 @@ Dashboard 与 Haven 后续均已发布，并由用户通过召回透镜截图完
 - `disabled_for_request` 不属于故障；自然 `contextual`、只在正文命中主题、或低于门槛的候选仍不会借此进入，原先“正式候选 + keyword >= 0.85”的保守降级保持不变。
 - Dashboard 召回透镜新增标题命中主题、明确回忆标题降级开关和门槛，并为新原因码提供中文解释。
 - 本地验证：Haven `py_compile` 通过，召回专项 33/33、全套 unittest 191/191 通过；Dashboard 原因码测试 6/6、生产 build 通过。
-- 本轮仍需在发布后用新 session 做真实验收；历史 Debug 不会补算新字段。
+- 发布后真实验收已通过：明确生日回忆在 `query_timeout` 下正确选择并最终注入【生日与遗忘的和解】，新规则显示 `shadow_explicit_query_unavailable_title_keyword` 的中文降级说明，Utility 为 `promote`；旧规则仍拒绝，证明本次由重构规则接管。历史 Debug 不会补算新字段。
+
+## rebuilt 候选池补全与取消 freshness 排序（2026-09-07 本地完成）
+
+- 真实“纪念日”案例暴露出候选列表并不完整：新规则此前只审核旧规则最终选中项与旧规则抑制项，旧 admission 已准入但因旧排序落选的候选不会进入 rebuilt，也不会出现在召回透镜。
+- rebuilt 现改为审核本轮检索阶段命中的完整候选集合，包含 direct、semantic rescue、relation axis 与 planner supplemental 中已准入但未被旧排序选中的项；不扩大关键词 Top-K 或语义 Top-K，不做全库扫描。
+- Planner degraded 的自然 contextual 仍维持 `conservative_no_expansion`，只审核旧正式结果；session 已召回桶和本窗口新 hold 桶的前置/最终硬排除保持不变。
+- 候选评分新增 `score_without_freshness`。legacy 继续使用原分数以便回滚；rebuilt 在 relevance/utility 通过后的排序使用无 freshness 分数，长期桶不再因变旧而吃亏。重要度、语义/关键词证据、rerank 与冷却均保留。
+- Debug 新增 `reviewed_candidate_count`、`candidate_debug_truncated`，候选记录 `candidate_origin / legacy_score / rebuilt_score / rebuilt_freshness_ignored`。召回透镜合并显示正式抑制和新规则拒绝项，明确标注“旧规则已准入未选”，并区分旧分与新分。
+- 本地验证：Haven `py_compile`、召回专项 36/36、全套 unittest 194/194 通过；Dashboard 原因码测试 6/6、生产 build 通过。发布后需用新的“纪念日”轮次确认两个标题直命中桶至少进入完整候选列表；是否最终注入仍由 relevance、utility 和单卡排序决定。
 
 ## 发布后仍需继续核查
 

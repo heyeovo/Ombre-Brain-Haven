@@ -72,6 +72,8 @@ Gateway 先生成轮级 `RecallNecessityPlan`，再让统一 relevance 与 utili
 
 `phase1_recall_shadow_enabled` 默认开启。`OMBRE_RECALL_DECISION_MODE` 默认 `rebuilt`，此时原 shadow 投影就是正式结果；设为 `legacy` 可立即恢复旧 admission/排序结果。重构决策同时审核旧路径放行和被拒候选：
 
+- rebuilt 的输入是本轮检索阶段实际命中的完整集合，包括旧规则已准入但旧排序未选中的候选；旧最终选择只用于 legacy 对照，不再限制新规则候选池。Planner degraded 的 contextual 仍维持只审核旧正式结果的保守边界。
+- 候选同时保留旧 `score` 和不含 freshness 的 `score_without_freshness`。旧路径继续按原分数用于回滚对照；rebuilt 相关性通过后的排序只使用后者，因此桶不会因长期变旧而降序。重要度、语义/关键词证据、rerank、冷却和 session 硬排除保持不变。
 - Shadow 会先从原句中隔离 `identity.relationship_terms`、AI/用户名称、用户别名，以及逗号分隔的环境变量 `OMBRE_RECALL_IGNORED_ADDRESS_TERMS`，再提取可信主题词；日常称呼不能单独充当主题或 rare-name 独特证据。额外称呼列表用于线上身份配置仍为通用值或需要继续加入昵称的场景，仅作用于 Shadow relevance，不改变正式关键词拆分、搜索、评分或注入。
 - Shadow 保留正式候选池同一口径的 `keyword_score`，不再对单桶建立第二套 BM25 分数；称呼只是不允许成为 `matched_topic_terms` 或直接证据，不会给候选加分或扣分。rare-name、身份名候选和“query 词命中桶标题”必须同时命中清理后的可信主题；用户明确给出桶 ID 仍属于直接证据。
 - 候选 debug 同时记录 `raw_topic_terms`、`topic_terms`、`ignored_address_terms`、`ignored_identity_terms`、`ignored_configured_address_terms`、`ignored_topic_terms`、`formal_keyword_score`、`shadow_keyword_score` 以及各直接证据是否实际生效。当前两个 keyword 字段同值，保留命名仅为兼容已发布 Debug。
@@ -99,6 +101,7 @@ Debug 顶层新增：
 - `recall_necessity_debug`：必要性、是否可定位、理由码和上下文是否可用；
 - `recall_shadow_debug`：planner 状态、降级策略、正式/shadow 桶 ID、增减桶和 shadow 候选；
 - `recall_shadow_debug.utility_candidates`：通过 relevance 后每个候选的 utility 三档与原因码；选中/utility 拒绝候选还分别保留 `shadow_utility` 详情；
+- `reviewed_candidate_count` 记录新规则实际审核总数；候选的 `candidate_origin` 区分旧规则最终选中、旧规则已准入未选中和旧规则抑制，`legacy_score / rebuilt_score` 说明 freshness 移除前后的排序分数。
 - `formal_bucket_ids` / `legacy_bucket_ids` 是旧路径结果，`shadow_bucket_ids` 是重构投影，`effective_bucket_ids` 是最终结果；`rebuilt` 时 `recall_shadow_debug.affects_recall=true`。
 - 重构正式结果最多一张桶卡；旧 source-record 后置扩展不能绕过 utility 或单卡上限。
 - Hook 先用调用方传入的 `exclude_ids` 从候选池移除桶，最后出卡前再硬过滤一次。Dashboard 传入本窗口已召回桶与本窗口新建 hold 桶的并集，因此这些桶不会在同一窗口再次参与召回或抢占单卡位。

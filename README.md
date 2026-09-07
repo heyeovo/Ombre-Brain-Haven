@@ -84,7 +84,7 @@ AI 对这段经历的理解、关系侧学习或以后应怎样做。
 
 `bucket` 模式可用于对照测试：它跳过 moment 图刷新和扩散，但仍执行可靠性门控。
 
-Gateway 默认由重构后的召回决策接管正式结果：先把本轮分成 `none`、`explicit` 或 `contextual`，再对旧路径放行与抑制的候选统一执行 relevance 和 `promote / neutral / reject` utility，最终最多注入一张桶卡。普通关键词单独命中不能证明相关；明确回忆和可用前文的接续指代可优先，无法确定增量价值的自然 contextual 保持 neutral，完全重复才 reject。语义查询默认最多等待 5 秒；若明确回忆在查询超时或失败时没有语义分，只有候选标题直接命中可信主题且关键词分不低于 0.65 才可降级进入 Utility。调用方主动关闭语义、自然 contextual 和仅正文命中均不适用该降级。`recall_shadow_debug` 继续保存旧结果、重构结果和最终生效结果供召回透镜对比。环境变量 `OMBRE_RECALL_DECISION_MODE=legacy` 可紧急恢复旧正式决策；默认 `rebuilt`。`phase1_recall_shadow_enabled=false` 也会令接管失效。Dashboard 提供的 session 排除 ID 会先从候选池移除，并在最终出卡时再次硬过滤：本窗口已召回桶和本窗口真正新建的 hold 桶都不会再次参与召回，也不会抢占唯一候选位。Hook 卡片会在正文后附最多一行显式关联边的桶名与 ID，不展开关联正文。
+Gateway 默认由重构后的召回决策接管正式结果：先把本轮分成 `none`、`explicit` 或 `contextual`，再对本轮检索到的全部候选统一执行 relevance 和 `promote / neutral / reject` utility；旧规则已准入但排序未选中的桶也必须进入 rebuilt 审核，最终最多注入一张桶卡。普通关键词单独命中不能证明相关；明确回忆和可用前文的接续指代可优先，无法确定增量价值的自然 contextual 保持 neutral，完全重复才 reject。rebuilt 排序使用不含 freshness 的分数，长期记忆不会因为变旧而失去排序优势；重要度、相关性证据和 session 防重复仍保留。语义查询默认最多等待 5 秒；若明确回忆在查询超时或失败时没有语义分，只有候选标题直接命中可信主题且关键词分不低于 0.65 才可降级进入 Utility。调用方主动关闭语义、自然 contextual 和仅正文命中均不适用该降级。`recall_shadow_debug` 继续保存旧结果、重构结果、候选来源和最终生效结果供召回透镜对比。环境变量 `OMBRE_RECALL_DECISION_MODE=legacy` 可紧急恢复旧正式决策；默认 `rebuilt`。`phase1_recall_shadow_enabled=false` 也会令接管失效。Dashboard 提供的 session 排除 ID 会先从候选池移除，并在最终出卡时再次硬过滤：本窗口已召回桶和本窗口真正新建的 hold 桶都不会再次参与召回，也不会抢占唯一候选位。Hook 卡片会在正文后附最多一行显式关联边的桶名与 ID，不展开关联正文。
 
 ### 4. Word Map Lite
 

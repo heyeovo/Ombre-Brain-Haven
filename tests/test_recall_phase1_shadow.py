@@ -98,7 +98,6 @@ class RecallNecessityContractsTest(unittest.TestCase):
 class RecallShadowContractsTest(unittest.TestCase):
     def make_service(self, *, planner_enabled: bool = True) -> GatewayService:
         service = GatewayService.__new__(GatewayService)
-        service.phase1_recall_shadow_enabled = True
         service.query_planner_enabled = planner_enabled
         service.recall_policy = RecallPolicy()
         service.recall_fusion_mode = "dynamic"
@@ -115,7 +114,6 @@ class RecallShadowContractsTest(unittest.TestCase):
                 ("utility_test_decision",),
             )
         )
-        service._pick_dynamic_cards = lambda items, *, query="": list(items)[:2]
         service._format_suppressed_bucket_debug = lambda item, **_kwargs: {
             "bucket_id": str((item.get("bucket") or {}).get("id") or ""),
             "bucket_name": str(
@@ -140,7 +138,7 @@ class RecallShadowContractsTest(unittest.TestCase):
             "utility": utility,
         }
 
-    def test_none_shadow_removes_formal_result_without_mutating_it(self):
+    def test_none_skips_retrieved_candidates_without_mutating_them(self):
         service = self.make_service()
         formal = [self.item("wrong-bucket", "non_explicit_query")]
         original = dict(formal[0])
@@ -151,9 +149,8 @@ class RecallShadowContractsTest(unittest.TestCase):
             [],
             {"errors": [], "triggered": False},
         )
-        self.assertEqual(debug["formal_bucket_ids"], ["wrong-bucket"])
         self.assertEqual(debug["shadow_bucket_ids"], [])
-        self.assertEqual(debug["removed_bucket_ids"], ["wrong-bucket"])
+        self.assertEqual(debug["reviewed_candidate_count"], 0)
         self.assertEqual(formal[0], original)
 
     def test_recall_test_observation_none_skips_shadow_candidate_review(self):
@@ -182,49 +179,45 @@ class RecallShadowContractsTest(unittest.TestCase):
 
     def test_degraded_explicit_softens_axis_but_keeps_positive_evidence_requirement(self):
         service = self.make_service()
-        suppressed = [
+        candidates = [
             self.item("target", "activated_axis_mismatch", reliable=True),
             self.item("noise", "activated_axis_mismatch", reliable=False),
         ]
         debug = service._build_recall_shadow_debug(
             "帮我单独搜一下邻居",
             RecallNecessityPlan("explicit", True),
+            candidates,
             [],
-            suppressed,
             {"errors": ["query_planner_dehydration_unavailable"], "triggered": True},
         )
         self.assertEqual(debug["planner_status"], "degraded")
         self.assertEqual(debug["shadow_bucket_ids"], ["target"])
-        self.assertEqual(debug["added_bucket_ids"], ["target"])
         self.assertEqual(
             debug["rejected_candidates"][0]["shadow_admission_reason"],
             "shadow_test_unreliable",
         )
 
-    def test_degraded_contextual_never_expands_formal_result(self):
+    def test_degraded_contextual_reviews_bounded_retrieval_pool(self):
         service = self.make_service()
-        formal = [self.item("formal", "topic_evidence")]
-        suppressed = [self.item("tempting", "activated_axis_mismatch", reliable=True)]
+        candidates = [
+            self.item("first", "retrieved", reliable=True),
+            self.item("tempting", "retrieved", reliable=True),
+            self.item("noise", "retrieved", reliable=False),
+        ]
         debug = service._build_recall_shadow_debug(
             "那后来呢",
             RecallNecessityPlan("contextual", True, context_available=True),
-            formal,
-            suppressed,
+            candidates,
+            [],
             {"errors": ["query_planner_timeout"], "triggered": True},
-            additional_candidate_items=[
-                self.item("admitted-but-unselected", "topic_evidence", reliable=True)
-            ],
         )
-        self.assertEqual(debug["fallback_strategy"], "conservative_no_expansion")
-        self.assertEqual(debug["shadow_bucket_ids"], ["formal"])
-        self.assertEqual(debug["added_bucket_ids"], [])
-        self.assertEqual(debug["reviewed_candidate_count"], 1)
+        self.assertEqual(debug["fallback_strategy"], "contextual_unified_retrieval")
+        self.assertEqual(debug["shadow_bucket_ids"], ["first"])
+        self.assertEqual(debug["reviewed_candidate_count"], 3)
 
-    def test_rebuilt_reviews_retrieved_candidates_that_legacy_admitted_but_did_not_select(self):
+    def test_rebuilt_reviews_neutral_retrieval_pool_directly(self):
         service = self.make_service(planner_enabled=False)
-        service.recall_decision_mode = "rebuilt"
         service.inject_max_cards = 2
-        service.semantic_rescue_enabled = False
         service._query_planner_debug_base = lambda _query: {"errors": [], "triggered": False, "timing_ms": {}}
         service._shadow_previous_user_query = lambda _session_id, _query: ""
         service._auto_query_too_vague = lambda _query: False
@@ -235,17 +228,16 @@ class RecallShadowContractsTest(unittest.TestCase):
         service._query_planner_trigger_reason = lambda _query, _selected: ""
         service._structural_activation_shadow_debug = lambda *_args, **_kwargs: {}
         service._bucket_with_recall_signal = lambda item: dict(item["bucket"])
-        service._pick_dynamic_cards = lambda items, *, query="": list(items)[:1]
 
-        legacy_selected = self.item("legacy-selected", "topic_evidence", utility="neutral")
-        admitted_unselected = self.item(
-            "admitted-unselected",
-            "topic_evidence",
+        retrieved_neutral = self.item("retrieved-neutral", "retrieved", utility="neutral")
+        retrieved_promote = self.item(
+            "retrieved-promote",
+            "retrieved",
             utility="promote",
         )
 
         async def candidates(*_args, **_kwargs):
-            return [legacy_selected, admitted_unselected], []
+            return [retrieved_neutral, retrieved_promote], []
 
         service._dynamic_bucket_candidate_items = candidates
         selected, _suppressed, debug = asyncio.run(service._select_dynamic_buckets(
@@ -256,15 +248,14 @@ class RecallShadowContractsTest(unittest.TestCase):
         ))
 
         shadow = debug["recall_shadow_debug"]
-        self.assertEqual(shadow["legacy_bucket_ids"], ["legacy-selected"])
-        self.assertEqual(shadow["shadow_bucket_ids"], ["admitted-unselected"])
-        self.assertEqual(shadow["effective_bucket_ids"], ["admitted-unselected"])
+        self.assertEqual(shadow["shadow_bucket_ids"], ["retrieved-promote"])
+        self.assertEqual(shadow["effective_bucket_ids"], ["retrieved-promote"])
         self.assertEqual(shadow["reviewed_candidate_count"], 2)
         self.assertFalse(shadow["candidate_debug_truncated"])
-        self.assertEqual([bucket["id"] for bucket in selected], ["admitted-unselected"])
+        self.assertEqual([bucket["id"] for bucket in selected], ["retrieved-promote"])
         self.assertEqual(
             shadow["selected_candidates"][0]["candidate_origin"],
-            "retrieved_admitted_unselected",
+            "direct_retrieval",
         )
 
     def test_rebuilt_selection_uses_score_without_freshness(self):
@@ -284,7 +275,7 @@ class RecallShadowContractsTest(unittest.TestCase):
 
         self.assertEqual(debug["shadow_bucket_ids"], ["older"])
         selected = debug["selected_candidates"][0]
-        self.assertEqual(selected["legacy_score"], 0.68)
+        self.assertEqual(selected["retrieval_score"], 0.68)
         self.assertEqual(selected["rebuilt_score"], 0.68)
         self.assertTrue(selected["rebuilt_freshness_ignored"])
         self.assertEqual(
@@ -324,26 +315,19 @@ class RecallShadowContractsTest(unittest.TestCase):
             "shadow_promote_priority",
         )
 
-    def test_rebuilt_reranker_candidate_priority_ignores_freshness_but_legacy_keeps_it(self):
+    def test_rebuilt_reranker_candidate_priority_always_ignores_freshness(self):
         service = self.make_service()
         freshness_favored = self.item("fresh", "topic_evidence")
         freshness_favored.update({"score": 0.72, "score_without_freshness": 0.52})
         older_but_more_relevant = self.item("older", "topic_evidence")
         older_but_more_relevant.update({"score": 0.68, "score_without_freshness": 0.68})
 
-        service.recall_decision_mode = "rebuilt"
         self.assertLess(
             service._bucket_rerank_candidate_priority("纪念日", older_but_more_relevant),
             service._bucket_rerank_candidate_priority("纪念日", freshness_favored),
         )
 
-        service.recall_decision_mode = "legacy"
-        self.assertLess(
-            service._bucket_rerank_candidate_priority("纪念日", freshness_favored),
-            service._bucket_rerank_candidate_priority("纪念日", older_but_more_relevant),
-        )
-
-    def test_explicit_shadow_rechecks_formal_candidates(self):
+    def test_explicit_rebuilt_rechecks_retrieved_candidates(self):
         service = self.make_service()
         formal = [
             self.item("relevant", "non_explicit_query", reliable=True),
@@ -357,7 +341,6 @@ class RecallShadowContractsTest(unittest.TestCase):
             {"errors": [], "triggered": False},
         )
         self.assertEqual(debug["shadow_bucket_ids"], ["relevant"])
-        self.assertEqual(debug["removed_bucket_ids"], ["noise"])
 
     def test_utility_promote_precedes_neutral_and_shadow_selects_one_card(self):
         service = self.make_service()
@@ -379,9 +362,8 @@ class RecallShadowContractsTest(unittest.TestCase):
             "promote",
         )
 
-    def test_rebuilt_mode_marks_shadow_as_effective_and_legacy_is_rollback(self):
+    def test_rebuilt_decision_is_always_effective(self):
         service = self.make_service()
-        service.recall_decision_mode = "rebuilt"
         rebuilt = service._build_recall_shadow_debug(
             "今天下雨了",
             RecallNecessityPlan("contextual", True),
@@ -392,16 +374,6 @@ class RecallShadowContractsTest(unittest.TestCase):
         self.assertTrue(rebuilt["affects_recall"])
         self.assertEqual(rebuilt["decision_mode"], "rebuilt")
 
-        service.recall_decision_mode = "legacy"
-        legacy = service._build_recall_shadow_debug(
-            "今天下雨了",
-            RecallNecessityPlan("contextual", True),
-            [self.item("rain", "topic_evidence")],
-            [],
-            {"errors": [], "triggered": False},
-        )
-        self.assertFalse(legacy["affects_recall"])
-
     def test_effective_bucket_mapping_preserves_rebuilt_order_and_one_card(self):
         items = [self.item("neutral", "topic_evidence"), self.item("promoted", "topic_evidence")]
         selected = GatewayService._recall_items_for_bucket_ids(["promoted"], items)
@@ -409,7 +381,6 @@ class RecallShadowContractsTest(unittest.TestCase):
 
     def test_rebuilt_auto_vague_branch_returns_shadow_projection(self):
         service = self.make_service()
-        service.recall_decision_mode = "rebuilt"
         service.recall_policy = RecallPolicy()
         service.inject_max_cards = 2
         service._query_planner_debug_base = lambda _query: {"errors": [], "triggered": False, "timing_ms": {}}
@@ -420,7 +391,8 @@ class RecallShadowContractsTest(unittest.TestCase):
         service._bucket_with_recall_signal = lambda item: dict(item["bucket"])
 
         async def candidates(*_args, **_kwargs):
-            return [self.item("rain", "topic_evidence")], []
+            rain = self.item("rain", "topic_evidence")
+            return [rain], []
 
         service._dynamic_bucket_candidate_items = candidates
         selected, _suppressed, debug = asyncio.run(service._select_dynamic_buckets(
@@ -618,8 +590,7 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
         self.assertEqual(debug["topic_terms"], ["下雨"])
         self.assertEqual(debug["matched_topic_terms"], [])
         self.assertEqual(debug["rare_name_terms"], [])
-        self.assertEqual(debug["formal_keyword_score"], 0.669)
-        self.assertEqual(debug["shadow_keyword_score"], 0.669)
+        self.assertEqual(debug["retrieval_keyword_score"], 0.669)
         self.assertIn("小言", debug["ignored_identity_terms"])
 
     def test_round_15_title_and_composite_rare_name_cannot_bypass_trusted_topic(self):
@@ -636,12 +607,11 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
                 rare_name_match=True,
                 rare_name_terms=["小言给小羊的情书"],
             ),
-            formal_candidate=False,
         )
         self.assertFalse(admitted)
         self.assertEqual(reason, "shadow_query_topic_missing")
         self.assertEqual(debug["matched_topic_terms"], [])
-        self.assertEqual(debug["shadow_keyword_score"], 0.669)
+        self.assertEqual(debug["retrieval_keyword_score"], 0.669)
         self.assertFalse(debug["rare_name_direct"])
         self.assertFalse(debug["source_record_direct"])
         self.assertFalse(debug["unique_direct"])
@@ -672,12 +642,11 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
                 semantic=0.588,
                 keyword=0.9083,
             ),
-            formal_candidate=False,
         )
         self.assertTrue(rain_admitted)
         self.assertEqual(rain_reason, "shadow_semantic_keyword_agreement")
         self.assertEqual(rain_debug["matched_topic_terms"], ["下雨"])
-        self.assertEqual(rain_debug["shadow_keyword_score"], 0.9083)
+        self.assertEqual(rain_debug["retrieval_keyword_score"], 0.9083)
         self.assertEqual(rain_debug["ignored_configured_address_terms"], ["小言"])
 
         admitted, reason, debug = service._shadow_candidate_relevance(
@@ -689,19 +658,18 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
                 semantic=0.538,
                 keyword=0.6694,
             ),
-            formal_candidate=False,
         )
 
         self.assertFalse(admitted)
         self.assertEqual(reason, "shadow_query_topic_missing")
         self.assertEqual(debug["topic_terms"], ["下雨"])
         self.assertEqual(debug["matched_topic_terms"], [])
-        self.assertEqual(debug["shadow_keyword_score"], 0.6694)
+        self.assertEqual(debug["retrieval_keyword_score"], 0.6694)
         self.assertEqual(debug["ignored_address_terms"], ["小言"])
         self.assertEqual(debug["ignored_identity_terms"], [])
         self.assertEqual(debug["ignored_configured_address_terms"], ["小言"])
 
-    def test_query_timeout_keeps_only_formal_strong_trusted_topic_keyword(self):
+    def test_contextual_query_timeout_uses_content_topic_and_high_keyword(self):
         service = self.make_service()
         rain = self.item(
             "每一场雨都跟你在一起",
@@ -714,20 +682,68 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
             "话说 今天下雨了 小言",
             "contextual",
             rain,
-            formal_candidate=True,
         )
         self.assertTrue(admitted)
-        self.assertEqual(reason, "shadow_query_unavailable_formal_topic_keyword")
-        self.assertTrue(debug["query_unavailable_keyword_fallback"])
+        self.assertEqual(reason, "shadow_contextual_query_unavailable_content_keyword")
+        self.assertEqual(debug["matched_content_topic_terms"], ["下雨"])
+        self.assertTrue(debug["contextual_query_unavailable_keyword_fallback"])
 
+        below_threshold = self.item(
+            "小言写给小羊的情书",
+            "那天写了一封情书。",
+            semantic=None,
+            keyword=0.829,
+            semantic_status="query_timeout",
+        )
         added, added_reason, _added_debug = service._shadow_candidate_relevance(
-            "话说 今天下雨了 小言",
+            "先看你写的情书",
             "contextual",
-            rain,
-            formal_candidate=False,
+            below_threshold,
         )
         self.assertFalse(added)
         self.assertEqual(added_reason, "shadow_semantic_not_scored")
+
+    def test_contextual_query_timeout_allows_letter_candidates_with_substantive_content(self):
+        service = self.make_service()
+        letter = self.item(
+            "小言写给小羊的情书",
+            "这是小言写给小羊的一封情书。",
+            semantic=None,
+            keyword=0.836,
+            semantic_status="query_timeout",
+        )
+        admitted, reason, debug = service._shadow_candidate_relevance(
+            "先看你写的情书",
+            "contextual",
+            letter,
+        )
+        self.assertTrue(admitted)
+        self.assertEqual(reason, "shadow_contextual_query_unavailable_content_keyword")
+        self.assertEqual(debug["matched_title_topic_terms"], ["情书"])
+        self.assertEqual(debug["matched_content_topic_terms"], ["情书"])
+
+    def test_contextual_query_timeout_rejects_high_keyword_title_only_match(self):
+        service = self.make_service()
+        title_only = self.item(
+            "小言写给小羊的情书",
+            "那天只是一起散步，后来认真聊了很久。",
+            semantic=None,
+            keyword=0.95,
+            semantic_status="query_timeout",
+            rare_name_match=True,
+            rare_name_terms=["情书"],
+        )
+        admitted, reason, debug = service._shadow_candidate_relevance(
+            "先看你写的情书",
+            "contextual",
+            title_only,
+        )
+        self.assertFalse(admitted)
+        self.assertEqual(reason, "shadow_semantic_not_scored")
+        self.assertEqual(debug["matched_title_topic_terms"], ["情书"])
+        self.assertEqual(debug["matched_content_topic_terms"], [])
+        self.assertFalse(debug["rare_name_direct"])
+        self.assertFalse(debug["contextual_query_unavailable_keyword_fallback"])
 
     def test_query_timeout_does_not_keep_identity_only_or_completed_semantic_candidates(self):
         service = self.make_service()
@@ -744,7 +760,6 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
             "话说 今天下雨了 小言",
             "contextual",
             identity_only,
-            formal_candidate=True,
         )
         self.assertFalse(admitted)
         self.assertEqual(reason, "shadow_semantic_not_scored")
@@ -762,7 +777,6 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
             "你还记得那次因为生日的事跟你吵架吗",
             "explicit",
             item,
-            formal_candidate=False,
         )
         self.assertTrue(admitted)
         self.assertEqual(reason, "shadow_explicit_query_unavailable_title_keyword")
@@ -782,7 +796,6 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
             "最近又想起生日了",
             "contextual",
             title_match,
-            formal_candidate=False,
         )
         self.assertFalse(admitted)
         self.assertEqual(reason, "shadow_semantic_not_scored")
@@ -798,7 +811,6 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
             "你还记得那次因为生日的事跟你吵架吗",
             "explicit",
             content_only,
-            formal_candidate=False,
         )
         self.assertFalse(admitted)
         self.assertEqual(reason, "shadow_semantic_not_scored")
@@ -815,7 +827,6 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
             "你还记得那次因为生日的事跟你吵架吗",
             "explicit",
             semantic_disabled,
-            formal_candidate=False,
         )
         self.assertFalse(admitted)
         self.assertEqual(reason, "shadow_semantic_not_scored")
@@ -833,7 +844,6 @@ class RecallShadowCandidateRelevanceTest(unittest.TestCase):
             "话说 今天下雨了 小言",
             "contextual",
             completed,
-            formal_candidate=True,
         )
         self.assertFalse(admitted)
         self.assertEqual(reason, "shadow_semantic_not_scored")

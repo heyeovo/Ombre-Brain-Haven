@@ -76,15 +76,15 @@ AI 对这段经历的理解、关系侧学习或以后应怎样做。
 
 当前默认召回模式是 `graph`：
 
-1. 用原始问题的 embedding 与正文证据寻找候选。
-2. 归一化问题、关键词、别名和 Word Map 只提供辅助提示。
-3. admission gate 判断是否存在可靠 direct seed。
-4. 只有 seed 通过后，才允许沿已批准关系边扩散。
-5. 直接命中可带原文窗口；关联记忆只能以摘要出现。
+1. 用原始问题的 embedding、关键词与正文证据构建有界候选池。
+2. 归一化问题、别名、Word Map 和已批准关系边只提供检索提示。
+3. 统一 relevance 判断候选是否与本轮话题相关，再由 utility 判断是否值得注入。
+4. session 排除与语义去重是候选阶段的硬边界。
+5. 最终最多注入一张桶卡；关联记忆只显示简短名称与 ID。
 
-`bucket` 模式可用于对照测试：它跳过 moment 图刷新和扩散，但仍执行可靠性门控。
+`bucket` 模式可用于对照测试：它跳过 moment 图刷新和扩散，但仍执行统一 relevance 与 utility。
 
-Gateway 默认由重构后的召回决策接管正式结果：先把本轮分成 `none`、`explicit` 或 `contextual`，再对本轮检索到的全部候选统一执行 relevance 和 `promote / neutral / reject` utility；旧规则已准入但排序未选中的桶也必须进入 rebuilt 审核，最终最多注入一张桶卡。普通关键词单独命中不能证明相关；明确回忆和可用前文的接续指代可优先，无法确定增量价值的自然 contextual 保持 neutral，完全重复才 reject。rebuilt 排序使用不含 freshness 的分数，长期记忆不会因为变旧而失去排序优势；重要度、相关性证据和 session 防重复仍保留。语义查询默认最多等待 5 秒；若明确回忆在查询超时或失败时没有语义分，只有候选标题直接命中可信主题且关键词分不低于 0.65 才可降级进入 Utility。调用方主动关闭语义、自然 contextual 和仅正文命中均不适用该降级。`recall_shadow_debug` 继续保存旧结果、重构结果、候选来源和最终生效结果供召回透镜对比；通过 Utility 但受 promote 优先或单卡上限影响而未入选的桶单独保存在 `eligible_unselected_candidates`，不归入拒绝候选。环境变量 `OMBRE_RECALL_DECISION_MODE=legacy` 可紧急恢复旧正式决策；默认 `rebuilt`。`phase1_recall_shadow_enabled=false` 也会令接管失效。Dashboard 提供的 session 排除 ID 会先从候选池移除，并在最终出卡时再次硬过滤：本窗口已召回桶和本窗口真正新建的 hold 桶都不会再次参与召回，也不会抢占唯一候选位。Hook 卡片会在正文后附最多一行显式关联边的桶名与 ID，不展开关联正文。
+Gateway 使用单一路线生成正式结果：先把本轮分成 `none`、`explicit` 或 `contextual`，再对本轮有界检索池统一执行 relevance 和 `promote / neutral / reject` utility，最终最多注入一张桶卡。普通关键词或纯标题命中不能单独证明相关；明确回忆和可用前文的接续指代可优先，无法确定增量价值的自然 contextual 保持 neutral，完全重复才 reject。排序使用不含 freshness 的分数，长期记忆不会因为变旧而失去排序优势；重要度、相关性证据和 session 防重复仍保留。语义查询默认最多等待 5 秒；在 `query_timeout / query_failed / query_embedding_unavailable / query_embedding_failed` 时，`explicit` 只有“可信主题同时命中标题与正文 + keyword >= 0.65”才可降级进入 Utility；自然 `contextual` 则要求“可信主题命中正文 + keyword >= 0.83”。调用方主动关闭语义或仅有标题命中都不适用故障降级。`recall_shadow_debug` 是沿用的 Debug 字段名，记录统一决策审核、最终结果与未入选/拒绝候选，不再表示两套算法并行。Dashboard 提供的 session 排除 ID 会先从候选池移除，并在最终出卡时再次硬过滤：本窗口已召回桶和本窗口真正新建的 hold 桶都不会再次参与召回，也不会抢占唯一候选位。Hook 卡片会在正文后附最多一行显式关联边的桶名与 ID，不展开关联正文。
 
 ### 4. Word Map Lite
 
@@ -586,14 +586,14 @@ VPS 的 Backblaze B2 加密备份范围、计划、恢复步骤和验收记录�
 3. 图扩散只在可靠 seed 后出现，且只给摘要。
 4. 明确日期 / 原句问题不会被附近日期替代。
 5. `/api/debug/injections` 中的最终可见注入符合预期。
-6. `recall_shadow_debug` 的正式桶 ID 与实际注入一致，且 shadow 差异不反向影响正式结果。
+6. `recall_shadow_debug.effective_bucket_ids` 与实际注入一致，且通过 Utility 但未获单卡位的候选仍可观测。
 
 ## 已知边界
 
 - embedding 负责找候选，不负责判断事实正确；模型更大不必然召回更准，延迟却通常更高。
 - 动态召回仍会增加首 token 前的准备时间，瓶颈可能来自远程 embedding / reranker、首次冷启动和图扩散，而不只来自上游聊天模型。当前版本已经在启动时预热 query plan、bucket、moment graph、词法 profile 与 relevance facets，并缓存评分输入、复用 moment graph、过滤陈旧 moment / edge，减少重复计算与无效扩散；远程模型的网络往返仍是剩余的主要可变延迟。可通过 injection debug 中的 `prepare_timing_debug.steps_ms` 区分 `semantic_candidates`、rerank、diffusion 等阶段，不要只凭总耗时猜瓶颈。
 - Prompt Cache 缓存的是发送给最终 upstream 的稳定前缀，不缓存 Ombre 的动态召回结果；它可以降低重复前缀的费用或上游处理时间，但不能消除每轮 embedding、门控和扩散成本。
-- reranker、query planner、Word Map 和图扩散都是辅助层，不能越过 admission gate。
+- reranker、query planner、Word Map 和图扩散都是辅助层，不能越过统一 relevance 与 utility。
 - `profile_fact` 是带证据事实；Portrait 是后台模型对多条材料的稳定理解，两者不应直接等同。
 - Persona State 是短期状态，不是长期身份真源。
 - Dream、relationship weather、comment 和 affect anchor 不能单独证明当前话题。

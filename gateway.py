@@ -401,7 +401,7 @@ PROFILE_CONTEXT_SECTIONS = ("evidence_context", "context", "reflection", "feelin
 MOMENT_CHUNK_SHADOW_TARGET_CHARS = 320
 MOMENT_CHUNK_SHADOW_MAX_CHARS = 520
 MOMENT_CHUNK_SHADOW_MIN_TAIL_CHARS = 100
-SHADOW_QUERY_UNAVAILABLE_KEYWORD_MIN = 0.85
+SHADOW_CONTEXTUAL_QUERY_UNAVAILABLE_KEYWORD_MIN = 0.83
 SHADOW_EXPLICIT_QUERY_UNAVAILABLE_KEYWORD_MIN = 0.65
 SHADOW_QUERY_UNAVAILABLE_STATUSES = frozenset(
     {
@@ -803,18 +803,6 @@ class GatewayService:
             else self.gateway_cfg.get("query_planner_enabled"),
             False,
         )
-        self.phase1_recall_shadow_enabled = self._bool_config_value(
-            self.gateway_cfg.get("phase1_recall_shadow_enabled"),
-            True,
-        )
-        recall_decision_mode = str(
-            os.environ.get("OMBRE_RECALL_DECISION_MODE")
-            or self.gateway_cfg.get("recall_decision_mode")
-            or "rebuilt"
-        ).strip().lower()
-        self.recall_decision_mode = (
-            recall_decision_mode if recall_decision_mode in {"rebuilt", "legacy"} else "rebuilt"
-        )
         self.phase1_shadow_ignored_address_terms = (
             self._phase1_shadow_ignored_address_terms_from_env()
         )
@@ -834,27 +822,6 @@ class GatewayService:
             0.0,
             0.30,
         )
-        self.semantic_rescue_enabled = self._bool_config_value(
-            self.gateway_cfg.get("semantic_rescue_enabled"),
-            False,
-        )
-        self.semantic_rescue_candidate_limit = max(
-            1,
-            min(3, int(self.gateway_cfg.get("semantic_rescue_candidate_limit", 3))),
-        )
-        self.semantic_rescue_max_tokens = max(
-            128,
-            min(512, int(self.gateway_cfg.get("semantic_rescue_max_tokens", 220))),
-        )
-        self.semantic_rescue_timeout_seconds = max(
-            0.5,
-            min(15.0, float(self.gateway_cfg.get("semantic_rescue_timeout_seconds", 4))),
-        )
-        self.semantic_rescue_model = str(getattr(self.dehydrator, "model", "") or "").strip()
-        if not self.semantic_rescue_model:
-            dehydration_cfg = self.config.get("dehydration", {})
-            if isinstance(dehydration_cfg, dict):
-                self.semantic_rescue_model = str(dehydration_cfg.get("model") or "").strip()
         self.memory_detail_recall_enabled = self._bool_config_value(
             self.gateway_cfg.get("memory_detail_recall_enabled"),
             False,
@@ -1060,10 +1027,6 @@ class GatewayService:
             "query_planner_min_chars": self.query_planner_min_chars,
             "query_planner_max_queries": self.query_planner_max_queries,
             "query_planner_max_tokens": self.query_planner_max_tokens,
-            "semantic_rescue_enabled": self.semantic_rescue_enabled,
-            "semantic_rescue_candidate_limit": self.semantic_rescue_candidate_limit,
-            "semantic_rescue_max_tokens": self.semantic_rescue_max_tokens,
-            "semantic_rescue_timeout_seconds": self.semantic_rescue_timeout_seconds,
             "memory_detail_recall_enabled": self.memory_detail_recall_enabled,
             "memory_detail_recall_max_ids": self.memory_detail_recall_max_ids,
             "memory_detail_recall_budget": self.memory_detail_recall_budget,
@@ -1588,34 +1551,6 @@ class GatewayService:
             self.query_planner_max_tokens = max(128, int(payload["query_planner_max_tokens"]))
             self.gateway_cfg["query_planner_max_tokens"] = self.query_planner_max_tokens
             updated.append("gateway.query_planner_max_tokens")
-        if "semantic_rescue_enabled" in payload:
-            self.semantic_rescue_enabled = self._bool_config_value(
-                payload["semantic_rescue_enabled"],
-                False,
-            )
-            self.gateway_cfg["semantic_rescue_enabled"] = self.semantic_rescue_enabled
-            updated.append("gateway.semantic_rescue_enabled")
-        if "semantic_rescue_candidate_limit" in payload:
-            self.semantic_rescue_candidate_limit = max(
-                1,
-                min(3, int(payload["semantic_rescue_candidate_limit"])),
-            )
-            self.gateway_cfg["semantic_rescue_candidate_limit"] = self.semantic_rescue_candidate_limit
-            updated.append("gateway.semantic_rescue_candidate_limit")
-        if "semantic_rescue_max_tokens" in payload:
-            self.semantic_rescue_max_tokens = max(
-                128,
-                min(512, int(payload["semantic_rescue_max_tokens"])),
-            )
-            self.gateway_cfg["semantic_rescue_max_tokens"] = self.semantic_rescue_max_tokens
-            updated.append("gateway.semantic_rescue_max_tokens")
-        if "semantic_rescue_timeout_seconds" in payload:
-            self.semantic_rescue_timeout_seconds = max(
-                0.5,
-                min(15.0, float(payload["semantic_rescue_timeout_seconds"])),
-            )
-            self.gateway_cfg["semantic_rescue_timeout_seconds"] = self.semantic_rescue_timeout_seconds
-            updated.append("gateway.semantic_rescue_timeout_seconds")
         if "memory_detail_recall_enabled" in payload:
             self.memory_detail_recall_enabled = self._bool_config_value(
                 payload["memory_detail_recall_enabled"],
@@ -10059,25 +9994,10 @@ class GatewayService:
         selected_buckets: list[dict],
         all_buckets: list[dict],
     ) -> list[dict]:
-        # Rebuilt mode owns the final one-card decision. The legacy source-record
-        # extension would otherwise append cards after Utility and bypass its cap.
-        if self._rebuilt_recall_enabled():
-            return selected_buckets
-        if not query:
-            return selected_buckets
-        output = list(selected_buckets or [])
-        seen = {str(bucket.get("id") or "") for bucket in output if isinstance(bucket, dict)}
-        for bucket in all_buckets or []:
-            bucket_id = str((bucket or {}).get("id") or "")
-            if not bucket_id or bucket_id in seen:
-                continue
-            if not self._is_source_record_bucket(bucket):
-                continue
-            if not self._source_record_explicit_bucket_match_reason(query, bucket):
-                continue
-            output.append(bucket)
-            seen.add(bucket_id)
-        return output
+        # Source-record buckets must pass the same rebuilt relevance, Utility, and
+        # one-card selection as every other bucket. Keep the wrapper for callers,
+        # but never append cards after the rebuilt decision.
+        return selected_buckets
 
     def _source_record_synthetic_moment_for_bucket(
         self,
@@ -10995,7 +10915,7 @@ class GatewayService:
             and not self._has_named_exact_anchor_candidate(query, all_buckets)
         ):
             query_planner_debug["skip_reason"] = "auto_vague_query"
-            if self.phase1_recall_shadow_enabled and necessity_plan.should_search:
+            if necessity_plan.should_search:
                 _, _, query_planner_debug = await self._select_dynamic_buckets(
                     query,
                     session_id,
@@ -11025,10 +10945,7 @@ class GatewayService:
             for bucket in all_buckets
             if bucket.get("id")
             and (
-                (
-                    self._is_dynamic_candidate(bucket)
-                    and not self._is_relevance_suppressed(query, bucket)
-                )
+                self._is_dynamic_candidate(bucket)
                 or (relevance_query and self._is_relevance_candidate_bucket(query, bucket))
             )
         }
@@ -14657,20 +14574,6 @@ class GatewayService:
                 "query_timeout_seconds": self.embedding_query_timeout_seconds,
                 "supplemental_enabled": self.query_planner_supplemental_semantic,
             },
-            "semantic_rescue": {
-                "enabled": bool(self.semantic_rescue_enabled),
-                "triggered": False,
-                "skip_reason": "",
-                "candidate_limit": self.semantic_rescue_candidate_limit,
-                "candidate_bucket_ids": [],
-                "called": False,
-                "model": self.semantic_rescue_model,
-                "selected_bucket_id": "",
-                "matched_axis": "",
-                "direct_evidence_span": "",
-                "error": "",
-                "timing_ms": 0,
-            },
             "timing_ms": {},
         }
 
@@ -14835,8 +14738,6 @@ class GatewayService:
         query: str,
         necessity: str,
         item: dict,
-        *,
-        formal_candidate: bool = False,
     ) -> tuple[bool, str, dict[str, Any]]:
         bucket = item.get("bucket") if isinstance(item, dict) else None
         if not isinstance(bucket, dict):
@@ -14855,9 +14756,9 @@ class GatewayService:
             if semantic_raw is not None
             else None
         )
-        formal_keyword_score = self._safe_float(item.get("keyword_score"), 0.0)
+        retrieval_keyword_score = self._safe_float(item.get("keyword_score"), 0.0)
         topic_term_plan = self._shadow_topic_term_plan(query)
-        keyword_score = formal_keyword_score
+        keyword_score = retrieval_keyword_score
         topic_terms = topic_term_plan["topic_terms"]
         matched_topic_terms = [
             term
@@ -14874,6 +14775,12 @@ class GatewayService:
             for term in topic_terms
             if self._compact_lookup_key(term) in bucket_title_key
         ]
+        bucket_content_key = self._compact_lookup_key(str(bucket.get("content") or ""))
+        matched_content_topic_terms = [
+            term
+            for term in topic_terms
+            if self._compact_lookup_key(term) in bucket_content_key
+        ]
         bucket_id = str(bucket.get("id") or "")
         identity_keys = set(self._identity_match_terms(compact=True))
         rare_name_terms = [
@@ -14885,12 +14792,13 @@ class GatewayService:
         explicit_bucket_id = bool(
             bucket_id and bucket_id in self._extract_explicit_bucket_ids_from_text(query)
         )
-        rare_name_direct = bool(rare_name_terms and has_topic)
+        rare_name_direct = bool(rare_name_terms and matched_content_topic_terms)
         identity_name_direct = bool(
-            has_topic and self._is_identity_name_candidate_bucket(query, bucket)
+            matched_content_topic_terms
+            and self._is_identity_name_candidate_bucket(query, bucket)
         )
         source_record_match_reason = self._source_record_explicit_bucket_match_reason(query, bucket)
-        source_record_direct = bool(has_topic and source_record_match_reason)
+        source_record_direct = bool(matched_content_topic_terms and source_record_match_reason)
         unique_direct = bool(
             explicit_bucket_id
             or rare_name_direct
@@ -14899,17 +14807,17 @@ class GatewayService:
         )
         exact_direct = bool(
             item.get("exact_anchor_match")
-            and has_topic
+            and matched_content_topic_terms
             and any(len(self._compact_lookup_key(term)) >= 4 for term in matched_topic_terms)
         )
-        semantic_status = str(item.get("semantic_status") or "legacy_unknown")
+        semantic_status = str(item.get("semantic_status") or "unknown")
         query_semantic_unavailable = semantic_status in SHADOW_QUERY_UNAVAILABLE_STATUSES
-        query_unavailable_keyword_fallback = bool(
-            formal_candidate
+        contextual_query_unavailable_keyword_fallback = bool(
+            necessity == "contextual"
             and semantic_raw is None
             and query_semantic_unavailable
-            and keyword_score >= SHADOW_QUERY_UNAVAILABLE_KEYWORD_MIN
-            and has_topic
+            and keyword_score >= SHADOW_CONTEXTUAL_QUERY_UNAVAILABLE_KEYWORD_MIN
+            and matched_content_topic_terms
         )
         explicit_query_unavailable_title_fallback = bool(
             necessity == "explicit"
@@ -14917,13 +14825,13 @@ class GatewayService:
             and query_semantic_unavailable
             and keyword_score >= SHADOW_EXPLICIT_QUERY_UNAVAILABLE_KEYWORD_MIN
             and matched_title_topic_terms
+            and matched_content_topic_terms
         )
         details = {
             "semantic_status": semantic_status,
             "semantic_score": semantic_score,
             "keyword_score": keyword_score,
-            "formal_keyword_score": formal_keyword_score,
-            "shadow_keyword_score": keyword_score,
+            "retrieval_keyword_score": retrieval_keyword_score,
             "topic_terms": topic_terms,
             "raw_topic_terms": topic_term_plan["raw_topic_terms"],
             "ignored_address_terms": topic_term_plan["ignored_address_terms"],
@@ -14934,6 +14842,7 @@ class GatewayService:
             "ignored_topic_terms": topic_term_plan["ignored_topic_terms"],
             "matched_topic_terms": matched_topic_terms,
             "matched_title_topic_terms": matched_title_topic_terms,
+            "matched_content_topic_terms": matched_content_topic_terms,
             "rare_name_terms": rare_name_terms,
             "rare_name_direct": rare_name_direct,
             "identity_name_direct": identity_name_direct,
@@ -14942,10 +14851,9 @@ class GatewayService:
             "explicit_bucket_id": explicit_bucket_id,
             "unique_direct": unique_direct,
             "exact_direct": exact_direct,
-            "formal_candidate": bool(formal_candidate),
             "query_semantic_unavailable": query_semantic_unavailable,
-            "query_unavailable_keyword_min": SHADOW_QUERY_UNAVAILABLE_KEYWORD_MIN,
-            "query_unavailable_keyword_fallback": query_unavailable_keyword_fallback,
+            "contextual_query_unavailable_keyword_min": SHADOW_CONTEXTUAL_QUERY_UNAVAILABLE_KEYWORD_MIN,
+            "contextual_query_unavailable_keyword_fallback": contextual_query_unavailable_keyword_fallback,
             "explicit_query_unavailable_keyword_min": SHADOW_EXPLICIT_QUERY_UNAVAILABLE_KEYWORD_MIN,
             "explicit_query_unavailable_title_fallback": explicit_query_unavailable_title_fallback,
         }
@@ -14960,8 +14868,8 @@ class GatewayService:
             return True, "shadow_explicit_semantic_topic", details
         if necessity == "explicit" and exact_direct:
             return True, "shadow_explicit_exact_topic", details
-        if query_unavailable_keyword_fallback:
-            return True, "shadow_query_unavailable_formal_topic_keyword", details
+        if contextual_query_unavailable_keyword_fallback:
+            return True, "shadow_contextual_query_unavailable_content_keyword", details
         if explicit_query_unavailable_title_fallback:
             return True, "shadow_explicit_query_unavailable_title_keyword", details
         if semantic_raw is None:
@@ -15037,36 +14945,24 @@ class GatewayService:
         self,
         query: str,
         necessity_plan: RecallNecessityPlan,
-        formal_items: list[dict],
+        candidate_items: list[dict],
         suppressed_items: list[dict],
         planner_debug: dict[str, Any],
-        additional_candidate_items: list[dict] | None = None,
         recent_context: str = "",
     ) -> dict[str, Any]:
-        formal_items = [item for item in formal_items or [] if isinstance(item, dict)]
+        candidate_items = [item for item in candidate_items or [] if isinstance(item, dict)]
         suppressed_items = [item for item in suppressed_items or [] if isinstance(item, dict)]
-        additional_candidate_items = [
-            item for item in (additional_candidate_items or []) if isinstance(item, dict)
-        ]
-        formal_bucket_ids = [
-            str((item.get("bucket") or {}).get("id") or "")
-            for item in formal_items
-            if (item.get("bucket") or {}).get("id")
-        ]
         planner_status = self._planner_shadow_status(planner_debug)
         debug: dict[str, Any] = {
             "version": 1,
-            "enabled": bool(self.phase1_recall_shadow_enabled),
-            "affects_recall": self._rebuilt_recall_enabled(),
-            "decision_mode": str(getattr(self, "recall_decision_mode", "legacy") or "legacy"),
+            "enabled": True,
+            "affects_recall": True,
+            "decision_mode": "rebuilt",
             "planner_status": planner_status,
             "necessity": necessity_plan.necessity,
             "targetable": bool(necessity_plan.targetable),
             "fallback_strategy": "",
-            "formal_bucket_ids": formal_bucket_ids,
             "shadow_bucket_ids": [],
-            "added_bucket_ids": [],
-            "removed_bucket_ids": [],
             "selected_candidates": [],
             "eligible_unselected_candidates": [],
             "rejected_candidates": [],
@@ -15076,10 +14972,6 @@ class GatewayService:
             "reviewed_candidate_count": 0,
             "candidate_debug_truncated": False,
         }
-        if not self.phase1_recall_shadow_enabled:
-            debug["fallback_strategy"] = "shadow_disabled"
-            return debug
-
         shadow_pool: list[dict] = []
         rejected_rows: list[dict[str, Any]] = []
         utility_rows: list[dict[str, Any]] = []
@@ -15089,52 +14981,26 @@ class GatewayService:
         elif not necessity_plan.targetable:
             debug["fallback_strategy"] = "explicit_target_missing"
         else:
-            conservative_contextual = bool(
-                necessity_plan.necessity == "contextual"
-                and planner_status in {"degraded", "disabled", "not_run"}
-            )
+            candidates = list(candidate_items)
             debug["fallback_strategy"] = (
-                "conservative_no_expansion"
-                if conservative_contextual
-                else "contextual_strict_relevance"
+                "contextual_unified_retrieval"
                 if necessity_plan.necessity == "contextual"
-                else "explicit_strict_relevance_with_planner_fallback"
+                else "explicit_unified_retrieval"
             )
-            formal_ids = {
-                str((item.get("bucket") or {}).get("id") or "")
-                for item in formal_items
-                if (item.get("bucket") or {}).get("id")
-            }
-            additional_ids = {
-                str((item.get("bucket") or {}).get("id") or "")
-                for item in additional_candidate_items
-                if (item.get("bucket") or {}).get("id")
-            }
-            candidates = [*formal_items]
-            if not conservative_contextual:
-                candidates.extend(additional_candidate_items)
-                candidates.extend(suppressed_items)
             for raw_item in candidates:
                 item = self._rebuilt_recall_candidate_item(raw_item)
                 bucket_id = str((item.get("bucket") or {}).get("id") or "")
                 if not bucket_id or bucket_id in seen_ids:
                     continue
                 seen_ids.add(bucket_id)
-                candidate_origin = (
-                    "legacy_selected"
-                    if bucket_id in formal_ids
-                    else "retrieved_admitted_unselected"
-                    if bucket_id in additional_ids
-                    else "legacy_suppressed"
-                )
+                candidate_origin = str(item.get("rebuilt_candidate_origin") or "retrieved")
                 item["rebuilt_candidate_origin"] = candidate_origin
                 admitted, shadow_reason, relevance_debug = self._shadow_candidate_relevance(
                     query,
                     necessity_plan.necessity,
                     item,
-                    formal_candidate=bucket_id in formal_ids,
                 )
-                original_reason = str(item.get("admission_reason") or "suppressed")
+                retrieval_reason = str(item.get("admission_reason") or "retrieved_candidate")
                 if admitted:
                     utility = self._shadow_candidate_utility(
                         query,
@@ -15168,19 +15034,18 @@ class GatewayService:
                             query=query,
                             status="shadow_utility_rejected",
                         )
-                        row["formal_admission_reason"] = original_reason
+                        row["retrieval_reason"] = retrieval_reason
                         row["shadow_admission_reason"] = "shadow_utility_rejected"
                         row["shadow_relevance_reason"] = shadow_reason
                         row["shadow_relevance_debug"] = relevance_debug
                         row["shadow_utility"] = utility_debug
-                        row["was_formal_candidate"] = bucket_id in formal_ids
                         row["candidate_origin"] = candidate_origin
-                        row["legacy_score"] = item.get("legacy_score")
+                        row["retrieval_score"] = item.get("retrieval_score")
                         row["rebuilt_score"] = item.get("rebuilt_score")
                         row["rebuilt_freshness_ignored"] = item.get("rebuilt_freshness_ignored")
                         rejected_rows.append(row)
                         continue
-                    item["shadow_original_admission_reason"] = original_reason
+                    item["retrieval_original_reason"] = retrieval_reason
                     item["shadow_relevance_debug"] = relevance_debug
                     item["shadow_utility"] = utility_debug
                     item["admission_reason"] = shadow_reason
@@ -15188,12 +15053,11 @@ class GatewayService:
                     shadow_pool.append(item)
                     continue
                 row = self._format_suppressed_bucket_debug(item, query=query, status="shadow_rejected")
-                row["formal_admission_reason"] = original_reason
+                row["retrieval_reason"] = retrieval_reason
                 row["shadow_admission_reason"] = shadow_reason
                 row["shadow_relevance_debug"] = relevance_debug
-                row["was_formal_candidate"] = bucket_id in formal_ids
                 row["candidate_origin"] = candidate_origin
-                row["legacy_score"] = item.get("legacy_score")
+                row["retrieval_score"] = item.get("retrieval_score")
                 row["rebuilt_score"] = item.get("rebuilt_score")
                 row["rebuilt_freshness_ignored"] = item.get("rebuilt_freshness_ignored")
                 rejected_rows.append(row)
@@ -15207,11 +15071,7 @@ class GatewayService:
             promoted_pool or shadow_pool,
             key=lambda item: self._bucket_final_candidate_rank(query, item),
         )
-        shadow_items = (
-            self._pick_dynamic_cards(selection_pool, query=query)[:1]
-            if selection_pool
-            else []
-        )
+        shadow_items = selection_pool[:1]
         shadow_bucket_ids = [
             str((item.get("bucket") or {}).get("id") or "")
             for item in shadow_items
@@ -15220,17 +15080,17 @@ class GatewayService:
         selected_rows: list[dict[str, Any]] = []
         for item in shadow_items:
             row = self._format_suppressed_bucket_debug(item, query=query, status="shadow_selected")
-            row["formal_admission_reason"] = str(
-                item.get("shadow_original_admission_reason")
+            row["retrieval_reason"] = str(
+                item.get("retrieval_original_reason")
                 or item.get("admission_reason")
-                or "admitted_bucket"
+                or "retrieved_candidate"
             )
             row["shadow_admission_reason"] = str(item.get("admission_reason") or "shadow_selected")
             row["shadow_softened_reasons"] = list(item.get("shadow_softened_reasons") or [])
             row["shadow_relevance_debug"] = dict(item.get("shadow_relevance_debug") or {})
             row["shadow_utility"] = dict(item.get("shadow_utility") or {})
             row["candidate_origin"] = str(item.get("rebuilt_candidate_origin") or "")
-            row["legacy_score"] = item.get("legacy_score")
+            row["retrieval_score"] = item.get("retrieval_score")
             row["rebuilt_score"] = item.get("rebuilt_score")
             row["rebuilt_freshness_ignored"] = item.get("rebuilt_freshness_ignored")
             selected_rows.append(row)
@@ -15258,10 +15118,10 @@ class GatewayService:
                 query=query,
                 status="shadow_eligible_unselected",
             )
-            row["formal_admission_reason"] = str(
-                item.get("shadow_original_admission_reason")
+            row["retrieval_reason"] = str(
+                item.get("retrieval_original_reason")
                 or item.get("admission_reason")
-                or "admitted_bucket"
+                or "retrieved_candidate"
             )
             row["shadow_admission_reason"] = str(
                 item.get("admission_reason") or "shadow_eligible_unselected"
@@ -15269,7 +15129,7 @@ class GatewayService:
             row["shadow_relevance_debug"] = dict(item.get("shadow_relevance_debug") or {})
             row["shadow_utility"] = dict(item.get("shadow_utility") or {})
             row["candidate_origin"] = str(item.get("rebuilt_candidate_origin") or "")
-            row["legacy_score"] = item.get("legacy_score")
+            row["retrieval_score"] = item.get("retrieval_score")
             row["rebuilt_score"] = item.get("rebuilt_score")
             row["rebuilt_freshness_ignored"] = item.get("rebuilt_freshness_ignored")
             utility_status = str((item.get("shadow_utility") or {}).get("status") or "")
@@ -15280,8 +15140,6 @@ class GatewayService:
             )
             eligible_unselected_rows.append(row)
         debug["shadow_bucket_ids"] = shadow_bucket_ids
-        debug["added_bucket_ids"] = [item for item in shadow_bucket_ids if item not in formal_bucket_ids]
-        debug["removed_bucket_ids"] = [item for item in formal_bucket_ids if item not in shadow_bucket_ids]
         candidate_debug_limit = 100
         rejected_rows.sort(
             key=lambda row: -self._safe_float(row.get("rebuilt_score"), row.get("score")),
@@ -15303,23 +15161,17 @@ class GatewayService:
 
     def _rebuilt_recall_candidate_item(self, raw_item: dict) -> dict:
         item = dict(raw_item)
-        legacy_score = self._safe_float(item.get("score"), 0.0)
+        retrieval_score = self._safe_float(item.get("score"), 0.0)
         has_freshness_free_score = item.get("score_without_freshness") is not None
         rebuilt_score = self._safe_float(
             item.get("score_without_freshness"),
-            legacy_score,
+            retrieval_score,
         )
-        item["legacy_score"] = legacy_score
+        item["retrieval_score"] = retrieval_score
         item["rebuilt_score"] = rebuilt_score
         item["rebuilt_freshness_ignored"] = has_freshness_free_score
         item["score"] = rebuilt_score
         return item
-
-    def _rebuilt_recall_enabled(self) -> bool:
-        return bool(
-            getattr(self, "phase1_recall_shadow_enabled", False)
-            and str(getattr(self, "recall_decision_mode", "legacy") or "legacy") == "rebuilt"
-        )
 
     @staticmethod
     def _recall_items_for_bucket_ids(bucket_ids: list[str], candidate_items: list[dict]) -> list[dict]:
@@ -15334,18 +15186,20 @@ class GatewayService:
         return [by_id[bucket_id] for bucket_id in wanted if bucket_id in by_id]
 
     @staticmethod
-    def _recall_shadow_with_formal_ids(
+    def _recall_shadow_with_effective_ids(
         shadow_debug: dict[str, Any] | None,
-        formal_bucket_ids: list[str],
+        effective_bucket_ids: list[str],
     ) -> dict[str, Any]:
         debug = dict(shadow_debug or {})
         if not debug:
             return debug
-        formal_ids = list(dict.fromkeys(str(item) for item in formal_bucket_ids if str(item or "").strip()))
-        shadow_ids = list(debug.get("shadow_bucket_ids") or [])
-        debug["formal_bucket_ids"] = formal_ids
-        debug["added_bucket_ids"] = [item for item in shadow_ids if item not in formal_ids]
-        debug["removed_bucket_ids"] = [item for item in formal_ids if item not in shadow_ids]
+        debug["effective_bucket_ids"] = list(
+            dict.fromkeys(
+                str(item)
+                for item in effective_bucket_ids
+                if str(item or "").strip()
+            )
+        )
         return debug
 
     def _structural_activation_debug_base(self, query: str) -> dict[str, Any]:
@@ -16011,235 +15865,6 @@ class GatewayService:
             return str(message.get("content") or ""), None
         return str(getattr(message, "content", "") or ""), None
 
-    def _semantic_rescue_axes(self, query: str) -> list[dict[str, Any]]:
-        plan = self._recall_query_plan(query)
-        axes: list[dict[str, Any]] = []
-        for group in (getattr(plan, "activated_axis_groups", ()) or ())[:4]:
-            terms = [
-                str(term).strip()
-                for term in group or ()
-                if str(term or "").strip() and self._matched_query_term_is_specific(term)
-            ]
-            if not terms:
-                continue
-            axes.append(
-                {
-                    "id": f"axis_{len(axes)}",
-                    "terms": list(dict.fromkeys(terms))[:4],
-                }
-            )
-        return axes
-
-    def _semantic_rescue_candidates(self, items: list[dict]) -> list[dict]:
-        allowed_reasons = {
-            "semantic_only",
-            "retrieval_alias_only",
-            "generic_category_only",
-            "weak_evidence_only",
-            "no_hard_evidence",
-            "activated_axis_mismatch",
-        }
-        candidates = [
-            item
-            for item in items or []
-            if isinstance(item, dict)
-            and isinstance(item.get("bucket"), dict)
-            and self._safe_float(item.get("semantic_score"), 0.0) > 0
-            and not list(item.get("hard_evidence_labels") or [])
-            and str(item.get("admission_reason") or "") in allowed_reasons
-        ]
-        candidates.sort(
-            key=lambda item: (
-                self._safe_float(item.get("semantic_score"), 0.0),
-                self._safe_float(item.get("rerank_score"), 0.0),
-                self._safe_float(item.get("score"), 0.0),
-            ),
-            reverse=True,
-        )
-        return candidates[: self.semantic_rescue_candidate_limit]
-
-    async def _try_semantic_rescue(
-        self,
-        query: str,
-        suppressed_items: list[dict],
-        debug: dict[str, Any],
-    ) -> dict | None:
-        started_at = time.perf_counter()
-
-        def finish(reason: str = "") -> None:
-            if reason:
-                debug["skip_reason"] = reason
-            debug["timing_ms"] = max(0, int((time.perf_counter() - started_at) * 1000))
-
-        if not self.semantic_rescue_enabled:
-            finish("disabled")
-            return None
-        query_plan = self._recall_query_plan(query)
-        if getattr(query_plan, "long_term_route", "skip") != "search":
-            finish("query_route_skip")
-            return None
-        if self._auto_recall_low_signal_query(query):
-            finish("low_signal_query")
-            return None
-        if self._query_is_category_overview(query):
-            finish("category_overview")
-            return None
-        axes = self._semantic_rescue_axes(query)
-        if not axes:
-            finish("no_specific_axis")
-            return None
-        candidates = self._semantic_rescue_candidates(suppressed_items)
-        debug["candidate_bucket_ids"] = [
-            str((item.get("bucket") or {}).get("id") or "")
-            for item in candidates
-        ]
-        if not candidates:
-            finish("no_eligible_candidates")
-            return None
-        if not self.semantic_rescue_model:
-            finish("model_missing")
-            return None
-
-        documents: list[dict[str, Any]] = []
-        document_by_id: dict[str, str] = {}
-        item_by_id: dict[str, dict] = {}
-        for item in candidates:
-            bucket = item.get("bucket") or {}
-            bucket_id = str(bucket.get("id") or "")
-            if not bucket_id:
-                continue
-            metadata = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-            content = bucket_content_for_recall(bucket)[:3500]
-            if not content.strip():
-                continue
-            documents.append(
-                {
-                    "bucket_id": bucket_id,
-                    "title": str(metadata.get("name") or bucket_id),
-                    "content": content,
-                }
-            )
-            document_by_id[bucket_id] = content
-            item_by_id[bucket_id] = item
-        if not documents:
-            finish("no_candidate_content")
-            return None
-
-        payload = {
-            "model": self.semantic_rescue_model,
-            "messages": [
-                {"role": "system", "content": SEMANTIC_RESCUE_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {
-                            "query": query,
-                            "axes": axes,
-                            "candidates": documents,
-                        },
-                        ensure_ascii=False,
-                    ),
-                },
-            ],
-            "temperature": 0,
-            "max_tokens": self.semantic_rescue_max_tokens,
-            "stream": False,
-        }
-        debug["triggered"] = True
-        debug["called"] = True
-        try:
-            content, error = await asyncio.wait_for(
-                self._call_query_planner_with_dehydrator(payload),
-                timeout=self.semantic_rescue_timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            debug["error"] = "semantic_rescue_timeout"
-            finish("model_error")
-            return None
-        if error:
-            debug["error"] = str(error).replace("query_planner", "semantic_rescue")
-            finish("model_error")
-            return None
-        try:
-            result = self._parse_semantic_rescue_response(content or "")
-        except ValueError as exc:
-            debug["error"] = f"semantic_rescue_parse_failed:{exc}"
-            finish("invalid_response")
-            return None
-        debug["result"] = dict(result)
-        bucket_id = str(result.get("selected_bucket_id") or "").strip()
-        span = str(result.get("direct_evidence_span") or "").strip()
-        axis_id = str(result.get("matched_axis") or "").strip()
-        if not bucket_id and not span and not axis_id:
-            finish("model_no_match")
-            return None
-        if bucket_id not in item_by_id:
-            finish("unknown_bucket")
-            return None
-        if axis_id not in {str(axis.get("id") or "") for axis in axes}:
-            finish("unknown_axis")
-            return None
-        if len(self._compact_lookup_key(span)) < 6 or span not in document_by_id[bucket_id]:
-            finish("invalid_evidence_span")
-            return None
-
-        rescued = dict(item_by_id[bucket_id])
-        original_reason = str(rescued.get("admission_reason") or "")
-        rescue_evidence = {
-            "selected_bucket_id": bucket_id,
-            "matched_axis": axis_id,
-            "direct_evidence_span": span,
-            "original_blocked_reason": original_reason,
-        }
-        rescued["semantic_rescue"] = rescue_evidence
-        rescued["semantic_rescue_direct_span"] = span
-        rescued["semantic_rescue_matched_axis"] = axis_id
-        rescued["semantic_rescue_no_diffusion"] = True
-        rescued["blocked_reason"] = ""
-        if not self._admit_bucket_for_recall(query, rescued):
-            debug["error"] = f"semantic_rescue_readmission_denied:{rescued.get('admission_reason') or 'unknown'}"
-            finish("readmission_denied")
-            return None
-        rescued["admission_reason"] = "semantic_rescue_direct_evidence"
-        rescued["blocked_reason"] = ""
-        rescued["recall_policy_debug"] = {
-            **(
-                rescued.get("recall_policy_debug")
-                if isinstance(rescued.get("recall_policy_debug"), dict)
-                else {}
-            ),
-            "semantic_rescue": rescue_evidence,
-        }
-        debug["selected_bucket_id"] = bucket_id
-        debug["matched_axis"] = axis_id
-        debug["direct_evidence_span"] = self._clip_text(span, 500)
-        finish()
-        return rescued
-
-    @staticmethod
-    def _parse_semantic_rescue_response(content: str) -> dict[str, str]:
-        text = str(content or "").strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-            text = re.sub(r"\s*```$", "", text).strip()
-        if not text.startswith("{"):
-            start = text.find("{")
-            end = text.rfind("}")
-            if start >= 0 and end > start:
-                text = text[start : end + 1]
-        try:
-            raw = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ValueError("invalid_json") from exc
-        if not isinstance(raw, dict):
-            raise ValueError("json_root_not_object")
-        return {
-            "selected_bucket_id": str(raw.get("selected_bucket_id") or "").strip(),
-            "direct_evidence_span": str(raw.get("direct_evidence_span") or "").strip(),
-            "matched_axis": str(raw.get("matched_axis") or "").strip(),
-        }
-
-    @staticmethod
     def _chat_completion_content(body: dict[str, Any]) -> str:
         choices = body.get("choices")
         if not isinstance(choices, list) or not choices:
@@ -17128,11 +16753,8 @@ class GatewayService:
         eligible = [
             bucket for bucket in all_buckets
             if (
-                (
-                    self._is_dynamic_candidate(bucket)
-                    or self._is_identity_name_candidate_bucket(raw_query, bucket)
-                )
-                and not self._is_relevance_suppressed(policy_query, bucket)
+                self._is_dynamic_candidate(bucket)
+                or self._is_identity_name_candidate_bucket(raw_query, bucket)
             )
             or (relevance_query and self._is_relevance_candidate_bucket(policy_query, bucket))
         ]
@@ -17553,72 +17175,45 @@ class GatewayService:
             scored_candidates,
             hard_excluded_ids,
         )
-        if not scored_candidates:
-            mark("session_hard_exclude", stage_started_at)
-            return [], session_suppressed_candidates
-        mark("session_hard_exclude", stage_started_at)
-        stage_started_at = time.perf_counter()
-        filtered = [
-            item
-            for item in scored_candidates
-            if item["bucket"]["id"] not in recent_ids
-            or self._planner_lexical_direct_signal(item)
-            or item.get("exact_anchor_match")
-            or item.get("distinctive_anchor_match")
-            or item.get("category_overview_item")
-            or self._is_high_confidence_match(
-                self._safe_float(item.get("semantic_score"), 0.0),
-                self._safe_float(item.get("keyword_score"), 0.0),
-            )
-        ]
-        active_pool = filtered or scored_candidates
-        required_terms = required_terms or []
-
-        def admit_candidate_pool(pool: list[dict]) -> tuple[list[dict], list[dict]]:
-            admitted: list[dict] = []
-            suppressed: list[dict] = []
-            for raw_item in pool:
-                item = dict(raw_item)
-                if required_terms and not self._bucket_matches_any_planner_term(item.get("bucket") or {}, required_terms):
-                    item["admission_reason"] = "planner_must_terms_missing"
-                    item["recall_policy_debug"] = {
-                        "planner_must_terms": required_terms,
-                        "must_terms_matched": False,
-                        "auto": True,
-                    }
-                    suppressed.append(item)
+        planner_must_suppressed: list[dict] = []
+        if required_terms:
+            planner_filtered: list[dict] = []
+            for raw_item in scored_candidates:
+                if self._bucket_matches_any_planner_term(
+                    raw_item.get("bucket") or {},
+                    required_terms,
+                ):
+                    planner_filtered.append(raw_item)
                     continue
-                if self._admit_bucket_for_recall(policy_query, item):
-                    admitted.append(item)
-                else:
-                    suppressed.append(item)
-            return admitted, suppressed
-
-        admitted_pool, suppressed_candidates = admit_candidate_pool(active_pool)
-        suppressed_candidates = session_suppressed_candidates + suppressed_candidates
-        if (
-            not admitted_pool
-            and filtered
-            and len(filtered) < len(scored_candidates)
-        ):
-            admitted_pool, retry_suppressed = admit_candidate_pool(scored_candidates)
-            suppressed_candidates = session_suppressed_candidates + retry_suppressed
-        mark("admit_candidates", stage_started_at)
-        stage_started_at = time.perf_counter()
+                item = dict(raw_item)
+                item["admission_reason"] = "planner_must_terms_missing"
+                item["recall_policy_debug"] = {
+                    "planner_must_terms": list(required_terms),
+                    "must_terms_matched": False,
+                    "auto": True,
+                }
+                planner_must_suppressed.append(item)
+            scored_candidates = planner_filtered
         if allow_semantic_session_dedupe:
-            admitted_pool, semantic_dedupe_suppressed = await self._filter_semantic_session_deduped_bucket_items(
+            scored_candidates, semantic_dedupe_suppressed = await self._filter_semantic_session_deduped_bucket_items(
                 policy_query,
                 session_id,
-                admitted_pool,
+                scored_candidates,
                 all_buckets,
             )
         else:
             semantic_dedupe_suppressed = []
-        suppressed_candidates.extend(semantic_dedupe_suppressed)
-        mark("semantic_session_dedupe", stage_started_at)
-        admitted_pool = self._boost_explicit_relation_edge_bucket_items(policy_query, admitted_pool)
-        admitted_pool.sort(key=lambda item: self._bucket_final_candidate_rank(policy_query, item, recent_ids=recent_ids))
-        return admitted_pool, suppressed_candidates
+        neutral_candidates = list(scored_candidates)
+        boundary_suppressed_candidates = (
+            session_suppressed_candidates
+            + planner_must_suppressed
+            + semantic_dedupe_suppressed
+        )
+        if not scored_candidates:
+            mark("session_hard_exclude", stage_started_at)
+            return [], boundary_suppressed_candidates
+        mark("session_hard_exclude", stage_started_at)
+        return neutral_candidates, boundary_suppressed_candidates
 
     async def _select_dynamic_buckets(
         self,
@@ -17663,10 +17258,10 @@ class GatewayService:
             and not self._has_named_exact_anchor_candidate(query, all_buckets)
         ):
             planner_debug["skip_reason"] = "auto_vague_query"
-            shadow_admitted: list[dict] = []
             shadow_suppressed: list[dict] = []
-            if self.phase1_recall_shadow_enabled and necessity_plan.should_search:
-                shadow_admitted, shadow_suppressed = await self._dynamic_bucket_candidate_items(
+            shadow_retrieved: list[dict] = []
+            if necessity_plan.should_search:
+                shadow_retrieved, shadow_suppressed = await self._dynamic_bucket_candidate_items(
                     query,
                     session_id,
                     all_buckets,
@@ -17681,32 +17276,27 @@ class GatewayService:
                     timing_debug=timing_debug,
                     timing_prefix="shadow_direct",
                 )
-                shadow_admitted = [
-                    {**item, "shadow_candidate_admitted": True}
-                    for item in shadow_admitted
+                shadow_retrieved = [
+                    {**item, "rebuilt_candidate_origin": "direct_retrieval"}
+                    for item in shadow_retrieved
                 ]
             recall_shadow_debug = self._build_recall_shadow_debug(
                 query,
                 necessity_plan,
-                [],
+                shadow_retrieved,
                 shadow_suppressed,
                 planner_debug,
-                additional_candidate_items=shadow_admitted,
                 recent_context=shadow_recent_context,
             )
-            if self._rebuilt_recall_enabled():
-                selected_items = self._recall_items_for_bucket_ids(
-                    list(recall_shadow_debug.get("shadow_bucket_ids") or []),
-                    [*shadow_admitted, *shadow_suppressed],
-                )
-                selected_buckets = [
-                    self._bucket_with_recall_signal(item)
-                    for item in selected_items
-                    if isinstance(item.get("bucket"), dict)
-                ]
-            else:
-                selected_buckets = []
-            recall_shadow_debug["legacy_bucket_ids"] = []
+            selected_items = self._recall_items_for_bucket_ids(
+                list(recall_shadow_debug.get("shadow_bucket_ids") or []),
+                [*shadow_retrieved, *shadow_suppressed],
+            )
+            selected_buckets = [
+                self._bucket_with_recall_signal(item)
+                for item in selected_items
+                if isinstance(item.get("bucket"), dict)
+            ]
             recall_shadow_debug["effective_bucket_ids"] = [
                 str(bucket.get("id") or "") for bucket in selected_buckets if bucket.get("id")
             ]
@@ -17717,7 +17307,7 @@ class GatewayService:
             return selected_buckets, shadow_suppressed
 
         stage_started_at = time.perf_counter()
-        active_pool, suppressed_candidates = await self._dynamic_bucket_candidate_items(
+        direct_retrieved_candidates, suppressed_candidates = await self._dynamic_bucket_candidate_items(
             query,
             session_id,
             all_buckets,
@@ -17728,61 +17318,30 @@ class GatewayService:
             timing_debug=timing_debug,
             timing_prefix="direct",
         )
-        rebuilt_admitted_candidates = list(active_pool)
-        structural_activation_items = list(active_pool) + list(suppressed_candidates)
+        rebuilt_candidate_items = [
+            {**item, "rebuilt_candidate_origin": "direct_retrieval"}
+            for item in direct_retrieved_candidates
+        ]
+        structural_activation_items = list(direct_retrieved_candidates) + list(suppressed_candidates)
         self._add_timing_ms(timing_debug, "direct.candidate_items_total", stage_started_at)
         stage_started_at = time.perf_counter()
-        self._merge_word_map_hint_debug(planner_debug, active_pool + suppressed_candidates)
-        self._merge_exact_anchor_debug(planner_debug, active_pool + suppressed_candidates)
-        self._merge_dynamic_anchor_debug(planner_debug, active_pool + suppressed_candidates)
-        direct_selected = self._pick_dynamic_cards(active_pool, query=query)
-        selected_items = list(direct_selected)
-        self._add_timing_ms(timing_debug, "direct.pick_cards", stage_started_at)
-
-        rescue_debug = planner_debug.setdefault("semantic_rescue", {})
-        if not self.semantic_rescue_enabled:
-            rescue_debug["skip_reason"] = "disabled"
-        elif len(direct_selected) >= self.inject_max_cards:
-            rescue_debug["skip_reason"] = "capacity_full"
-        else:
-            stage_started_at = time.perf_counter()
-            rescued_item = await self._try_semantic_rescue(
+        self._merge_word_map_hint_debug(planner_debug, direct_retrieved_candidates + suppressed_candidates)
+        self._merge_exact_anchor_debug(planner_debug, direct_retrieved_candidates + suppressed_candidates)
+        self._merge_dynamic_anchor_debug(planner_debug, direct_retrieved_candidates + suppressed_candidates)
+        direct_rebuilt_relevant = [
+            item
+            for item in direct_retrieved_candidates
+            if self._shadow_candidate_relevance(
                 query,
-                suppressed_candidates,
-                rescue_debug,
-            )
-            self._add_timing_ms(timing_debug, "semantic_rescue", stage_started_at)
-            if rescued_item:
-                if allow_semantic_session_dedupe:
-                    rescued_items, rescue_dedupe_suppressed = await self._filter_semantic_session_deduped_bucket_items(
-                        query,
-                        session_id,
-                        [rescued_item],
-                        all_buckets,
-                    )
-                else:
-                    rescued_items, rescue_dedupe_suppressed = [rescued_item], []
-                if rescued_items:
-                    rescued_item = rescued_items[0]
-                    rescued_bucket_id = str((rescued_item.get("bucket") or {}).get("id") or "")
-                    active_pool.append(rescued_item)
-                    rebuilt_admitted_candidates.append(rescued_item)
-                    direct_selected.append(rescued_item)
-                    selected_items = list(direct_selected)
-                    structural_activation_items.append(rescued_item)
-                    suppressed_candidates = [
-                        item
-                        for item in suppressed_candidates
-                        if str((item.get("bucket") or {}).get("id") or "") != rescued_bucket_id
-                    ]
-                else:
-                    rescue_debug["selected_bucket_id"] = ""
-                    rescue_debug["skip_reason"] = "semantic_session_dedupe"
-                    suppressed_candidates.extend(rescue_dedupe_suppressed)
+                necessity_plan.necessity,
+                item,
+            )[0]
+        ]
+        self._add_timing_ms(timing_debug, "direct.rebuilt_relevance_probe", stage_started_at)
 
         relation_axis_queries = (
             []
-            if self._items_have_explicit_relation_pair(direct_selected)
+            if self._items_have_explicit_relation_pair(direct_rebuilt_relevant)
             else self._relation_axis_supplemental_queries(query)
         )
         if relation_axis_queries:
@@ -17791,7 +17350,7 @@ class GatewayService:
                 short_query = axis_query["query"]
                 must_terms = list(axis_query.get("must_terms") or [])
                 stage_started_at = time.perf_counter()
-                admitted, suppressed = await self._dynamic_bucket_candidate_items(
+                retrieved, suppressed = await self._dynamic_bucket_candidate_items(
                     short_query,
                     session_id,
                     all_buckets,
@@ -17814,21 +17373,24 @@ class GatewayService:
                     f"relation_axis_{index}.candidate_items_total",
                     stage_started_at,
                 )
-                relation_axis_items.extend(admitted)
-                rebuilt_admitted_candidates.extend(admitted)
+                relation_axis_items.extend(retrieved)
+                rebuilt_candidate_items.extend(
+                    {**item, "rebuilt_candidate_origin": "relation_axis_retrieval"}
+                    for item in retrieved
+                )
                 suppressed_candidates.extend(suppressed)
-                structural_activation_items.extend(admitted)
+                structural_activation_items.extend(retrieved)
                 structural_activation_items.extend(suppressed)
                 stage_started_at = time.perf_counter()
-                self._merge_word_map_hint_debug(planner_debug, admitted + suppressed)
-                self._merge_exact_anchor_debug(planner_debug, admitted + suppressed)
+                self._merge_word_map_hint_debug(planner_debug, retrieved + suppressed)
+                self._merge_exact_anchor_debug(planner_debug, retrieved + suppressed)
                 planner_debug["relation_axis"].append(
                     {
                         "query": short_query,
                         "must_terms": must_terms,
                         "survived_bucket_ids": [
                             str((item.get("bucket") or {}).get("id") or "")
-                            for item in admitted
+                            for item in retrieved
                             if (item.get("bucket") or {}).get("id")
                         ],
                         "suppressed_bucket_ids": [
@@ -17839,16 +17401,9 @@ class GatewayService:
                     }
                 )
                 self._add_timing_ms(timing_debug, f"relation_axis_{index}.debug_merge", stage_started_at)
-            if relation_axis_items:
-                stage_started_at = time.perf_counter()
-                merged_items = self._merge_dynamic_bucket_items(selected_items + relation_axis_items, query)
-                merged_items = self._boost_explicit_relation_edge_bucket_items(query, merged_items)
-                merged_items.sort(key=lambda item: self._bucket_final_candidate_rank(query, item))
-                selected_items = self._pick_dynamic_cards(merged_items, query=query)
-                self._add_timing_ms(timing_debug, "relation_axis.pick_cards", stage_started_at)
 
         stage_started_at = time.perf_counter()
-        trigger_reason = self._query_planner_trigger_reason(query, direct_selected)
+        trigger_reason = self._query_planner_trigger_reason(query, direct_rebuilt_relevant)
         self._add_timing_ms(timing_debug, "query_planner_trigger_check", stage_started_at)
         if trigger_reason and allow_query_planner:
             planner_debug["triggered"] = True
@@ -17874,7 +17429,7 @@ class GatewayService:
                             continue
                         short_search_query = self._normalized_recall_query(short_query)
                         stage_started_at = time.perf_counter()
-                        admitted, suppressed = await self._dynamic_bucket_candidate_items(
+                        retrieved, suppressed = await self._dynamic_bucket_candidate_items(
                             short_query,
                             session_id,
                             all_buckets,
@@ -17892,14 +17447,17 @@ class GatewayService:
                             f"supplemental_{index}.candidate_items_total",
                             stage_started_at,
                         )
-                        supplemental_items.extend(admitted)
-                        rebuilt_admitted_candidates.extend(admitted)
+                        supplemental_items.extend(retrieved)
+                        rebuilt_candidate_items.extend(
+                            {**item, "rebuilt_candidate_origin": "planner_supplemental_retrieval"}
+                            for item in retrieved
+                        )
                         suppressed_candidates.extend(suppressed)
-                        structural_activation_items.extend(admitted)
+                        structural_activation_items.extend(retrieved)
                         structural_activation_items.extend(suppressed)
                         stage_started_at = time.perf_counter()
-                        self._merge_word_map_hint_debug(planner_debug, admitted + suppressed)
-                        self._merge_exact_anchor_debug(planner_debug, admitted + suppressed)
+                        self._merge_word_map_hint_debug(planner_debug, retrieved + suppressed)
+                        self._merge_exact_anchor_debug(planner_debug, retrieved + suppressed)
                         suppressed_must = [
                             self._format_suppressed_bucket_debug(item, query=short_query)
                             for item in suppressed
@@ -17912,7 +17470,7 @@ class GatewayService:
                                 "must_terms": must_terms,
                                 "survived_bucket_ids": [
                                     str((item.get("bucket") or {}).get("id") or "")
-                                    for item in admitted
+                                    for item in retrieved
                                     if (item.get("bucket") or {}).get("id")
                                 ],
                                 "suppressed_bucket_ids": [
@@ -17928,13 +17486,6 @@ class GatewayService:
                             }
                         )
                         self._add_timing_ms(timing_debug, f"supplemental_{index}.debug_merge", stage_started_at)
-                    if supplemental_items:
-                        stage_started_at = time.perf_counter()
-                        merged_items = self._merge_dynamic_bucket_items(selected_items + supplemental_items, query)
-                        merged_items = self._boost_explicit_relation_edge_bucket_items(query, merged_items)
-                        merged_items.sort(key=lambda item: self._bucket_final_candidate_rank(query, item))
-                        selected_items = self._pick_dynamic_cards(merged_items, query=query)
-                        self._add_timing_ms(timing_debug, "supplemental.pick_cards", stage_started_at)
                 else:
                     planner_debug["skip_reason"] = "planner_returned_no_search"
         elif trigger_reason:
@@ -17942,36 +17493,28 @@ class GatewayService:
         elif self.query_planner_enabled:
             planner_debug["skip_reason"] = "direct_recall_ok_or_query_short"
 
-        legacy_bucket_ids = [
-            str((item.get("bucket") or {}).get("id") or "")
-            for item in selected_items
-            if (item.get("bucket") or {}).get("id")
-        ]
         planner_debug["structural_activation_debug"] = self._structural_activation_shadow_debug(
             query,
             structural_activation_items,
-            legacy_bucket_ids,
+            [],
         )
         recall_shadow_debug = self._build_recall_shadow_debug(
             query,
             necessity_plan,
-            selected_items,
+            rebuilt_candidate_items,
             suppressed_candidates,
             planner_debug,
-            additional_candidate_items=rebuilt_admitted_candidates,
             recent_context=shadow_recent_context,
         )
-        if self._rebuilt_recall_enabled():
-            selected_items = self._recall_items_for_bucket_ids(
-                list(recall_shadow_debug.get("shadow_bucket_ids") or []),
-                [*selected_items, *rebuilt_admitted_candidates, *suppressed_candidates],
-            )
+        selected_items = self._recall_items_for_bucket_ids(
+            list(recall_shadow_debug.get("shadow_bucket_ids") or []),
+            [*rebuilt_candidate_items, *suppressed_candidates],
+        )
         effective_bucket_ids = [
             str((item.get("bucket") or {}).get("id") or "")
             for item in selected_items
             if (item.get("bucket") or {}).get("id")
         ]
-        recall_shadow_debug["legacy_bucket_ids"] = legacy_bucket_ids
         recall_shadow_debug["effective_bucket_ids"] = effective_bucket_ids
         planner_debug["recall_shadow_debug"] = recall_shadow_debug
         planner_debug["final_bucket_ids"] = effective_bucket_ids
@@ -18405,9 +17948,7 @@ class GatewayService:
 
     def _bucket_rerank_candidate_priority(self, query: str, item: dict) -> tuple:
         priority_score = self._safe_float(
-            item.get("score_without_freshness")
-            if self._rebuilt_recall_enabled()
-            else item.get("score"),
+            item.get("score_without_freshness"),
             0.0,
         )
         return (
@@ -18851,164 +18392,6 @@ class GatewayService:
                 normalize_memory_metadata(node).get("canonical_domain") or ""
             ),
         }
-
-    def _admit_bucket_for_recall(self, query: str, item: dict) -> bool:
-        bucket = item.get("bucket") if isinstance(item, dict) else None
-        if not isinstance(bucket, dict):
-            return False
-        if self._is_self_anchor_recall_excluded_bucket(bucket):
-            return False
-        evidence_labels = self._bucket_evidence_labels(query, item)
-        hard_evidence_labels = self._hard_bucket_evidence_labels(evidence_labels)
-        item["evidence_labels"] = evidence_labels
-        item["hard_evidence_labels"] = hard_evidence_labels
-        dynamic_plan = item.get("dynamic_anchor_plan") if isinstance(item.get("dynamic_anchor_plan"), dict) else {}
-        independent_anchor_evidence = bool(
-            self._planner_lexical_direct_signal(item)
-            or item.get("exact_anchor_match")
-            or item.get("explicit_relation_edge_match")
-            or self._entity_edge_direct_signal(item)
-            or self._is_identity_name_candidate_bucket(query, bucket)
-            or "title_anchor" in hard_evidence_labels
-            or "semantic_rescue_direct_span" in hard_evidence_labels
-            or "strong_semantic" in hard_evidence_labels
-            or "strong_rerank" in hard_evidence_labels
-        )
-        dynamic_anchor_missing = bool(
-            dynamic_plan.get("required_terms")
-            and not item.get("distinctive_anchor_match")
-            and not independent_anchor_evidence
-        )
-        category_overview_missing = bool(
-            dynamic_plan.get("category_overview")
-            and dynamic_plan.get("category_terms")
-            and not item.get("category_overview_item")
-        )
-        query_plan = self._recall_query_plan(query)
-        rejection = self._anchor_plan_direct_rejection(bucket, self._query_anchor_plan(query))
-        if rejection:
-            reason, debug = rejection
-            if reason == "anchor_must_group_missing" and self._can_bypass_anchor_with_strong_model_score(
-                query,
-                semantic_score=item.get("semantic_score"),
-                rerank_score=item.get("rerank_score"),
-            ):
-                item["recall_policy_debug"] = {
-                    **debug,
-                    "anchor_bypassed_by_strong_model_score": True,
-                }
-            else:
-                item["admission_reason"] = reason
-                item["recall_policy_debug"] = debug
-                return False
-        else:
-            item.pop("recall_policy_debug", None)
-        axis_rejection = self._axis_lite_bucket_rejection(query, item, query_plan)
-        if axis_rejection:
-            reason, debug = axis_rejection
-            item["admission_reason"] = reason
-            item["recall_policy_debug"] = debug
-            return False
-        decision = self.recall_policy.assess(
-            query,
-            self._bucket_relevance_node(bucket),
-            query_plan=query_plan,
-            has_topic_evidence=self._bucket_has_query_topic_evidence(query, bucket),
-            semantic_score=item.get("semantic_score"),
-            rerank_score=item.get("rerank_score"),
-            high_confidence_edge=bool(
-                self._planner_lexical_direct_signal(item)
-                or item.get("exact_anchor_match")
-                or self._word_map_direct_signal(item)
-                or self._entity_edge_direct_signal(item)
-                or item.get("semantic_rescue_direct_span")
-                or "title_anchor" in hard_evidence_labels
-            ),
-            auto=True,
-        )
-        item["admission_reason"] = decision.reason
-        if item.get("recall_policy_debug"):
-            item["recall_policy_debug"] = {
-                **item["recall_policy_debug"],
-                "decision": decision.debug,
-            }
-        else:
-            item["recall_policy_debug"] = decision.debug
-        if decision.admit_direct and self._bucket_is_tech_domain(bucket):
-            tech_rejection = self._tech_domain_recall_rejection(query, item, node=bucket)
-            if tech_rejection:
-                item["admission_reason"] = "tech_domain_without_query_anchor"
-                item["recall_policy_debug"] = {
-                    **(item.get("recall_policy_debug") if isinstance(item.get("recall_policy_debug"), dict) else {}),
-                    **tech_rejection,
-                }
-                return False
-        if decision.admit_direct and decision.reason == "non_explicit_query":
-            if not self._bucket_has_reliable_recall_signal(query, item):
-                item["admission_reason"] = "low_recall_evidence"
-                return False
-        if decision.admit_direct and dynamic_anchor_missing:
-            item["admission_reason"] = "discriminative_anchor_missing"
-            item["blocked_reason"] = "discriminative_anchor_missing"
-            item["recall_policy_debug"] = {
-                **(item.get("recall_policy_debug") if isinstance(item.get("recall_policy_debug"), dict) else {}),
-                "required_terms": list(dynamic_plan.get("required_terms") or []),
-                "matched_terms": list(item.get("distinctive_anchor_terms") or []),
-                "missing_terms": list(item.get("distinctive_anchor_missing_terms") or []),
-                "anchor_coverage": self._safe_float(item.get("anchor_coverage"), 0.0),
-                "auto": True,
-            }
-            return False
-        if decision.admit_direct and category_overview_missing:
-            item["admission_reason"] = "category_overview_item_missing"
-            item["blocked_reason"] = "category_overview_item_missing"
-            item["recall_policy_debug"] = {
-                **(item.get("recall_policy_debug") if isinstance(item.get("recall_policy_debug"), dict) else {}),
-                "category_terms": list(dynamic_plan.get("category_terms") or []),
-                "matched_terms": list(item.get("category_overview_terms") or []),
-                "auto": True,
-            }
-            return False
-        if decision.admit_direct and not hard_evidence_labels:
-            reason = self._weak_bucket_evidence_block_reason(evidence_labels)
-            item["admission_reason"] = reason
-            item["blocked_reason"] = reason
-            item["recall_policy_debug"] = {
-                **(item.get("recall_policy_debug") if isinstance(item.get("recall_policy_debug"), dict) else {}),
-                "evidence_labels": evidence_labels,
-                "hard_evidence_labels": hard_evidence_labels,
-                "blocked_reason": reason,
-            }
-            return False
-        return decision.admit_direct
-
-    def _bucket_has_reliable_recall_signal(self, query: str, item: dict) -> bool:
-        if not isinstance(item, dict):
-            return False
-        if (
-            self._planner_lexical_direct_signal(item)
-            or item.get("exact_anchor_match")
-            or item.get("distinctive_anchor_match")
-            or item.get("category_overview_item")
-            or item.get("semantic_rescue_direct_span")
-        ):
-            return True
-        if self._entity_edge_direct_signal(item):
-            return True
-        if self.recall_policy.has_strong_score(
-            semantic_score=item.get("semantic_score"),
-            rerank_score=item.get("rerank_score"),
-        ):
-            return True
-        bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else None
-        if (
-            bucket
-            and item.get("entity_edge_match")
-            and self._safe_float(item.get("entity_edge_score"), 0.0) >= 0.62
-            and self._bucket_has_query_topic_evidence(query, bucket)
-        ):
-            return True
-        return bool(bucket and self._bucket_has_query_topic_evidence(query, bucket))
 
     def _entity_edge_direct_signal(self, item: dict) -> bool:
         if not isinstance(item, dict) or not item.get("entity_edge_match"):
@@ -19514,142 +18897,6 @@ class GatewayService:
             for value in incoming.get(key) or []:
                 if value not in values:
                     values.append(value)
-
-    def _pick_dynamic_cards(self, scored_candidates: list[dict], *, query: str = "") -> list[dict]:
-        if not scored_candidates:
-            return []
-
-        axis_diverse = self._pick_axis_diverse_dynamic_cards(scored_candidates, query=query)
-        if axis_diverse:
-            return axis_diverse
-
-        chosen = []
-        first = None
-        remaining_candidates = []
-        for index, candidate in enumerate(scored_candidates):
-            has_reliable_signal = self._dynamic_bucket_item_has_reliable_recall_signal(query, candidate)
-            if candidate["score"] >= self.first_card_min_score or has_reliable_signal:
-                first = candidate
-                remaining_candidates = scored_candidates[:index] + scored_candidates[index + 1:]
-                break
-        if not first:
-            return []
-        chosen.append(first)
-
-        if self.inject_max_cards < 2 or not remaining_candidates:
-            return chosen
-
-        if first.get("category_overview_item"):
-            for candidate in remaining_candidates:
-                if not candidate.get("category_overview_item"):
-                    continue
-                if self._dynamic_bucket_item_has_reliable_recall_signal(query, candidate):
-                    chosen.append(candidate)
-                    if len(chosen) >= self.inject_max_cards:
-                        return chosen
-            if len(chosen) > 1:
-                return chosen
-
-        covered_terms = set(first.get("matched_query_terms") or [])
-        if covered_terms:
-            for candidate in remaining_candidates:
-                candidate_terms = set(candidate.get("matched_query_terms") or [])
-                if not (candidate_terms - covered_terms):
-                    continue
-                candidate_score = self._safe_float(candidate.get("score"), 0.0)
-                if (
-                    candidate_score >= self.second_card_min_score
-                    or self._dynamic_bucket_item_has_reliable_recall_signal(query, candidate)
-                ):
-                    chosen.append(candidate)
-                    return chosen
-
-        second = remaining_candidates[0]
-        if (
-            second["score"] >= self.second_card_min_score
-            and second["score"] >= first["score"] * self.second_card_relative_score
-        ):
-            chosen.append(second)
-        return chosen
-
-    def _pick_axis_diverse_dynamic_cards(self, scored_candidates: list[dict], *, query: str = "") -> list[dict]:
-        if self.inject_max_cards < 2:
-            return []
-        query_plan = self._recall_query_plan(query)
-        if not bool(getattr(query_plan, "activated_axis_multi", False)):
-            return []
-        groups = [
-            tuple(term for term in group if str(term or "").strip())
-            for group in (getattr(query_plan, "activated_axis_groups", ()) or ())
-            if group
-        ]
-        if len(groups) < 2:
-            return []
-
-        chosen: list[dict] = []
-        chosen_ids: set[str] = set()
-        for group in groups:
-            for candidate in scored_candidates:
-                bucket = candidate.get("bucket") if isinstance(candidate, dict) else None
-                bucket_id = str((bucket or {}).get("id") or "")
-                if not bucket_id or bucket_id in chosen_ids:
-                    continue
-                if not self._axis_group_matches_item(group, candidate):
-                    continue
-                candidate_score = self._safe_float(candidate.get("score"), 0.0)
-                if (
-                    candidate_score >= self.first_card_min_score
-                    or self._dynamic_bucket_item_has_reliable_recall_signal(query, candidate)
-                ):
-                    chosen.append(candidate)
-                    chosen_ids.add(bucket_id)
-                    break
-            if len(chosen) >= self.inject_max_cards:
-                break
-        if len(chosen) < min(len(groups), self.inject_max_cards):
-            return []
-        for candidate in scored_candidates:
-            if len(chosen) >= self.inject_max_cards:
-                break
-            bucket = candidate.get("bucket") if isinstance(candidate, dict) else None
-            bucket_id = str((bucket or {}).get("id") or "")
-            if bucket_id and bucket_id not in chosen_ids:
-                chosen.append(candidate)
-                chosen_ids.add(bucket_id)
-        return chosen[: self.inject_max_cards]
-
-    def _axis_group_matches_item(self, group: tuple[str, ...], item: dict) -> bool:
-        bucket = item.get("bucket") if isinstance(item, dict) else None
-        if not isinstance(bucket, dict):
-            return False
-        text = self._axis_lite_node_text(bucket)
-        keys = [self._compact_axis_text(term) for term in group if self._compact_axis_text(term)]
-        return bool(keys and text and all(key in text for key in keys))
-
-    def _dynamic_bucket_item_has_reliable_recall_signal(self, query: str, item: dict) -> bool:
-        semantic_score = self._safe_float(item.get("semantic_score"), 0.0)
-        if semantic_score < 0.40:
-            return False
-        if (
-            self._planner_lexical_direct_signal(item)
-            or item.get("exact_anchor_match")
-            or self._word_map_direct_signal(item)
-            or item.get("distinctive_anchor_match")
-            or item.get("category_overview_item")
-        ):
-            return True
-        if self._is_high_confidence_match(
-            self._safe_float(item.get("semantic_score"), 0.0),
-            self._safe_float(item.get("keyword_score"), 0.0),
-        ):
-            return True
-        bucket = item.get("bucket") if isinstance(item, dict) else None
-        if not bucket or not self._recall_query_plan(query).wants_body_chain:
-            return False
-        node = self._bucket_relevance_node(bucket)
-        if should_suppress_context_candidate(query, node, self.relevance_options):
-            return False
-        return relevance_multiplier(query, node, self.relevance_options) > 1.0
 
     async def _summarize_buckets(self, buckets: list[dict], budget: int) -> str:
         if budget <= 0 or not buckets:
@@ -21026,7 +20273,7 @@ class GatewayService:
             targeted_bucket_ids=targeted_bucket_ids,
             dream_source_bucket_ids=dream_source_bucket_ids,
         )
-        recall_shadow_debug = self._recall_shadow_with_formal_ids(
+        recall_shadow_debug = self._recall_shadow_with_effective_ids(
             (query_planner_debug or {}).get("recall_shadow_debug"),
             recalled_bucket_ids,
         )
@@ -21180,16 +20427,16 @@ class GatewayService:
             debug["recall_necessity_debug"] = dict(
                 phase1_debug.get("recall_necessity_debug") or {}
             )
-            formal_bucket_ids = list(debug.get("recalled_bucket_ids") or [])
-            if not formal_bucket_ids:
-                formal_bucket_ids = [
+            effective_bucket_ids = list(debug.get("recalled_bucket_ids") or [])
+            if not effective_bucket_ids:
+                effective_bucket_ids = [
                     str(row.get("bucket_id") or "")
                     for row in (debug.get("recalled_bucket_debug") or [])
                     if isinstance(row, dict) and row.get("bucket_id")
                 ]
-            debug["recall_shadow_debug"] = self._recall_shadow_with_formal_ids(
+            debug["recall_shadow_debug"] = self._recall_shadow_with_effective_ids(
                 phase1_debug.get("recall_shadow_debug"),
-                formal_bucket_ids,
+                effective_bucket_ids,
             )
             debug["date_recall"] = date_recall_text
             debug["date_recall_debug"] = date_recall_debug
@@ -22644,15 +21891,6 @@ class GatewayService:
             "metadata": meta,
         }
 
-    def _is_relevance_suppressed(self, query: str, bucket: dict) -> bool:
-        if not self._query_has_relevance_facet(query):
-            return False
-        return should_suppress_context_candidate(
-            query,
-            self._bucket_relevance_node(bucket),
-            self.relevance_options,
-        )
-
     def _is_relevance_candidate_bucket(self, query: str, bucket: dict) -> bool:
         if self._is_recall_excluded_domain_bucket(bucket):
             return False
@@ -22672,8 +21910,6 @@ class GatewayService:
         if not query_active:
             return False
         node = self._bucket_relevance_node(bucket)
-        if should_suppress_context_candidate(query, node, self.relevance_options):
-            return False
         node_active = active_facets(facets_for_node(node, self.relevance_options), threshold=0.3)
         if not node_active:
             return False

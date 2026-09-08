@@ -8,7 +8,7 @@
 - 已完成总体方案：`docs/recall-rebuild-plan.md`。
 - Phase 0 召回透镜最小版已在 Dashboard 实现并通过本地真实数据验收。
 - Phase 1 的召回必要性、候选独立 relevance、planner 降级、utility 和召回透镜线上验收均已完成。
-- 2026-09-07 已在本地完成 Phase 2：重构 relevance + utility 默认接管正式桶结果，保留 `legacy` 紧急回滚；待用户 commit/push/deploy 后做线上 smoke。
+- 2026-09-08 已在本地完成 Phase 2 收口：候选检索与旧 admission/排序拆开，统一 relevance + utility 是唯一正式桶决策；legacy 切换与旧决策入口已移除，待用户 commit/push/deploy 后做线上 smoke。
 
 ## 已确认的产品决定
 
@@ -298,15 +298,25 @@ Dashboard 与 Haven 后续均已发布，并由用户通过召回透镜截图完
 - 此轮同时暴露 Debug 缺口：通过 Utility 后未获得单卡位的 neutral 桶既不属于 selected，也不属于 rejected；旧 `utility_candidates` 又只保存 ID，导致召回透镜只能显示 ID，且下方候选区无法定位完整候选。
 - Haven 现为 `utility_candidates` 补齐桶名，并新增 `eligible_unselected_candidates` 保存完整候选、旧/新分、来源、Utility 与 `shadow_promote_priority / shadow_single_card_limit` 未选原因。该字段只增强观测，不改变 relevance、utility、排序、单卡上限或正式注入。
 - Dashboard 新增“保留资格但未入选”独立区域；Utility 顶部同时显示桶名和 ID。未入选 neutral 不再错误落入“被拒候选”。
-- 发布后用新的自然“纪念日”轮次验收：所有进入 Utility 的桶都应显示桶名和 ID；最终注入仍最多一个；其余通过 Utility 的桶应出现在“保留资格但未入选”，而非“被拒候选”。
+- 已发布并完成新 session 真实验收：Haven `c3e3c556569d41d70022e1f1886f8d530ad14642`，Dashboard `d5353b6863bef1cb5ddddc1fd3be7cc20a2b06da`。自然“纪念日”轮次中三个 Utility 候选均同时显示桶名和 ID；最终只注入“三个月纪念日与Clawd玩偶”，另外“一个月纪念日与情绪沟通”“纪念日表白”正确进入“保留资格但未入选 · 2”，未混入拒绝候选。该项验收通过。
+
+## 统一候选路线与 contextual 查询故障降级（2026-09-08 本地完成）
+
+- 已确认失败案例“先看你写的情书”应保持 `necessity=contextual`，不能为了借用 explicit 降级而把“先看/读/翻找”统一改判 explicit；Claude/CC 的 MCP 工具提示未修改。
+- 候选生成现只组合关键词、语义、精确锚点、关系轴与 planner 补充的有界检索结果；旧 `_admit_bucket_for_recall`、旧 `_pick_dynamic_cards`、semantic rescue 及其配置已退出，`OMBRE_RECALL_DECISION_MODE` 与 `phase1_recall_shadow_enabled` 也已删除。没有两套正式决策并跑或回滚路线。
+- 统一 relevance 直接审核中性检索池，之后进入 `promote / neutral / reject` Utility，按 `score_without_freshness` 排序并最多注入一张。planner must terms、域/状态隔离、session 硬排除和语义去重仍保留。
+- contextual 查询故障降级只允许真实 query 故障状态、无语义分、清理后的可信主题命中实质正文且检索 keyword `>= 0.83`。标题命中可作为证据显示，但不能替代正文；因此“情书”正文命中且 keyword `0.836` 可进入 Utility，而标题命中、keyword `0.95`、正文无“情书”的反例仍拒绝。
+- explicit 查询故障降级也收紧为可信主题同时命中标题与正文、keyword `>= 0.65`。`disabled_for_request` 和 `indexed_not_in_semantic_top_k` 均不能冒充 query 故障。
+- `recall_shadow_debug` 仅为兼容沿用的字段名，现记录统一审核与 `effective_bucket_ids`；Dashboard 召回透镜已移除旧正式结果/新算法对比，改为显示最终注入、保留资格未选和相关性拒绝。
+- 本地验证：Haven `py_compile gateway.py`、召回专项 unittest 39/39、全套 unittest 197/197 通过；Dashboard 原因码测试 6/6、生产 build 通过。
 
 ## 发布后仍需继续核查
 
 1. **Embedding 内容新鲜度**：线上 318 个桶已确认没有缺失或模型/维度过期向量，因此不执行 backfill。现有检查不包含正文内容哈希；只有后续出现“桶正文已改但向量未刷新”的具体证据时，再单独审计内容新鲜度。
-2. **Semantic 查询状态**：召回透镜已能区分 `scored`、`indexed_not_in_semantic_top_k`、`query_embedding_unavailable/failed`、`query_timeout/failed` 和 engine disabled，并显示明确回忆标题降级证据；发布后需核对真实超时轮次是否命中新原因码。
+2. **Semantic 查询状态**：召回透镜已能区分 `scored`、`indexed_not_in_semantic_top_k`、`query_embedding_unavailable/failed`、`query_timeout/failed` 和 engine disabled，并显示 explicit/contextual 故障降级证据；发布后需核对真实超时轮次是否命中新 contextual 原因码。
 3. **Session 去重真实契约**：Dashboard 每轮从 Haven 读取 `injected_buckets ∪ session_created_buckets` 并作为 `exclude_ids` 传给 Hook；Hook 先从候选池移除，再在最终出卡前硬过滤，不存在强证据 bypass。因此同一窗口已经返回的桶不重复，当前窗口真正新建的 hold 桶也不参与后续召回或抢占单卡位。`skip_recent_rounds=5` 是另一条旧内部去重路径，不代表 Dashboard 的完整窗口契约。
-4. **Planner 实际可用性**：按新记录统计 normal / not_triggered / disabled / degraded，以及 dehydration 鉴权错误；确认用户当前线上是否确有可用 dehydration 配置。Planner 不可用时 contextual 必须保持“不新增”。
-5. **Shadow relevance 泛化**：继续收集自然话题、明确过去指向、系统复盘和 keyword-only 噪声案例。重点观察 `semantic >= 0.50 + keyword >= 0.65 + specific topic` 的第一版组合证据是否放过无关桶或漏掉真正相关桶；该阈值只用于 Shadow，线上验收后再决定是否调整。
+4. **Planner 实际可用性**：按新记录统计 normal / not_triggered / disabled / degraded，以及 dehydration 鉴权错误；确认用户当前线上是否确有可用 dehydration 配置。Planner 只补充有界检索 query/must terms，不能越过统一 relevance。
+5. **统一 relevance 泛化**：继续收集自然话题、明确过去指向、系统复盘和 keyword-only 噪声案例。重点观察正常语义证据与 query 故障降级是否放过无关桶或漏掉真正相关桶；没有真实新证据时不继续调阈值。
 6. **缺少目标桶的明确请求**：旧 Round 25、54 若对应桶当前不存在，无法证明“明确请求不会整轮误杀”；必须另找已有真实桶的 explicit 案例替代，不把“候选不存在”误判为 gate 失败。
 7. **主动召回价值与纯相关性分离**：`natural_contextual_topic` 回答“这句话有没有可检索的具体自然话题”，Shadow relevance 回答“候选是否与话题相关”，新增 utility 三档回答“相关桶当前应优先、保留还是明确拒绝”。自然 contextual 是主要主动召回入口，代码无法确认价值时保持 neutral，不默认沉默。当前代码只覆盖高把握 promote/reject；更细腻的关系连续性仍需先收集真实 neutral 案例，再决定是否增加轻量模型。utility Shadow 稳定前不把 contextual 整体切为正式召回。
 
@@ -317,21 +327,26 @@ Dashboard 与 Haven 后续均已发布，并由用户通过召回透镜截图完
 3. 继续用固定案例验收 necessity、候选独立审核、planner 降级不扩召回和 `semantic_status`；embedding 覆盖统计已完成，不做 backfill。
 4. Recall utility 与候选 relevance 已按 `promote / neutral / reject` 分离；Dashboard 真实数据已完成三档基础行为和 Shadow 单卡投影验收，Utility MVP 判定通过。
 5. 称呼作为明确讨论对象的语境区分另开后续窗口，不与上述 necessity / utility 问题混做。
-6. Phase 2 已选择直接接管而非渐进放量：默认最多一张正式桶卡，保留环境变量回滚；不处理家族聚类、自动建边或额外 LLM agent。
+6. Phase 2 已完成单一路线收口：中性检索池只由统一 relevance + utility 决定，最多一张正式桶卡；旧 admission/选卡和环境变量回滚已删除。不处理家族聚类、自动建边或额外 LLM agent。
 
-Phase 1 necessity/relevance 修正与轻量 utility Shadow 均已 commit/push/deploy，Dashboard 召回透镜展示也已发布；新 session 的 necessity 与 Utility MVP 验收通过。后续仍可用原固定 Round 9、12、25、54、57、61 与 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24 继续观察候选泛化，但历史 Debug 不会自动补算新字段。在 Shadow 正式接管前，先补一次“那后来呢”上下文指代短测并明确 Phase 2 的渐进开关、回退和验收门槛。
+Phase 1 necessity/relevance 修正与 Utility MVP 已发布并通过既有新 session 验收；2026-09-08 的单一路线收口与 contextual 查询故障降级仍待 commit/push/deploy。后续仍可用原固定 Round 9、12、25、54、57、61 与 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24 观察候选泛化，但历史 Debug 不会自动补算新字段。下一窗口只做上述发布后 smoke，不在没有新证据时继续调阈值。
 
 ## 下一窗口唯一范围
 
-Phase 2 发布后只做新 session smoke：复测 `none`、自然 `contextual`、明确 `explicit`、完全重复 `reject`，并确认正式结果最多一张、召回透镜能同时看到 legacy/rebuilt/effective ID、同窗口已召回桶和新建 hold 桶不再返回。另用一个标题含明确主题的真实桶重复 explicit 请求，确认语义正常时照常计分；若出现 `query_timeout/query_failed`，应显示新降级并让 keyword `>= 0.65` 的标题直命中候选进入 Utility。`disabled_for_request` 与自然 contextual 不得触发该降级。上下文指代测试若前一句已经返回目标桶，则“那后来呢”因窗口排除而为空是正确结果，不能据此判定 contextual promote 失败；要覆盖 promote，需选一个前句只建立话题但尚未召回目标桶的案例。
+发布后只做新 session smoke，不继续改算法：
+
+1. 用“先看你写的情书”触发真实 query timeout/failed，确认正文含“情书”、keyword 约 0.836 的正确桶进入 Utility，召回透镜显示 contextual 正文+关键词故障降级。
+2. 用标题含“情书”但正文无该主题的桶确认不会仅凭标题与高 keyword 放行。
+3. 确认 `disabled_for_request`、`indexed_not_in_semantic_top_k` 不触发故障降级。
+4. 确认同窗口排除、最多一张、freshness-free 排序和 Utility 未选候选可见性不变。
 
 ## 不得扩散的边界
 
-- `OMBRE_RECALL_DECISION_MODE=rebuilt` 默认正式接管；出现严重回归时只切为 `legacy` 回滚，不现场改阈值。
-- Phase 1 不创建家族表、关系边或自动聚类任务。
-- 下一窗口只用召回透镜验收 utility 三档和单卡结果；不再要求打开 Gateway Debug，也不扩大其他页面视觉。
+- 不把“先看/读/翻找”统一改判 explicit。
+- 不恢复 legacy admission、旧选卡或环境变量回滚；需要修正时基于统一路线的真实 Debug 单独讨论。
+- 不改 Claude/CC 的 MCP 工具提示，不扩大其他页面视觉。
+- 不创建家族表、自动聚类或自动关系边。
 - 不用 `localStorage` 作为未来人工标注的唯一存储。
-- 旧召回规则暂不删除，作为 `legacy` 回滚路径保留。
 
 ## 后续窗口顺序
 

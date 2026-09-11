@@ -3391,6 +3391,10 @@ class GatewayService:
             limit = int(request.query_params.get("limit", "50"))
         except ValueError:
             limit = 50
+        try:
+            offset = int(request.query_params.get("offset", "0"))
+        except ValueError:
+            offset = 0
         source = str(request.query_params.get("source", "") or "").strip()
         chat_days = [
             item.strip() for item in str(request.query_params.get("chat_days", "") or "").split(",")
@@ -3401,16 +3405,27 @@ class GatewayService:
             "1", "true", "yes"
         }
         profile_id = self._conversation_profile_id
+        sessions = self.state_store.list_conversation_sessions(
+            profile_id=profile_id,
+            limit=limit,
+            offset=offset,
+            source=source,
+            persona_id=persona_id,
+            deleted_only=deleted_only,
+        )
+        total = self.state_store.count_conversation_sessions(
+            profile_id=profile_id,
+            source=source,
+            persona_id=persona_id,
+            deleted_only=deleted_only,
+        )
         return JSONResponse(
             {
                 "profile_id": profile_id,
-                "sessions": self.state_store.list_conversation_sessions(
-                    profile_id=profile_id,
-                    limit=limit,
-                    source=source,
-                    persona_id=persona_id,
-                    deleted_only=deleted_only,
-                ),
+                "count": len(sessions),
+                "total": total,
+                "offset": max(0, offset),
+                "sessions": sessions,
             }
         )
 

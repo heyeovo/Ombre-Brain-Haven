@@ -200,8 +200,8 @@ GET    /gateway/api/conversation/turn?request_id=
        # 按 profile + request_id 读回已提交轮次及 raw_json/persona_id，供调用端持久幂等重放
 GET    /gateway/api/conversation/turns?session_id=&after_round_id=&source=&chat_days=
        # 读取窗口历史；chat_days 按聊天日期读取，after_round_id 供各 CC 线路补齐未见的跨线路文字轮次
-GET    /gateway/api/conversation/sessions?source=&persona_id=&deleted=1
-       # 默认只列活动窗口；deleted=1 只列软删除窗口；列表返回 pinned_at
+GET    /gateway/api/conversation/sessions?source=&persona_id=&deleted=1&limit=&offset=
+       # 默认只列活动窗口；deleted=1 只列软删除窗口；响应返回当前页 count、真实 total、offset 与各窗口 pinned_at
 GET    /gateway/api/conversation/session?session_id=&include_bucket_exclusions=1&include_context_days=1
        # 窗口状态、滚动配置/revision/watermark、可选日期清单，以及按当前可见原文日期过滤的桶排除集合
 PATCH  /gateway/api/conversation/session

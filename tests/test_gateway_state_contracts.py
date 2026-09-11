@@ -929,6 +929,35 @@ class GatewayStateContractsTest(unittest.TestCase):
             [],
         )
 
+    def test_session_list_total_and_offset_are_not_limited_to_current_page(self):
+        store = self.make_store()
+        for index in range(3):
+            session_id = f"session-{index + 1}"
+            self.commit(
+                store,
+                session_id=session_id,
+                request_id=f"request-{index + 1}",
+                expected=0,
+                persona_id="ombre",
+            )
+            store.soft_delete_conversation_session(
+                profile_id="default", session_id=session_id
+            )
+        self.assertEqual(
+            store.count_conversation_sessions(
+                profile_id="default", persona_id="ombre", deleted_only=True
+            ),
+            3,
+        )
+        page = store.list_conversation_sessions(
+            profile_id="default",
+            persona_id="ombre",
+            deleted_only=True,
+            limit=1,
+            offset=1,
+        )
+        self.assertEqual(len(page), 1)
+
     def test_one_pinned_session_per_persona_and_delete_clears_pin(self):
         store = self.make_store()
         self.commit(store, request_id="request-1", expected=0, persona_id="ombre")

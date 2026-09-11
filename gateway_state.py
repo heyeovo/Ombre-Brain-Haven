@@ -3243,12 +3243,14 @@ class GatewayStateStore:
         *,
         profile_id: str,
         limit: int = 50,
+        offset: int = 0,
         source: str = "",
         persona_id: str = "",
         deleted_only: bool = False,
     ) -> list[dict[str, Any]]:
         """会话列表：每个 session_id 一行，带轮数、时间范围和第一句用户原话做标题。"""
         safe_limit = max(1, min(200, int(limit or 50)))
+        safe_offset = max(0, int(offset or 0))
         safe_profile_id = str(profile_id or "default").strip() or "default"
         safe_source = str(source or "").strip()
         safe_persona_id = str(persona_id or "").strip()
@@ -3273,7 +3275,7 @@ class GatewayStateStore:
                 "AND owner.persona_id = ?)"
             )
             params.append(safe_persona_id)
-        params.append(safe_limit)
+        params.extend([safe_limit, safe_offset])
         conn = self._connect()
         rows = conn.execute(
             f"""
@@ -3287,7 +3289,7 @@ class GatewayStateStore:
             WHERE {where_clause}
             GROUP BY turns.session_id
             ORDER BY last_id DESC
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
             params,
         ).fetchall()
@@ -3329,6 +3331,47 @@ class GatewayStateStore:
             )
         conn.close()
         return sessions
+
+    def count_conversation_sessions(
+        self,
+        *,
+        profile_id: str,
+        source: str = "",
+        persona_id: str = "",
+        deleted_only: bool = False,
+    ) -> int:
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_source = str(source or "").strip()
+        safe_persona_id = str(persona_id or "").strip()
+        deleted_predicate = "EXISTS" if deleted_only else "NOT EXISTS"
+        where_clause = (
+            f"turns.profile_id = ? AND {deleted_predicate} ("
+            "SELECT 1 FROM conversation_sessions meta "
+            "WHERE meta.profile_id = turns.profile_id "
+            "AND meta.session_id = turns.session_id "
+            "AND COALESCE(meta.deleted_at, '') <> ''"
+            ")"
+        )
+        params: list[Any] = [safe_profile_id]
+        if safe_source:
+            where_clause += " AND turns.source = ?"
+            params.append(safe_source)
+        if safe_persona_id:
+            where_clause += (
+                " AND EXISTS (SELECT 1 FROM conversation_sessions owner "
+                "WHERE owner.profile_id = turns.profile_id "
+                "AND owner.session_id = turns.session_id "
+                "AND owner.persona_id = ?)"
+            )
+            params.append(safe_persona_id)
+        conn = self._connect()
+        row = conn.execute(
+            f"SELECT COUNT(DISTINCT turns.session_id) AS total "
+            f"FROM conversation_turns turns WHERE {where_clause}",
+            params,
+        ).fetchone()
+        conn.close()
+        return int(row["total"] or 0)
 
     def set_conversation_session_title(
         self,

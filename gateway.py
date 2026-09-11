@@ -3447,6 +3447,10 @@ class GatewayService:
                     {"error": "after_round_id must be an integer"}, status_code=400
                 )
         source = str(request.query_params.get("source", "") or "").strip()
+        chat_days = [
+            item.strip() for item in str(request.query_params.get("chat_days", "") or "").split(",")
+            if item.strip()
+        ]
         include_raw = self._truthy_header(request.query_params.get("include_raw"))
         profile_id = self._conversation_profile_id
         turns = self.state_store.list_conversation_turns_by_session(

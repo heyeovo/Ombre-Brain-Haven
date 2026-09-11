@@ -489,6 +489,7 @@ class GatewayStateStore:
                 frozen_persona_append_initialized INTEGER NOT NULL DEFAULT 0,
                 cc_seen_round_id INTEGER NOT NULL DEFAULT 0,
                 state_version INTEGER NOT NULL DEFAULT 0,
+                pinned_at TEXT,
                 deleted_at TEXT,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (profile_id, session_id)
@@ -596,6 +597,7 @@ class GatewayStateStore:
                 "frozen_persona_append_initialized": "INTEGER NOT NULL DEFAULT 0",
                 "cc_seen_round_id": "INTEGER NOT NULL DEFAULT 0",
                 "state_version": "INTEGER NOT NULL DEFAULT 0",
+                "pinned_at": "TEXT",
             },
         )
         if "persona_id" in session_columns_added:
@@ -2402,7 +2404,7 @@ class GatewayStateStore:
             session = conn.execute(
                 """
                 SELECT persona_id, cc_seen_round_id, cc_overrides_json, cc_lanes_json,
-                       rolling_context_json, state_version
+                       rolling_context_json, state_version, deleted_at
                 FROM conversation_sessions
                 WHERE profile_id = ? AND session_id = ?
                 """,
@@ -2412,6 +2414,8 @@ class GatewayStateStore:
                 actual_persona_id = str(session["persona_id"] or "ombre")
                 if actual_persona_id != safe_persona_id:
                     raise ConversationPersonaConflictError(safe_persona_id, actual_persona_id)
+                if str(session["deleted_at"] or "").strip():
+                    raise ValueError("conversation session is deleted")
 
             head = conn.execute(
                 """
@@ -2534,7 +2538,6 @@ class GatewayStateStore:
                         cc_overrides_json = CASE WHEN ? = 1 THEN ? ELSE cc_overrides_json END,
                         cc_lanes_json = CASE WHEN ? = 1 THEN ? ELSE cc_lanes_json END,
                         state_version = state_version + CASE WHEN ? = 1 THEN 1 ELSE 0 END,
-                        deleted_at = NULL,
                         updated_at = ?
                     WHERE profile_id = ? AND session_id = ?
                     """,
@@ -3300,7 +3303,7 @@ class GatewayStateStore:
             ).fetchone()
             meta = conn.execute(
                 """
-                SELECT persona_id, title, deleted_at FROM conversation_sessions
+                SELECT persona_id, title, pinned_at, deleted_at FROM conversation_sessions
                 WHERE profile_id = ? AND session_id = ?
                 """,
                 (safe_profile_id, row["session_id"]),
@@ -3320,6 +3323,7 @@ class GatewayStateStore:
                     "client": (head["client"] if head else "") or "",
                     "route": (head["route"] if head else "") or "",
                     "source": (head["source"] if head else "") or "gateway",
+                    "pinned_at": meta["pinned_at"] if meta else None,
                     "deleted_at": meta["deleted_at"] if meta else None,
                 }
             )
@@ -3373,25 +3377,94 @@ class GatewayStateStore:
             return {}
         deleted_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         conn = self._connect()
-        conn.execute(
-            """
-            INSERT INTO conversation_sessions
-            (profile_id, session_id, title, deleted_at, updated_at)
-            VALUES (?, ?, '', ?, ?)
-            ON CONFLICT(profile_id, session_id) DO UPDATE SET
-                deleted_at = excluded.deleted_at,
-                updated_at = excluded.updated_at
-            """,
-            (safe_profile_id, safe_session_id, deleted_at, deleted_at),
-        )
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO conversation_sessions
+                (profile_id, session_id, title, pinned_at, deleted_at, updated_at)
+                VALUES (?, ?, '', NULL, ?, ?)
+                ON CONFLICT(profile_id, session_id) DO UPDATE SET
+                    pinned_at = NULL,
+                    deleted_at = excluded.deleted_at,
+                    updated_at = excluded.updated_at
+                """,
+                (safe_profile_id, safe_session_id, deleted_at, deleted_at),
+            )
+            delete_agent_wake_session_records(
+                conn, profile_id=safe_profile_id, session_id=safe_session_id
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
         return {
             "profile_id": safe_profile_id,
             "session_id": safe_session_id,
             "deleted_at": deleted_at,
             "updated_at": deleted_at,
         }
+
+    def set_conversation_session_pinned(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        persona_id: str,
+        pinned: bool,
+    ) -> dict[str, Any]:
+        """Set the single main chat for one persona, or clear it."""
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "").strip()
+        safe_persona_id = str(persona_id or "").strip()
+        if not safe_session_id or not safe_persona_id:
+            raise ValueError("session_id and persona_id are required")
+        updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            target = conn.execute(
+                """
+                SELECT persona_id, deleted_at FROM conversation_sessions
+                WHERE profile_id = ? AND session_id = ?
+                """,
+                (safe_profile_id, safe_session_id),
+            ).fetchone()
+            if target is None:
+                raise ValueError("conversation session not found")
+            actual_persona_id = str(target["persona_id"] or "ombre")
+            if actual_persona_id != safe_persona_id:
+                raise ConversationPersonaConflictError(safe_persona_id, actual_persona_id)
+            if str(target["deleted_at"] or "").strip():
+                raise ValueError("deleted conversation cannot be pinned")
+            if pinned:
+                conn.execute(
+                    """
+                    UPDATE conversation_sessions SET pinned_at = NULL
+                    WHERE profile_id = ? AND persona_id = ?
+                    """,
+                    (safe_profile_id, safe_persona_id),
+                )
+            conn.execute(
+                """
+                UPDATE conversation_sessions
+                SET pinned_at = ?, updated_at = ?
+                WHERE profile_id = ? AND session_id = ?
+                """,
+                (updated_at if pinned else None, updated_at, safe_profile_id, safe_session_id),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return self.get_conversation_session_state(
+            profile_id=safe_profile_id,
+            session_id=safe_session_id,
+        )
 
     @classmethod
     def _daily_review_row_payload(cls, row: sqlite3.Row) -> dict[str, Any]:
@@ -3536,7 +3609,7 @@ class GatewayStateStore:
                    mode, daily_review_enabled, daily_review_snapshot_json,
                    daily_review_snapshot_initialized, handoff_snapshot_json,
                    frozen_persona_append, frozen_persona_append_initialized,
-                   cc_seen_round_id, state_version, deleted_at, updated_at
+                   cc_seen_round_id, state_version, pinned_at, deleted_at, updated_at
             FROM conversation_sessions
             WHERE profile_id = ? AND session_id = ?
             """,
@@ -3587,6 +3660,7 @@ class GatewayStateStore:
             "frozen_persona_append_initialized": bool(row["frozen_persona_append_initialized"]),
             "cc_seen_round_id": int(row["cc_seen_round_id"] or 0),
             "state_version": int(row["state_version"] or 0),
+            "pinned_at": row["pinned_at"],
             "deleted_at": row["deleted_at"],
             "updated_at": str(row["updated_at"] or ""),
         }

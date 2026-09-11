@@ -40,7 +40,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 |------|------|
 | `server.py` | **Brain** 入口（~640KB）。MCP 工具注册（`@mcp.custom_route`）+ REST API + 记忆核心 |
 | `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线 + cc 持久化路由（`Route()` 注册） |
-| `gateway_state.py` | Gateway/cc SQLite 状态：带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式、固定 handoff、版本化按天滚动配置及 turn watermark、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision、Context GC 配置/历史、按可见原文日期过滤的桶排除账本；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox |
+| `gateway_state.py` | Gateway/cc SQLite 状态：带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式、固定 handoff、版本化按天滚动配置及 turn watermark、每协作者唯一主窗标记、软删除防复活、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision、Context GC 配置/历史、按可见原文日期过滤的桶排除账本；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox |
 | `agent_wake_store.py` | CC 主动唤醒的 Haven 持久控制面：在 `gateway_state.db` 中维护 profile/session/lane 级 schedule、双开关、cache/agent/silence 时钟、版本 CAS、到期 claim、可恢复 lease 与幂等 wake run；只负责持久契约，不执行模型 turn |
 | `agent_wake_scheduler.py` | CC 主动唤醒的 30 秒持久调度桥：领取 Haven due schedule，以独立 Bearer callback 调用 Dashboard 后台 runner，并把完成、deferred、失败与重试状态写回 wake run |
 | `bark_notifications.py` | profile 级 Bark 私密配置、持久 notification outbox 与独立发送 worker；按已保存 `display_segments` 顺序推送，支持幂等、lease、失败重试、重启恢复、deep link、正文隐藏和 AES-128-CBC 加密 |
@@ -201,13 +201,13 @@ GET    /gateway/api/conversation/turn?request_id=
 GET    /gateway/api/conversation/turns?session_id=&after_round_id=&source=&chat_days=
        # 读取窗口历史；chat_days 按聊天日期读取，after_round_id 供各 CC 线路补齐未见的跨线路文字轮次
 GET    /gateway/api/conversation/sessions?source=&persona_id=&deleted=1
-       # 默认只列活动窗口；deleted=1 只列软删除窗口，供前端永久删除区使用
+       # 默认只列活动窗口；deleted=1 只列软删除窗口；列表返回 pinned_at
 GET    /gateway/api/conversation/session?session_id=&include_bucket_exclusions=1&include_context_days=1
        # 窗口状态、滚动配置/revision/watermark、可选日期清单，以及按当前可见原文日期过滤的桶排除集合
 PATCH  /gateway/api/conversation/session
-       # 修改持久窗口覆盖；rolling_context 以 state_version CAS 生成不可变配置版本；Context GC 路径保持原契约
+       # 修改持久窗口覆盖；pinned 设置每个 persona 唯一主窗；rolling_context 以 state_version CAS 生成不可变配置版本；Context GC 路径保持原契约
 DELETE /gateway/api/conversation/session
-       # 默认软删除；permanent=true 且 confirm_session_id 精确匹配时永久删除窗口数据
+       # 默认软删除并清除置顶/wake 记录，后续 turn 不得隐式复活；permanent=true 且 confirm_session_id 精确匹配时永久删除窗口数据
 GET|PATCH /gateway/api/daily-reviews?persona_id=
        # 独立日回顾列表与手动微调；不进入 bucket、搜索或召回
 ```
@@ -345,7 +345,7 @@ cc 配置/用户数据由 **Gateway** 持久化到 Haven 数据库，路由注�
 ```
 dashboards 的 `/api/gateway/[...path]` 代理到这些路由，Bearer 网关鉴权。
 
-会话轮次存 `conversation_turns`，每轮同时分配稳定的 `user_message_id` / `assistant_message_id`，并按窗口时区与日界线保存 `chat_day`；旧行启动迁移时确定性回填。窗口状态存 `conversation_sessions`，滚动配置版本存 `conversation_context_versions`，只保存配置与保存时的 turn watermark，不为每次请求复制整份上下文。图片/文件元数据与文件解析正文存 `conversation_attachments`；私有文件位于 `buckets_dir/cc-attachments`。`conversation_turns.turn_kind` 兼容区分 `user` / `agent_wake`，旧行默认 `user`；wake 可保存空 assistant 正文，并在 `raw_json` 记录 wake event、next wake、usage 与版本化 `display_segments`。主动唤醒控制面与会话表共用 `gateway_state.db`：`agent_wake_schedules` 按 `profile_id + session_id + lane_id` 隔离 cache/agent/silence 三类时钟、窗口 Bark 开关、CAS 版本和 lease，`agent_wake_runs` 以 `wake_id` 保存幂等运行状态；窗口永久删除时只清理同 profile/session 的两类 wake 记录。`bark_profile_configs` 按 profile 保存 server URL、device key、加密 key 和分段策略，读取只返回掩码；`notification_outbox` 在可见 agent wake turn 的同一事务内按 `profile_id + turn_id + segment_index + splitter_version` 幂等创建，独立 worker 顺序发送、失败重试并在重启后恢复。
+会话轮次存 `conversation_turns`，每轮同时分配稳定的 `user_message_id` / `assistant_message_id`，并按窗口时区与日界线保存 `chat_day`；旧行启动迁移时确定性回填。窗口状态存 `conversation_sessions`，其中 `pinned_at` 为每个 persona 至多一个的手动主窗标记；软删除会清除此标记和同 profile/session 的 wake 记录，严格写入拒绝向已删除窗口追加 turn，防止后台任务使窗口复活。滚动配置版本存 `conversation_context_versions`，只保存配置与保存时的 turn watermark，不为每次请求复制整份上下文。图片/文件元数据与文件解析正文存 `conversation_attachments`；私有文件位于 `buckets_dir/cc-attachments`。`conversation_turns.turn_kind` 兼容区分 `user` / `agent_wake`，旧行默认 `user`；wake 可保存空 assistant 正文，并在 `raw_json` 记录 wake event、next wake、usage 与版本化 `display_segments`。主动唤醒控制面与会话表共用 `gateway_state.db`：`agent_wake_schedules` 按 `profile_id + session_id + lane_id` 隔离 cache/agent/silence 三类时钟、窗口 Bark 开关、CAS 版本和 lease，`agent_wake_runs` 以 `wake_id` 保存幂等运行状态；窗口软删除或永久删除时清理同 profile/session 的 wake 记录。`bark_profile_configs` 按 profile 保存 server URL、device key、加密 key 和分段策略，读取只返回掩码；`notification_outbox` 在可见 agent wake turn 的同一事务内按 `profile_id + turn_id + segment_index + splitter_version` 幂等创建，独立 worker 顺序发送、失败重试并在重启后恢复。
 
 Dashboard 从窗口状态恢复最后活跃 CC lane、Persona、冻结 prompt 与 resume id，通过统一协调器串行进入同一个 Agent SDK iterator；成功用户/wake turn 在 Haven 单事务提交消息、活动/cache 时间、turn-local wake 决定和 silence timer。Haven Brain 每 30 秒按持久 `due_at` 领取任务，Dashboard 取得后台协调器门禁后再原子 begin；旧 version、无效 silence 来源、重复 callback、过期 lease、失败退避、24 小时无用户活动和滚动后台 turn 上限均由持久状态恢复与约束。
 

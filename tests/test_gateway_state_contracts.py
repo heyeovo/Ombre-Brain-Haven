@@ -43,6 +43,7 @@ class GatewayStateContractsTest(unittest.TestCase):
         *,
         request_id: str,
         expected: int | None,
+        session_id: str = "session-1",
         source: str = "selfhost",
         persona_id: str = "ombre",
         assistant_text: str = "reply",
@@ -53,7 +54,7 @@ class GatewayStateContractsTest(unittest.TestCase):
     ):
         return store.commit_conversation_turn(
             profile_id="default",
-            session_id="session-1",
+            session_id=session_id,
             persona_id=persona_id,
             request_id=request_id,
             expected_last_round_id=expected,
@@ -927,6 +928,50 @@ class GatewayStateContractsTest(unittest.TestCase):
             store.list_conversation_sessions(profile_id="default", deleted_only=True),
             [],
         )
+
+    def test_one_pinned_session_per_persona_and_delete_clears_pin(self):
+        store = self.make_store()
+        self.commit(store, request_id="request-1", expected=0, persona_id="ombre")
+        self.commit(
+            store,
+            session_id="session-2",
+            request_id="request-2",
+            expected=0,
+            persona_id="ombre",
+        )
+        store.set_conversation_session_pinned(
+            profile_id="default", session_id="session-1", persona_id="ombre", pinned=True
+        )
+        store.set_conversation_session_pinned(
+            profile_id="default", session_id="session-2", persona_id="ombre", pinned=True
+        )
+        sessions = store.list_conversation_sessions(profile_id="default", persona_id="ombre")
+        pins = {item["session_id"]: item["pinned_at"] for item in sessions}
+        self.assertIsNone(pins["session-1"])
+        self.assertTrue(pins["session-2"])
+
+        store.soft_delete_conversation_session(
+            profile_id="default", session_id="session-2"
+        )
+        deleted = store.list_conversation_sessions(
+            profile_id="default", persona_id="ombre", deleted_only=True
+        )
+        self.assertIsNone(deleted[0]["pinned_at"])
+
+    def test_deleted_session_cannot_be_revived_by_new_turn(self):
+        store = self.make_store()
+        self.commit(store, request_id="request-1", expected=0, persona_id="ombre")
+        store.soft_delete_conversation_session(
+            profile_id="default", session_id="session-1"
+        )
+        with self.assertRaisesRegex(ValueError, "session is deleted"):
+            self.commit(
+                store,
+                request_id="request-2",
+                expected=1,
+                persona_id="ombre",
+            )
+        self.assertEqual(store.list_conversation_sessions(profile_id="default"), [])
 
     def test_permanent_delete_removes_window_but_not_unscoped_legacy_state(self):
         store = self.make_store()

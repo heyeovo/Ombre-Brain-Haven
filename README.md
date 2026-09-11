@@ -272,6 +272,8 @@ Gateway 会把成功完成的 user / assistant 轮次持久保存到 `conversati
 
 Dashboard 可把一个逻辑聊天切换为手动按天滚动：每个聊天日选择保留原文、仅保留对应日回顾或暂不带入。Haven 为每条 user/assistant 消息分配永久 ID，并保存聊天日期；每次保存滚动配置只新增配置 revision 与当时的 turn watermark，不逐请求复制整份上下文。CC 只用同 revision 的原生 session 续接，watermark 后的新消息留在原生会话自然增长；selfhost 因无状态而每轮按当前选择重组。当前仍是人工维护，自动切片摘要不属于这一阶段。
 
+每个 cc 协作者可手动指定一个主窗；该标记只控制 Dashboard 列表置顶，不自动改变上下文模式。软删除窗口时 Haven 同时清除置顶与主动唤醒记录，并拒绝后续 turn 写入，避免已删除窗口被后台活动隐式恢复。
+
 cc/selfhost 严格写入可以携带 `request_id`、`expected_last_round_id` 与 `persona_id`：Haven 在同一事务中检查幂等、窗口协作者归属和最后轮次，冲突时拒绝分叉。已提交轮次可通过 `GET /gateway/api/conversation/turn?request_id=...` 读回（含 `raw_json`），用于跨重启、跨设备的持久幂等重放。
 
 CC 主动唤醒复用同一严格写入：可见消息或无正文结果、wake event、下一次 wake、usage、cache refresh 和活动时间与轮次原子提交。正常用户 turn 成功提交时只采样一次持久 conversation silence timer，幂等重试不重抽；下一条用户消息进入模型前会原子取消仍未触发的 timer。Haven Brain 每 30 秒按持久 `due_at` 原子领取到期任务，通过独立 Bearer callback 调用 Dashboard；Dashboard 取得同一 `SessionTurnCoordinator` 的后台执行权后才原子确认 run 并请求模型。Run、lease、重试和滚动 24 小时上限均保存在 `gateway_state.db`，服务重启不会重新采样或重复已落库的 `wake_id`。

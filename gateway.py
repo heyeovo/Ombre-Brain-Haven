@@ -3559,6 +3559,30 @@ class GatewayService:
             )
             return JSONResponse({"ok": True, "deleted": True, "session": metadata})
 
+        if "pinned" in body:
+            persona_id = str(body.get("persona_id") or "").strip()
+            if not persona_id:
+                return JSONResponse({"error": "persona_id is required"}, status_code=400)
+            try:
+                state = self.state_store.set_conversation_session_pinned(
+                    profile_id=profile_id,
+                    session_id=session_id,
+                    persona_id=persona_id,
+                    pinned=body.get("pinned") is True,
+                )
+            except ConversationPersonaConflictError as exc:
+                return JSONResponse(
+                    {
+                        "error": str(exc),
+                        "expected_persona_id": exc.expected_persona_id,
+                        "actual_persona_id": exc.actual_persona_id,
+                    },
+                    status_code=409,
+                )
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": True, "session": state})
+
         if "rolling_context" in body:
             persona_id = str(body.get("persona_id") or "").strip()
             if not persona_id:

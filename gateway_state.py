@@ -12,6 +12,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from agent_wake_store import AgentWakeStore, delete_agent_wake_session_records, initialize_agent_wake_schema
 from bark_notifications import BarkNotificationStore, initialize_bark_notification_schema
+from conversation_slice_store import (
+    delete_conversation_slice_session_records,
+    initialize_conversation_slice_schema,
+)
 
 
 _LEGACY_SELFHOST_BASE_PROMPT = "\n".join(
@@ -309,6 +313,7 @@ class GatewayStateStore:
 
     def _init_db(self) -> None:
         conn = self._connect()
+        initialize_conversation_slice_schema(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS request_rounds (
@@ -4337,6 +4342,13 @@ class GatewayStateStore:
                     (safe_profile_id, safe_session_id),
                 )
                 counts[table] = max(0, int(cursor.rowcount or 0))
+            counts.update(
+                delete_conversation_slice_session_records(
+                    conn,
+                    profile_id=safe_profile_id,
+                    session_id=safe_session_id,
+                )
+            )
             counts.update(
                 delete_agent_wake_session_records(
                     conn, profile_id=safe_profile_id, session_id=safe_session_id

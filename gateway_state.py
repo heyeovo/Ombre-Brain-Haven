@@ -3667,12 +3667,32 @@ class GatewayStateStore:
             if len(day_modes) > 3660:
                 raise ValueError("rolling_context.day_modes is too large")
 
-            next_config = {
+            raw_pinned_ids = config.get("selected_pinned_ids", current.get("selected_pinned_ids"))
+            if raw_pinned_ids is not None:
+                if not isinstance(raw_pinned_ids, list) or not all(isinstance(v, str) for v in raw_pinned_ids):
+                    raise ValueError("rolling_context.selected_pinned_ids must be a string array")
+                selected_pinned_ids: list[str] | None = [s.strip() for s in raw_pinned_ids if s.strip()]
+            else:
+                selected_pinned_ids = None
+
+            raw_journal_ids = config.get("selected_journal_ids", current.get("selected_journal_ids"))
+            if raw_journal_ids is not None:
+                if not isinstance(raw_journal_ids, list) or not all(isinstance(v, str) for v in raw_journal_ids):
+                    raise ValueError("rolling_context.selected_journal_ids must be a string array")
+                selected_journal_ids: list[str] | None = [s.strip() for s in raw_journal_ids if s.strip()]
+            else:
+                selected_journal_ids = None
+
+            next_config: dict[str, Any] = {
                 "strategy": strategy,
                 "timezone": timezone_name,
                 "day_start_hour": day_start_hour,
                 "day_modes": dict(sorted(day_modes.items())),
             }
+            if selected_pinned_ids is not None:
+                next_config["selected_pinned_ids"] = selected_pinned_ids
+            if selected_journal_ids is not None:
+                next_config["selected_journal_ids"] = selected_journal_ids
             if next_config == current:
                 conn.rollback()
                 return self.get_conversation_session_state(

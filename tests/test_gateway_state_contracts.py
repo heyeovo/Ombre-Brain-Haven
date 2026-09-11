@@ -274,13 +274,25 @@ class GatewayStateContractsTest(unittest.TestCase):
             profile_id="default", session_id="legacy-session"
         )
         self.assertEqual(turns[0]["turn_kind"], "user")
+        self.assertTrue(turns[0]["user_message_id"].startswith("msg_"))
+        self.assertTrue(turns[0]["assistant_message_id"].startswith("msg_"))
+        self.assertNotEqual(turns[0]["user_message_id"], turns[0]["assistant_message_id"])
+        self.assertEqual(turns[0]["chat_day"], "2026-01-01")
         conn = sqlite3.connect(db_path)
         turn_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(conversation_turns)")
         }
         conn.close()
         self.assertIn("turn_kind", turn_columns)
+        self.assertIn("user_message_id", turn_columns)
+        self.assertIn("assistant_message_id", turn_columns)
+        self.assertIn("chat_day", turn_columns)
         restarted = GatewayStateStore(str(db_path))
+        restarted_turns = restarted.list_conversation_turns_by_session(
+            profile_id="default", session_id="legacy-session"
+        )
+        self.assertEqual(restarted_turns[0]["user_message_id"], turns[0]["user_message_id"])
+        self.assertEqual(restarted_turns[0]["assistant_message_id"], turns[0]["assistant_message_id"])
         self.assertEqual(
             restarted.get_conversation_session_state(
                 profile_id="default", session_id="legacy-session"
@@ -306,6 +318,7 @@ class GatewayStateContractsTest(unittest.TestCase):
                     },
                 }
             )
+
         self.assertEqual(saved["selfhost_defaults"]["model"], "claude-x")
         self.assertEqual(saved["base_prompt"], "自定义基础提示词")
         self.assertEqual(
@@ -365,6 +378,44 @@ class GatewayStateContractsTest(unittest.TestCase):
                 updates={"effective_engine": "selfhost"},
             )
 
+    def test_daily_rolling_context_is_versioned_only_when_configuration_changes(self):
+        store = self.make_store()
+        self.commit(store, request_id="rolling-source", expected=0)
+        before = store.get_conversation_session_state(
+            profile_id="default", session_id="session-1"
+        )
+        saved = store.patch_conversation_rolling_context(
+            profile_id="default",
+            session_id="session-1",
+            persona_id="ombre",
+            expected_state_version=before["state_version"],
+            config={
+                "strategy": "daily_rolling",
+                "timezone": "Asia/Shanghai",
+                "day_start_hour": 4,
+                "day_modes": {"2026-09-10": "review", "2026-09-11": "raw"},
+            },
+        )
+        self.assertEqual(saved["context_revision"], 1)
+        self.assertEqual(saved["context_turn_watermark"], 1)
+        self.assertEqual(saved["rolling_context"]["strategy"], "daily_rolling")
+        self.assertEqual(saved["rolling_context"]["day_modes"]["2026-09-10"], "review")
+
+        unchanged = store.patch_conversation_rolling_context(
+            profile_id="default",
+            session_id="session-1",
+            persona_id="ombre",
+            expected_state_version=saved["state_version"],
+            config=saved["rolling_context"],
+        )
+        self.assertEqual(unchanged["context_revision"], 1)
+        conn = sqlite3.connect(self.root / "gateway_state.db")
+        version_count = conn.execute(
+            "SELECT COUNT(*) FROM conversation_context_versions WHERE session_id = 'session-1'"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(version_count, 1)
+
     def test_atomic_commit_tracks_idempotency_cursor_and_buckets(self):
         store = self.make_store()
         first = self.commit(
@@ -384,6 +435,10 @@ class GatewayStateContractsTest(unittest.TestCase):
         self.assertFalse(first["idempotent_replay"])
         self.assertTrue(replay["idempotent_replay"])
         self.assertEqual(replay["turn"]["id"], first["turn"]["id"])
+        self.assertTrue(first["turn"]["user_message_id"].startswith("msg_"))
+        self.assertTrue(first["turn"]["assistant_message_id"].startswith("msg_"))
+        self.assertEqual(replay["turn"]["user_message_id"], first["turn"]["user_message_id"])
+        self.assertEqual(replay["turn"]["assistant_message_id"], first["turn"]["assistant_message_id"])
         self.assertEqual(
             store.get_session_bucket_exclusion_ids(
                 profile_id="default", session_id="session-1"
@@ -413,6 +468,32 @@ class GatewayStateContractsTest(unittest.TestCase):
             2,
         )
 
+    def test_rolling_bucket_exclusions_only_cover_visible_raw_days(self):
+        store = self.make_store()
+        conn = sqlite3.connect(self.root / "gateway_state.db")
+        conn.execute(
+            "INSERT INTO injected_buckets (session_id, round_id, bucket_id, injected_at) VALUES (?, ?, ?, ?)",
+            ("session-1", 1, "visible-recall", "2026-09-12T02:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO injected_buckets (session_id, round_id, bucket_id, injected_at) VALUES (?, ?, ?, ?)",
+            ("session-1", 2, "summarized-recall", "2026-09-10T02:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO session_created_buckets (profile_id, session_id, bucket_id, created_at) VALUES (?, ?, ?, ?)",
+            ("default", "session-1", "visible-created", "2026-09-12T03:00:00+00:00"),
+        )
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(
+            store.get_session_bucket_exclusion_ids(
+                profile_id="default",
+                session_id="session-1",
+                visible_chat_days={"2026-09-12"},
+            ),
+            {"visible-recall", "visible-created"},
+        )
     def test_cc_lanes_keep_independent_resume_points_and_cursors(self):
         store = self.make_store()
         api_raw = json.dumps(

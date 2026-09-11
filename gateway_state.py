@@ -8,6 +8,7 @@ import uuid
 import zipfile
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from agent_wake_store import AgentWakeStore, delete_agent_wake_session_records, initialize_agent_wake_schema
 from bark_notifications import BarkNotificationStore, initialize_bark_notification_schema
@@ -28,6 +29,29 @@ _DEFAULT_CC_BASE_PROMPT = "\n".join(
         "值得留下的东西主动记录，不等对方提醒。但只记录有持续价值的内容：稳定偏好、长期事实、未来会用到的约定。一次性情绪和闲聊瞬间不存。",
     )
 )
+
+
+def _conversation_chat_day(
+    created_at: datetime | str,
+    timezone_name: str = "Asia/Shanghai",
+    day_start_hour: int = 4,
+) -> str:
+    try:
+        tz = ZoneInfo(str(timezone_name or "Asia/Shanghai"))
+    except ZoneInfoNotFoundError:
+        tz = timezone(timedelta(hours=8))
+    if isinstance(created_at, datetime):
+        value = created_at
+    else:
+        raw = str(created_at or "").strip().replace("Z", "+00:00")
+        try:
+            value = datetime.fromisoformat(raw)
+        except ValueError:
+            value = datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    local = value.astimezone(tz) - timedelta(hours=max(0, min(23, int(day_start_hour))))
+    return local.date().isoformat()
 
 
 class ConversationConflictError(Exception):
@@ -352,6 +376,9 @@ class GatewayStateStore:
                 profile_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,
                 round_id INTEGER NOT NULL,
+                user_message_id TEXT NOT NULL DEFAULT '',
+                assistant_message_id TEXT NOT NULL DEFAULT '',
+                chat_day TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 user_text TEXT NOT NULL DEFAULT '',
                 assistant_text TEXT NOT NULL DEFAULT '',
@@ -379,7 +406,44 @@ class GatewayStateStore:
                 "raw_json": "TEXT NOT NULL DEFAULT ''",
                 "request_id": "TEXT",
                 "request_fingerprint": "TEXT",
+                "user_message_id": "TEXT NOT NULL DEFAULT ''",
+                "assistant_message_id": "TEXT NOT NULL DEFAULT ''",
+                "chat_day": "TEXT NOT NULL DEFAULT ''",
             },
+        )
+        missing_message_ids = conn.execute(
+            """
+            SELECT id, profile_id, session_id, round_id,
+                   user_message_id, assistant_message_id
+            FROM conversation_turns
+            WHERE user_message_id = '' OR assistant_message_id = ''
+            """
+        ).fetchall()
+        for row in missing_message_ids:
+            identity = f"{row['profile_id']}:{row['session_id']}:{row['round_id']}:{row['id']}"
+            user_message_id = str(row["user_message_id"] or "") or (
+                "msg_" + uuid.uuid5(uuid.NAMESPACE_URL, f"ombre://conversation/{identity}/user").hex
+            )
+            assistant_message_id = str(row["assistant_message_id"] or "") or (
+                "msg_" + uuid.uuid5(uuid.NAMESPACE_URL, f"ombre://conversation/{identity}/assistant").hex
+            )
+            conn.execute(
+                """
+                UPDATE conversation_turns
+                SET user_message_id = ?, assistant_message_id = ?
+                WHERE id = ?
+                """,
+                (user_message_id, assistant_message_id, int(row["id"])),
+            )
+        missing_chat_days = conn.execute(
+            "SELECT id, created_at FROM conversation_turns WHERE chat_day = ''"
+        ).fetchall()
+        conn.executemany(
+            "UPDATE conversation_turns SET chat_day = ? WHERE id = ?",
+            [
+                (_conversation_chat_day(row["created_at"]), int(row["id"]))
+                for row in missing_chat_days
+            ],
         )
         conn.execute(
             """
@@ -412,6 +476,9 @@ class GatewayStateStore:
                 cc_overrides_json TEXT NOT NULL DEFAULT '{}',
                 cc_lanes_json TEXT NOT NULL DEFAULT '{}',
                 context_gc_json TEXT NOT NULL DEFAULT '{}',
+                rolling_context_json TEXT NOT NULL DEFAULT '{}',
+                context_revision INTEGER NOT NULL DEFAULT 0,
+                context_turn_watermark INTEGER NOT NULL DEFAULT 0,
                 prompt_module_overrides_json TEXT NOT NULL DEFAULT '{}',
                 mode TEXT NOT NULL DEFAULT 'chat',
                 daily_review_enabled INTEGER NOT NULL DEFAULT 1,
@@ -425,6 +492,19 @@ class GatewayStateStore:
                 deleted_at TEXT,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (profile_id, session_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_context_versions (
+                profile_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                config_json TEXT NOT NULL,
+                turn_watermark INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (profile_id, session_id, revision)
             )
             """
         )
@@ -503,6 +583,9 @@ class GatewayStateStore:
                 "cc_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
                 "cc_lanes_json": "TEXT NOT NULL DEFAULT '{}'",
                 "context_gc_json": "TEXT NOT NULL DEFAULT '{}'",
+                "rolling_context_json": "TEXT NOT NULL DEFAULT '{}'",
+                "context_revision": "INTEGER NOT NULL DEFAULT 0",
+                "context_turn_watermark": "INTEGER NOT NULL DEFAULT 0",
                 "prompt_module_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
                 "mode": "TEXT NOT NULL DEFAULT 'chat'",
                 "daily_review_enabled": "INTEGER NOT NULL DEFAULT 1",
@@ -729,6 +812,25 @@ class GatewayStateStore:
                 payload TEXT NOT NULL DEFAULT '{}',
                 updated_at TEXT NOT NULL DEFAULT ''
             )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_turns_user_message_id
+            ON conversation_turns (profile_id, user_message_id)
+            WHERE user_message_id != ''
+            """
+        )
+        self._ensure_columns(
+            conn,
+            "conversation_context_versions",
+            {"turn_watermark": "INTEGER NOT NULL DEFAULT 0"},
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_turns_assistant_message_id
+            ON conversation_turns (profile_id, assistant_message_id)
+            WHERE assistant_message_id != ''
             """
         )
         # Claude Pro 额度属于 profile，而不是某个聊天窗口。每个 profile 只保留
@@ -1453,18 +1555,25 @@ class GatewayStateStore:
         created_iso = created_at.isoformat(timespec="seconds")
         safe_profile_id = str(profile_id or "default").strip() or "default"
         safe_session_id = str(session_id or "default").strip() or "default"
+        user_message_id = "msg_" + uuid.uuid4().hex
+        assistant_message_id = "msg_" + uuid.uuid4().hex
+        chat_day = _conversation_chat_day(created_at)
         conn = self._connect()
         cursor = conn.execute(
             """
             INSERT OR REPLACE INTO conversation_turns
-            (profile_id, session_id, round_id, created_at, user_text, assistant_text,
+            (profile_id, session_id, round_id, user_message_id, assistant_message_id, chat_day,
+             created_at, user_text, assistant_text,
              model, client, route, source, raw_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 safe_profile_id,
                 safe_session_id,
                 int(round_id),
+                user_message_id,
+                assistant_message_id,
+                chat_day,
                 created_iso,
                 str(user_text or ""),
                 str(assistant_text or ""),
@@ -1843,11 +1952,19 @@ class GatewayStateStore:
 
     @staticmethod
     def _conversation_turn_row_payload(row: sqlite3.Row) -> dict[str, Any]:
+        keys = set(row.keys())
+        turn_id = int(row["id"])
         return {
-            "id": int(row["id"]),
+            "id": turn_id,
             "profile_id": str(row["profile_id"]),
             "session_id": str(row["session_id"]),
             "round_id": int(row["round_id"]),
+            "user_message_id": str(row["user_message_id"] or "")
+            if "user_message_id" in keys else f"turn_{turn_id}_user",
+            "assistant_message_id": str(row["assistant_message_id"] or "")
+            if "assistant_message_id" in keys else f"turn_{turn_id}_assistant",
+            "chat_day": str(row["chat_day"] or "")
+            if "chat_day" in keys else _conversation_chat_day(row["created_at"]),
             "created_at": str(row["created_at"] or ""),
             "user_text": str(row["user_text"] or ""),
             "assistant_text": str(row["assistant_text"] or ""),
@@ -1874,6 +1991,7 @@ class GatewayStateStore:
         row = conn.execute(
             """
             SELECT turns.id, turns.profile_id, turns.session_id, turns.round_id,
+                   turns.user_message_id, turns.assistant_message_id, turns.chat_day,
                    turns.created_at, turns.user_text, turns.assistant_text,
                    turns.model, turns.client, turns.route, turns.source,
                    turns.turn_kind, turns.raw_json, turns.request_id,
@@ -2254,7 +2372,8 @@ class GatewayStateStore:
             })
             existing = conn.execute(
                 """
-                SELECT id, profile_id, session_id, round_id, created_at,
+                SELECT id, profile_id, session_id, round_id,
+                       user_message_id, assistant_message_id, chat_day, created_at,
                        user_text, assistant_text, model, client, route, source,
                        turn_kind, request_id, request_fingerprint
                 FROM conversation_turns
@@ -2282,7 +2401,8 @@ class GatewayStateStore:
 
             session = conn.execute(
                 """
-                SELECT persona_id, cc_seen_round_id, cc_overrides_json, cc_lanes_json, state_version
+                SELECT persona_id, cc_seen_round_id, cc_overrides_json, cc_lanes_json,
+                       rolling_context_json, state_version
                 FROM conversation_sessions
                 WHERE profile_id = ? AND session_id = ?
                 """,
@@ -2306,6 +2426,12 @@ class GatewayStateStore:
                 raise ConversationConflictError(expected_round, actual_round)
             next_round = actual_round + 1
             source_name = str(source or "gateway").strip() or "gateway"
+            rolling_context = self._json_object(session["rolling_context_json"]) if session is not None else {}
+            chat_day = _conversation_chat_day(
+                created_at,
+                str(rolling_context.get("timezone") or "Asia/Shanghai"),
+                int(rolling_context.get("day_start_hour") or 4),
+            )
             next_cc_overrides = self._json_object(session["cc_overrides_json"]) if session is not None else {}
             next_cc_lanes = self._json_object(session["cc_lanes_json"]) if session is not None else {}
             if source_name == "cc":
@@ -2325,6 +2451,7 @@ class GatewayStateStore:
                         "provider_id": provider_id,
                         "model": model_name,
                         "seen_round_id": next_round,
+                        "context_revision": max(0, int(raw_payload.get("rolling_context_revision") or 0)),
                     }
                 )
                 if cc_session_id:
@@ -2347,14 +2474,18 @@ class GatewayStateStore:
             cursor = conn.execute(
                 """
                 INSERT INTO conversation_turns
-                (profile_id, session_id, round_id, created_at, user_text, assistant_text,
+                (profile_id, session_id, round_id, user_message_id, assistant_message_id, chat_day,
+                 created_at, user_text, assistant_text,
                  model, client, route, source, turn_kind, raw_json, request_id, request_fingerprint)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     safe_profile_id,
                     safe_session_id,
                     next_round,
+                    "msg_" + uuid.uuid4().hex,
+                    "msg_" + uuid.uuid4().hex,
+                    chat_day,
                     created_iso,
                     str(user_text or ""),
                     str(assistant_text or ""),
@@ -2500,6 +2631,7 @@ class GatewayStateStore:
             row = conn.execute(
                 """
                 SELECT id, profile_id, session_id, round_id, created_at,
+                       user_message_id, assistant_message_id, chat_day,
                        user_text, assistant_text, model, client, route, source,
                        turn_kind, request_id
                 FROM conversation_turns WHERE id = ?
@@ -2521,6 +2653,9 @@ class GatewayStateStore:
         *,
         profile_id: str,
         session_id: str,
+        visible_chat_days: set[str] | None = None,
+        timezone_name: str = "Asia/Shanghai",
+        day_start_hour: int = 4,
     ) -> set[str]:
         safe_profile_id = str(profile_id or "default").strip() or "default"
         safe_session_id = str(session_id or "").strip()
@@ -2528,20 +2663,30 @@ class GatewayStateStore:
             return set()
         conn = self._connect()
         recalled = conn.execute(
-            "SELECT DISTINCT bucket_id FROM injected_buckets WHERE session_id = ?",
+            "SELECT DISTINCT bucket_id, injected_at FROM injected_buckets WHERE session_id = ?",
             (safe_session_id,),
         ).fetchall()
         created = conn.execute(
             """
-            SELECT bucket_id FROM session_created_buckets
+            SELECT bucket_id, created_at FROM session_created_buckets
             WHERE profile_id = ? AND session_id = ?
             """,
             (safe_profile_id, safe_session_id),
         ).fetchall()
         conn.close()
+        rows = [*recalled, *created]
+        if visible_chat_days is not None:
+            rows = [
+                row for row in rows
+                if _conversation_chat_day(
+                    row["injected_at"] if "injected_at" in row.keys() else row["created_at"],
+                    timezone_name,
+                    day_start_hour,
+                ) in visible_chat_days
+            ]
         return {
             str(row["bucket_id"])
-            for row in [*recalled, *created]
+            for row in rows
             if str(row["bucket_id"] or "").strip()
         }
 
@@ -2621,12 +2766,21 @@ class GatewayStateStore:
             )
 
             for turn in turns:
+                imported_round_id = int(turn["round_id"])
+                import_identity = f"{safe_source}:{safe_source_id}:{safe_session_id}:{imported_round_id}"
+                user_message_id = str(turn.get("user_message_id") or "").strip() or (
+                    "msg_" + uuid.uuid5(uuid.NAMESPACE_URL, f"ombre://import/{import_identity}/user").hex
+                )
+                assistant_message_id = str(turn.get("assistant_message_id") or "").strip() or (
+                    "msg_" + uuid.uuid5(uuid.NAMESPACE_URL, f"ombre://import/{import_identity}/assistant").hex
+                )
                 conn.execute(
                     """
                     INSERT INTO conversation_turns
-                    (profile_id, session_id, round_id, created_at, user_text, assistant_text,
+                    (profile_id, session_id, round_id, user_message_id, assistant_message_id, chat_day,
+                     created_at, user_text, assistant_text,
                      model, client, route, source, raw_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(profile_id, session_id, round_id) DO UPDATE SET
                         created_at = excluded.created_at,
                         user_text = excluded.user_text,
@@ -2640,7 +2794,10 @@ class GatewayStateStore:
                     (
                         safe_profile_id,
                         safe_session_id,
-                        int(turn["round_id"]),
+                        imported_round_id,
+                        user_message_id,
+                        assistant_message_id,
+                        _conversation_chat_day(str(turn["created_at"])),
                         str(turn["created_at"]),
                         str(turn.get("user_text") or ""),
                         str(turn.get("assistant_text") or ""),
@@ -2697,7 +2854,8 @@ class GatewayStateStore:
         params.append(safe_limit)
         rows = conn.execute(
             f"""
-            SELECT id, profile_id, session_id, round_id, created_at,
+            SELECT id, profile_id, session_id, round_id,
+                   user_message_id, assistant_message_id, chat_day, created_at,
                    user_text, assistant_text, model, client, route, source, turn_kind
             FROM conversation_turns
             WHERE {where_clause}
@@ -2713,6 +2871,9 @@ class GatewayStateStore:
                 "profile_id": row["profile_id"],
                 "session_id": row["session_id"],
                 "round_id": row["round_id"],
+                "user_message_id": row["user_message_id"] or f"turn_{row['id']}_user",
+                "assistant_message_id": row["assistant_message_id"] or f"turn_{row['id']}_assistant",
+                "chat_day": row["chat_day"] or _conversation_chat_day(row["created_at"]),
                 "created_at": row["created_at"],
                 "user_text": row["user_text"] or "",
                 "assistant_text": row["assistant_text"] or "",
@@ -2933,7 +3094,8 @@ class GatewayStateStore:
         conn = self._connect()
         rows = conn.execute(
             """
-            SELECT id, profile_id, session_id, round_id, created_at,
+            SELECT id, profile_id, session_id, round_id,
+                   user_message_id, assistant_message_id, chat_day, created_at,
                    user_text, assistant_text, model, client, route, source, turn_kind
             FROM conversation_turns
             WHERE profile_id = ?
@@ -2988,6 +3150,9 @@ class GatewayStateStore:
                 "profile_id": row["profile_id"],
                 "session_id": row["session_id"],
                 "round_id": row["round_id"],
+                "user_message_id": row["user_message_id"] or f"turn_{row['id']}_user",
+                "assistant_message_id": row["assistant_message_id"] or f"turn_{row['id']}_assistant",
+                "chat_day": row["chat_day"] or _conversation_chat_day(row["created_at"]),
                 "created_at": row["created_at"],
                 "user_text": row["user_text"] or "",
                 "assistant_text": row["assistant_text"] or "",
@@ -3365,7 +3530,9 @@ class GatewayStateStore:
             """
             SELECT profile_id, session_id, persona_id, title,
                    local_engine_preference, selfhost_overrides_json, cc_overrides_json,
-                   cc_lanes_json, context_gc_json, prompt_module_overrides_json,
+                   cc_lanes_json, context_gc_json, rolling_context_json, context_revision,
+                   context_turn_watermark,
+                   prompt_module_overrides_json,
                    mode, daily_review_enabled, daily_review_snapshot_json,
                    daily_review_snapshot_initialized, handoff_snapshot_json,
                    frozen_persona_append, frozen_persona_append_initialized,
@@ -3394,6 +3561,15 @@ class GatewayStateStore:
             "cc_overrides": self._json_object(row["cc_overrides_json"]),
             "cc_lanes": self._json_object(row["cc_lanes_json"]),
             "context_gc": self._json_object(row["context_gc_json"]),
+            "rolling_context": {
+                "strategy": "fixed_window",
+                "timezone": "Asia/Shanghai",
+                "day_start_hour": 4,
+                "day_modes": {},
+                **self._json_object(row["rolling_context_json"]),
+            },
+            "context_revision": int(row["context_revision"] or 0),
+            "context_turn_watermark": int(row["context_turn_watermark"] or 0),
             "prompt_module_overrides": {
                 str(key): bool(value)
                 for key, value in self._json_object(row["prompt_module_overrides_json"]).items()
@@ -3414,6 +3590,210 @@ class GatewayStateStore:
             "deleted_at": row["deleted_at"],
             "updated_at": str(row["updated_at"] or ""),
         }
+
+    def patch_conversation_rolling_context(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        persona_id: str,
+        config: dict[str, Any],
+        expected_state_version: int | None = None,
+    ) -> dict[str, Any]:
+        """Version the manually curated daily context without copying assembled prompt text."""
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "").strip()
+        safe_persona_id = str(persona_id or "").strip()
+        if not safe_session_id or not safe_persona_id:
+            raise ValueError("session_id and persona_id are required")
+        if not isinstance(config, dict):
+            raise ValueError("rolling_context must be an object")
+
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT persona_id, rolling_context_json, context_revision, state_version
+                FROM conversation_sessions
+                WHERE profile_id = ? AND session_id = ?
+                """,
+                (safe_profile_id, safe_session_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("session not found")
+            actual_persona_id = str(row["persona_id"] or "ombre")
+            if actual_persona_id != safe_persona_id:
+                raise ConversationPersonaConflictError(safe_persona_id, actual_persona_id)
+            current_state_version = int(row["state_version"] or 0)
+            if expected_state_version is not None and int(expected_state_version) != current_state_version:
+                raise SessionStateConflictError(int(expected_state_version), current_state_version)
+
+            current = {
+                "strategy": "fixed_window",
+                "timezone": "Asia/Shanghai",
+                "day_start_hour": 4,
+                "day_modes": {},
+                **self._json_object(row["rolling_context_json"]),
+            }
+            strategy = str(config.get("strategy", current["strategy"]) or "").strip()
+            if strategy not in {"fixed_window", "daily_rolling"}:
+                raise ValueError("rolling_context.strategy must be fixed_window or daily_rolling")
+            timezone_name = str(config.get("timezone", current["timezone"]) or "").strip()
+            try:
+                ZoneInfo(timezone_name)
+            except ZoneInfoNotFoundError as exc:
+                raise ValueError("rolling_context.timezone is invalid") from exc
+            try:
+                day_start_hour = int(config.get("day_start_hour", current["day_start_hour"]))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("rolling_context.day_start_hour must be an integer") from exc
+            if day_start_hour < 0 or day_start_hour > 23:
+                raise ValueError("rolling_context.day_start_hour must be between 0 and 23")
+            raw_day_modes = config.get("day_modes", current["day_modes"])
+            if not isinstance(raw_day_modes, dict):
+                raise ValueError("rolling_context.day_modes must be an object")
+            day_modes: dict[str, str] = {}
+            for raw_day, raw_mode in raw_day_modes.items():
+                day = str(raw_day or "").strip()
+                try:
+                    date.fromisoformat(day)
+                except ValueError as exc:
+                    raise ValueError(f"invalid chat day: {day}") from exc
+                mode = str(raw_mode or "").strip()
+                if mode not in {"raw", "review", "omit"}:
+                    raise ValueError(f"invalid mode for {day}: {mode}")
+                day_modes[day] = mode
+            if len(day_modes) > 3660:
+                raise ValueError("rolling_context.day_modes is too large")
+
+            next_config = {
+                "strategy": strategy,
+                "timezone": timezone_name,
+                "day_start_hour": day_start_hour,
+                "day_modes": dict(sorted(day_modes.items())),
+            }
+            if next_config == current:
+                conn.rollback()
+                return self.get_conversation_session_state(
+                    profile_id=safe_profile_id, session_id=safe_session_id,
+                )
+
+            next_revision = int(row["context_revision"] or 0) + 1
+            watermark_row = conn.execute(
+                """
+                SELECT COALESCE(MAX(id), 0) AS turn_watermark
+                FROM conversation_turns
+                WHERE profile_id = ? AND session_id = ?
+                """,
+                (safe_profile_id, safe_session_id),
+            ).fetchone()
+            turn_watermark = int(watermark_row["turn_watermark"] or 0)
+            if (
+                timezone_name != str(current.get("timezone") or "Asia/Shanghai")
+                or day_start_hour != int(current.get("day_start_hour") or 4)
+            ):
+                turn_rows = conn.execute(
+                    """
+                    SELECT id, created_at FROM conversation_turns
+                    WHERE profile_id = ? AND session_id = ?
+                    """,
+                    (safe_profile_id, safe_session_id),
+                ).fetchall()
+                conn.executemany(
+                    "UPDATE conversation_turns SET chat_day = ? WHERE id = ?",
+                    [
+                        (
+                            _conversation_chat_day(row["created_at"], timezone_name, day_start_hour),
+                            int(row["id"]),
+                        )
+                        for row in turn_rows
+                    ],
+                )
+            updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            encoded = json.dumps(next_config, ensure_ascii=False)
+            conn.execute(
+                """
+                UPDATE conversation_sessions
+                SET rolling_context_json = ?, context_revision = ?, context_turn_watermark = ?,
+                    state_version = state_version + 1, updated_at = ?
+                WHERE profile_id = ? AND session_id = ?
+                """,
+                (encoded, next_revision, turn_watermark, updated_at, safe_profile_id, safe_session_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO conversation_context_versions
+                (profile_id, session_id, revision, config_json, turn_watermark, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (safe_profile_id, safe_session_id, next_revision, encoded, turn_watermark, updated_at),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return self.get_conversation_session_state(
+            profile_id=safe_profile_id, session_id=safe_session_id,
+        )
+
+    def list_conversation_context_days(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        persona_id: str,
+    ) -> list[dict[str, Any]]:
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "").strip()
+        safe_persona_id = str(persona_id or "").strip()
+        conn = self._connect()
+        turn_rows = conn.execute(
+            """
+            SELECT chat_day, COUNT(*) AS turn_count,
+                   SUM(LENGTH(user_text) + LENGTH(assistant_text)) AS raw_chars,
+                   MIN(id) AS first_turn_id, MAX(id) AS last_turn_id
+            FROM conversation_turns
+            WHERE profile_id = ? AND session_id = ? AND chat_day != ''
+            GROUP BY chat_day
+            """,
+            (safe_profile_id, safe_session_id),
+        ).fetchall()
+        review_rows = conn.execute(
+            """
+            SELECT review_date, content, updated_at
+            FROM daily_reviews
+            WHERE profile_id = ? AND persona_id = ?
+            """,
+            (safe_profile_id, safe_persona_id),
+        ).fetchall()
+        conn.close()
+        days: dict[str, dict[str, Any]] = {}
+        for row in turn_rows:
+            day = str(row["chat_day"] or "")
+            days[day] = {
+                "day": day,
+                "turn_count": int(row["turn_count"] or 0),
+                "raw_chars": int(row["raw_chars"] or 0),
+                "first_turn_id": int(row["first_turn_id"] or 0),
+                "last_turn_id": int(row["last_turn_id"] or 0),
+                "review": None,
+            }
+        for row in review_rows:
+            day = str(row["review_date"] or "")
+            item = days.setdefault(day, {
+                "day": day, "turn_count": 0, "raw_chars": 0,
+                "first_turn_id": 0, "last_turn_id": 0, "review": None,
+            })
+            content = str(row["content"] or "")
+            item["review"] = {
+                "content": content,
+                "chars": len(content),
+                "updated_at": str(row["updated_at"] or ""),
+            }
+        return [days[key] for key in sorted(days, reverse=True)]
 
     def patch_conversation_context_gc(
         self,
@@ -3810,6 +4190,7 @@ class GatewayStateStore:
             for table in (
                 "conversation_attachments",
                 "conversation_turns",
+                "conversation_context_versions",
                 "conversation_sessions",
                 "conversation_import_archives",
                 "session_created_buckets",
@@ -3874,6 +4255,7 @@ class GatewayStateStore:
         before_id: int | None = None,
         after_round_id: int | None = None,
         source: str = "",
+        chat_days: list[str] | None = None,
         include_raw: bool = False,
     ) -> list[dict[str, Any]]:
         """某个会话的消息，按时间正序返回（界面直接顺着渲染）。"""
@@ -3894,11 +4276,19 @@ class GatewayStateStore:
         if safe_source:
             where_clause += " AND source = ?"
             params.append(safe_source)
+        safe_chat_days = list(dict.fromkeys(
+            str(item or "").strip() for item in (chat_days or []) if str(item or "").strip()
+        ))[:366]
+        if safe_chat_days:
+            placeholders = ",".join("?" for _ in safe_chat_days)
+            where_clause += f" AND chat_day IN ({placeholders})"
+            params.extend(safe_chat_days)
         params.append(safe_limit)
         conn = self._connect()
         rows = conn.execute(
             f"""
-            SELECT id, profile_id, session_id, round_id, created_at,
+            SELECT id, profile_id, session_id, round_id,
+                   user_message_id, assistant_message_id, chat_day, created_at,
                    user_text, assistant_text, model, client, route, source, turn_kind, raw_json
             FROM conversation_turns
             WHERE {where_clause}
@@ -3932,6 +4322,9 @@ class GatewayStateStore:
                 "profile_id": row["profile_id"],
                 "session_id": row["session_id"],
                 "round_id": row["round_id"],
+                "user_message_id": row["user_message_id"] or f"turn_{row['id']}_user",
+                "assistant_message_id": row["assistant_message_id"] or f"turn_{row['id']}_assistant",
+                "chat_day": row["chat_day"] or _conversation_chat_day(row["created_at"]),
                 "created_at": row["created_at"],
                 "user_text": row["user_text"] or "",
                 "assistant_text": row["assistant_text"] or "",

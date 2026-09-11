@@ -8,7 +8,7 @@
 - 已完成总体方案：`docs/recall-rebuild-plan.md`。
 - Phase 0 召回透镜最小版已在 Dashboard 实现并通过本地真实数据验收。
 - Phase 1 的召回必要性、候选独立 relevance、planner 降级、utility 和召回透镜线上验收均已完成。
-- 2026-09-08 已在本地完成 Phase 2 收口：候选检索与旧 admission/排序拆开，统一 relevance + utility 是唯一正式桶决策；legacy 切换与旧决策入口已移除，待用户 commit/push/deploy 后做线上 smoke。
+- 2026-09-09 Phase 2 已发布并完成线上 smoke：候选检索与旧 admission/排序拆开，统一 relevance + utility 是唯一正式桶决策；legacy 切换与旧决策入口已移除，第一版召回进入持续运行观察阶段。
 
 ## 已确认的产品决定
 
@@ -310,57 +310,35 @@ Dashboard 与 Haven 后续均已发布，并由用户通过召回透镜截图完
 - `recall_shadow_debug` 仅为兼容沿用的字段名，现记录统一审核与 `effective_bucket_ids`；Dashboard 召回透镜已移除旧正式结果/新算法对比，改为显示最终注入、保留资格未选和相关性拒绝。
 - 本地验证：Haven `py_compile gateway.py`、召回专项 unittest 39/39、全套 unittest 197/197 通过；Dashboard 原因码测试 6/6、生产 build 通过。
 
-## 发布后仍需继续核查
+## 发布后验收与阶段收口（2026-09-09）
 
-1. **Embedding 内容新鲜度**：线上 318 个桶已确认没有缺失或模型/维度过期向量，因此不执行 backfill。现有检查不包含正文内容哈希；只有后续出现“桶正文已改但向量未刷新”的具体证据时，再单独审计内容新鲜度。
-2. **Semantic 查询状态**：召回透镜已能区分 `scored`、`indexed_not_in_semantic_top_k`、`query_embedding_unavailable/failed`、`query_timeout/failed` 和 engine disabled，并显示 explicit/contextual 故障降级证据；发布后需核对真实超时轮次是否命中新 contextual 原因码。
-3. **Session 去重真实契约**：Dashboard 每轮从 Haven 读取 `injected_buckets ∪ session_created_buckets` 并作为 `exclude_ids` 传给 Hook；Hook 先从候选池移除，再在最终出卡前硬过滤，不存在强证据 bypass。因此同一窗口已经返回的桶不重复，当前窗口真正新建的 hold 桶也不参与后续召回或抢占单卡位。`skip_recent_rounds=5` 是另一条旧内部去重路径，不代表 Dashboard 的完整窗口契约。
-4. **Planner 实际可用性**：按新记录统计 normal / not_triggered / disabled / degraded，以及 dehydration 鉴权错误；确认用户当前线上是否确有可用 dehydration 配置。Planner 只补充有界检索 query/must terms，不能越过统一 relevance。
-5. **统一 relevance 泛化**：继续收集自然话题、明确过去指向、系统复盘和 keyword-only 噪声案例。重点观察正常语义证据与 query 故障降级是否放过无关桶或漏掉真正相关桶；没有真实新证据时不继续调阈值。
-6. **缺少目标桶的明确请求**：旧 Round 25、54 若对应桶当前不存在，无法证明“明确请求不会整轮误杀”；必须另找已有真实桶的 explicit 案例替代，不把“候选不存在”误判为 gate 失败。
-7. **主动召回价值与纯相关性分离**：`natural_contextual_topic` 回答“这句话有没有可检索的具体自然话题”，Shadow relevance 回答“候选是否与话题相关”，新增 utility 三档回答“相关桶当前应优先、保留还是明确拒绝”。自然 contextual 是主要主动召回入口，代码无法确认价值时保持 neutral，不默认沉默。当前代码只覆盖高把握 promote/reject；更细腻的关系连续性仍需先收集真实 neutral 案例，再决定是否增加轻量模型。utility Shadow 稳定前不把 contextual 整体切为正式召回。
+统一候选路线与 contextual 查询故障降级已随 Haven `6f1e317024d18299bc89aa891ee0daef26f1631d` 发布。
 
-## 后续推进顺序
+新 session 使用“先看你写的情书”完成真实 query timeout smoke：
 
-1. Dashboard 召回透镜的单页 Debug 信息、中文映射、部署及 `ob2-20260827-r1bpf2` Round 25 / Round 12 第一组真实验收均已完成。
-2. Phase 1 “测试召回 / 观测召回 / 不用搜东西”组合意图优先判 `none` 的修复、回归、完整 SHA 发布和新 session 验收均已完成。
-3. 继续用固定案例验收 necessity、候选独立审核、planner 降级不扩召回和 `semantic_status`；embedding 覆盖统计已完成，不做 backfill。
-4. Recall utility 与候选 relevance 已按 `promote / neutral / reject` 分离；Dashboard 真实数据已完成三档基础行为和 Shadow 单卡投影验收，Utility MVP 判定通过。
-5. 称呼作为明确讨论对象的语境区分另开后续窗口，不与上述 necessity / utility 问题混做。
-6. Phase 2 已完成单一路线收口：中性检索池只由统一 relevance + utility 决定，最多一张正式桶卡；旧 admission/选卡和环境变量回滚已删除。不处理家族聚类、自动建边或额外 LLM agent。
+- necessity 保持 `contextual`；
+- 本轮实际审核 4 个候选，3 个相关情书桶进入 Utility，均为 `neutral`；
+- “言之回应情书”（`79e3dfac572a`）语义状态为 `query_timeout`、keyword `0.851`，通过“正文主题 + 高关键词”故障降级并成为最终唯一注入；
+- “小羊的情书”（`16032fc94eea`）同为 `query_timeout`、keyword `0.837`，正确保留资格但因单卡上限未入选；
+- 页面显示统一规则已生效，最终仍只有一张卡；
+- 纯标题、高 keyword、正文无主题的反例由专项自动化测试锁定，不能通过 rare-name 等直接证据旁路。
 
-Phase 1 necessity/relevance 修正与 Utility MVP 已发布并通过既有新 session 验收；2026-09-08 的单一路线收口与 contextual 查询故障降级仍待 commit/push/deploy。后续仍可用原固定 Round 9、12、25、54、57、61 与 `ob2-20260827-zoazvn` 的 Round 4、6、9、16、20、21、23、24 观察候选泛化，但历史 Debug 不会自动补算新字段。下一窗口只做上述发布后 smoke，不在没有新证据时继续调阈值。
+至此 2026-08-27 开始的 recall rebuild 初步完成。召回保持正式开启，后续根据真实对话中的稳定漏召、误召或可靠性问题再做窄范围调整；没有召回透镜证据时不继续调阈值。
 
-## 下一窗口唯一范围
+## 本 Handoff 状态
 
-发布后只做新 session smoke，不继续改算法：
+本 handoff 已封卷，不再追加新的记忆系统阶段。它保留 Phase 0–2 的调查、产品决策、实现和验收历史，仅在需要追溯旧证据时阅读。
 
-1. 用“先看你写的情书”触发真实 query timeout/failed，确认正文含“情书”、keyword 约 0.836 的正确桶进入 Utility，召回透镜显示 contextual 正文+关键词故障降级。
-2. 用标题含“情书”但正文无该主题的桶确认不会仅凭标题与高 keyword 放行。
-3. 确认 `disabled_for_request`、`indexed_not_in_semantic_top_k` 不触发故障降级。
-4. 确认同窗口排除、最多一张、freshness-free 排序和 Utility 未选候选可见性不变。
+后续记忆系统规划与新的工作入口统一迁移到：
 
-## 不得扩散的边界
+- [memory-system-roadmap.md](memory-system-roadmap.md)
+
+新窗口先读 roadmap；只有涉及当前召回实现时再读 [recall-pipeline.md](recall-pipeline.md)，无需重新通读本长 handoff。
+
+## 封卷边界
 
 - 不把“先看/读/翻找”统一改判 explicit。
-- 不恢复 legacy admission、旧选卡或环境变量回滚；需要修正时基于统一路线的真实 Debug 单独讨论。
-- 不改 Claude/CC 的 MCP 工具提示，不扩大其他页面视觉。
-- 不创建家族表、自动聚类或自动关系边。
-- 不用 `localStorage` 作为未来人工标注的唯一存储。
-
-## 后续窗口顺序
-
-1. Phase 0：召回透镜与基线。
-2. Phase 1：召回必要性与 planner 降级。
-3. Phase 2：统一准入与排序。
-4. Phase 3：家族聚类 shadow mode。
-5. Phase 4：家族辅助召回。
-6. Phase 5：关系边生成与一跳扩展。
-7. Phase 6：视效果评估额外 LLM 判断。
-
-## 文档同步提醒
-
-- 代码实施后按 `ob-dashboard2/MAINTENANCE_CONTRACT.md` 检查跨仓库文档同步。
-- 已经成立的最终契约再同步到 `docs/recall-pipeline.md`、Haven `CLAUDE.md` 或 Dashboard `docs/architecture.md`。
-- 阶段进度继续维护在本 handoff，不写入 `CLAUDE.md`。
-- Haven 代码改动需要正式发布时，由用户 commit + push，并按项目规则更新 Coolify 的完整 `HAVEN_RELEASE_SHA` 后部署。
+- 不恢复 legacy admission、旧选卡或环境变量回滚。
+- 不在没有真实 Debug 证据时继续调阈值。
+- 家族聚类、家族辅助召回和关系边属于后续正式规划，必须按 roadmap 分阶段推进。
+- 不改 Claude/CC MCP 工具提示来替代召回系统设计。

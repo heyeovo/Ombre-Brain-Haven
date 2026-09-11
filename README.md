@@ -270,6 +270,8 @@ Persona 不是事实记忆，不能回答“发生过什么”，也不应覆盖
 
 Gateway 会把成功完成的 user / assistant 轮次持久保存到 `conversation_turns`。这张表也是 cc、Polaris 历史导入和未来 API 聊天共用的对话原文层；它不再按 `conversation_turns_max_entries` 自动删除旧轮次，该旧参数只保留调用兼容，运行时始终覆盖为 `0`。旧 `config.yaml` / `config.example.yaml` 即使仍显示 `500` 也不会生效。当问题包含“刚才、刚刚、上一句、之前那个”等近指表达时，Gateway 会从已保存原文中优先选择最近相关轮次，拼成 `Just Now Chat Context`，而不是用长期语义记忆猜测。
 
+Dashboard 可把一个逻辑聊天切换为手动按天滚动：每个聊天日选择保留原文、仅保留对应日回顾或暂不带入。Haven 为每条 user/assistant 消息分配永久 ID，并保存聊天日期；每次保存滚动配置只新增配置 revision 与当时的 turn watermark，不逐请求复制整份上下文。CC 只用同 revision 的原生 session 续接，watermark 后的新消息留在原生会话自然增长；selfhost 因无状态而每轮按当前选择重组。当前仍是人工维护，自动切片摘要不属于这一阶段。
+
 cc/selfhost 严格写入可以携带 `request_id`、`expected_last_round_id` 与 `persona_id`：Haven 在同一事务中检查幂等、窗口协作者归属和最后轮次，冲突时拒绝分叉。已提交轮次可通过 `GET /gateway/api/conversation/turn?request_id=...` 读回（含 `raw_json`），用于跨重启、跨设备的持久幂等重放。
 
 CC 主动唤醒复用同一严格写入：可见消息或无正文结果、wake event、下一次 wake、usage、cache refresh 和活动时间与轮次原子提交。正常用户 turn 成功提交时只采样一次持久 conversation silence timer，幂等重试不重抽；下一条用户消息进入模型前会原子取消仍未触发的 timer。Haven Brain 每 30 秒按持久 `due_at` 原子领取到期任务，通过独立 Bearer callback 调用 Dashboard；Dashboard 取得同一 `SessionTurnCoordinator` 的后台执行权后才原子确认 run 并请求模型。Run、lease、重试和滚动 24 小时上限均保存在 `gateway_state.db`，服务重启不会重新采样或重复已落库的 `wake_id`。
@@ -601,7 +603,7 @@ VPS 的 Backblaze B2 加密备份范围、计划、恢复步骤和验收记录�
 - 派生索引损坏时应从 Markdown / raw source 重建，不要把 SQLite 当唯一真源。
 - 每周 journey 可手动或定时生成候选，但始终没有自动确认或定时自动写入路径。
 
-更细的行为边界见 [`docs/memory-layer-contract.md`](docs/memory-layer-contract.md)，部署补充见 [`docs/deploy-zeabur.md`](docs/deploy-zeabur.md)。
+后续记忆系统工作统一从 [`docs/memory-system-roadmap.md`](docs/memory-system-roadmap.md) 开始；更细的行为边界见 [`docs/memory-layer-contract.md`](docs/memory-layer-contract.md)，当前召回实现见 [`docs/recall-pipeline.md`](docs/recall-pipeline.md)，部署补充见 [`docs/deploy-zeabur.md`](docs/deploy-zeabur.md)。
 
 ## 测试 / Testing
 

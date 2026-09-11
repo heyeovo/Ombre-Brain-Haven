@@ -4,6 +4,7 @@
 > 系统级总览 / 部署 / 客户端接入以 **README.md** 为准（Haven/Rain Fork 架构）。本文件只做开发入口：模块、路由、实现细节。
 > Codex/代理在本仓库中的工作约束见 **`AGENTS.md`**；改动收尾契约见 dashboard 仓库 **`MAINTENANCE_CONTRACT.md`**。
 > 已排期的后续工作写入对应 handoff；没有近期排期的长期遗留见 dashboard 仓库 **`TECH_DEBT.md`**。本文件不维护阶段任务副本。
+> 记忆系统的当前运行基线与后续 Phase 统一见 **`docs/memory-system-roadmap.md`**；旧 recall handoff 仅用于历史追溯。
 
 ## 项目概述
 
@@ -39,7 +40,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 |------|------|
 | `server.py` | **Brain** 入口（~640KB）。MCP 工具注册（`@mcp.custom_route`）+ REST API + 记忆核心 |
 | `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线 + cc 持久化路由（`Route()` 注册） |
-| `gateway_state.py` | Gateway/cc SQLite 状态：会话原文、窗口闲聊/工作模式、固定日回顾、handoff 与 CC 缓存前缀快照、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与游标、Context GC 配置/历史、桶排除账本；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox |
+| `gateway_state.py` | Gateway/cc SQLite 状态：带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式、固定 handoff、版本化按天滚动配置及 turn watermark、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision、Context GC 配置/历史、按可见原文日期过滤的桶排除账本；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox |
 | `agent_wake_store.py` | CC 主动唤醒的 Haven 持久控制面：在 `gateway_state.db` 中维护 profile/session/lane 级 schedule、双开关、cache/agent/silence 时钟、版本 CAS、到期 claim、可恢复 lease 与幂等 wake run；只负责持久契约，不执行模型 turn |
 | `agent_wake_scheduler.py` | CC 主动唤醒的 30 秒持久调度桥：领取 Haven due schedule，以独立 Bearer callback 调用 Dashboard 后台 runner，并把完成、deferred、失败与重试状态写回 wake run |
 | `bark_notifications.py` | profile 级 Bark 私密配置、持久 notification outbox 与独立发送 worker；按已保存 `display_segments` 顺序推送，支持幂等、lease、失败重试、重启恢复、deep link、正文隐藏和 AES-128-CBC 加密 |
@@ -197,14 +198,14 @@ GET|POST|DELETE /gateway/api/conversation/attachment
        # 上传压缩图片、Bearer 私有读取、清除单张或当前窗口全部图片
 GET    /gateway/api/conversation/turn?request_id=
        # 按 profile + request_id 读回已提交轮次及 raw_json/persona_id，供调用端持久幂等重放
-GET    /gateway/api/conversation/turns?session_id=&after_round_id=&source=
-       # 读取窗口历史；after_round_id 供各 CC 线路补齐未见的跨线路文字轮次
+GET    /gateway/api/conversation/turns?session_id=&after_round_id=&source=&chat_days=
+       # 读取窗口历史；chat_days 按聊天日期读取，after_round_id 供各 CC 线路补齐未见的跨线路文字轮次
 GET    /gateway/api/conversation/sessions?source=&persona_id=&deleted=1
        # 默认只列活动窗口；deleted=1 只列软删除窗口，供前端永久删除区使用
-GET    /gateway/api/conversation/session?session_id=&include_bucket_exclusions=1
-       # 窗口归属、闲聊/工作模式、固定日回顾与 handoff 快照、引擎/提示词覆盖、CC 分线路 session/游标、Context GC 状态与可选桶排除集合
+GET    /gateway/api/conversation/session?session_id=&include_bucket_exclusions=1&include_context_days=1
+       # 窗口状态、滚动配置/revision/watermark、可选日期清单，以及按当前可见原文日期过滤的桶排除集合
 PATCH  /gateway/api/conversation/session
-       # 修改持久窗口覆盖；context_gc_preferences 保存自动开关/保护项，context_gc_commit 用 state_version + 旧 cc_session_id 原子切换减负副本并写历史
+       # 修改持久窗口覆盖；rolling_context 以 state_version CAS 生成不可变配置版本；Context GC 路径保持原契约
 DELETE /gateway/api/conversation/session
        # 默认软删除；permanent=true 且 confirm_session_id 精确匹配时永久删除窗口数据
 GET|PATCH /gateway/api/daily-reviews?persona_id=
@@ -344,7 +345,7 @@ cc 配置/用户数据由 **Gateway** 持久化到 Haven 数据库，路由注�
 ```
 dashboards 的 `/api/gateway/[...path]` 代理到这些路由，Bearer 网关鉴权。
 
-会话轮次存 `conversation_turns`，窗口状态存 `conversation_sessions`，图片/文件元数据与文件解析正文存 `conversation_attachments`；私有文件位于 `buckets_dir/cc-attachments`。`conversation_turns.turn_kind` 兼容区分 `user` / `agent_wake`，旧行默认 `user`；wake 可保存空 assistant 正文，并在 `raw_json` 记录 wake event、next wake、usage 与版本化 `display_segments`。主动唤醒控制面与会话表共用 `gateway_state.db`：`agent_wake_schedules` 按 `profile_id + session_id + lane_id` 隔离 cache/agent/silence 三类时钟、窗口 Bark 开关、CAS 版本和 lease，`agent_wake_runs` 以 `wake_id` 保存幂等运行状态；窗口永久删除时只清理同 profile/session 的两类 wake 记录。`bark_profile_configs` 按 profile 保存 server URL、device key、加密 key 和分段策略，读取只返回掩码；`notification_outbox` 在可见 agent wake turn 的同一事务内按 `profile_id + turn_id + segment_index + splitter_version` 幂等创建，独立 worker 顺序发送、失败重试并在重启后恢复。
+会话轮次存 `conversation_turns`，每轮同时分配稳定的 `user_message_id` / `assistant_message_id`，并按窗口时区与日界线保存 `chat_day`；旧行启动迁移时确定性回填。窗口状态存 `conversation_sessions`，滚动配置版本存 `conversation_context_versions`，只保存配置与保存时的 turn watermark，不为每次请求复制整份上下文。图片/文件元数据与文件解析正文存 `conversation_attachments`；私有文件位于 `buckets_dir/cc-attachments`。`conversation_turns.turn_kind` 兼容区分 `user` / `agent_wake`，旧行默认 `user`；wake 可保存空 assistant 正文，并在 `raw_json` 记录 wake event、next wake、usage 与版本化 `display_segments`。主动唤醒控制面与会话表共用 `gateway_state.db`：`agent_wake_schedules` 按 `profile_id + session_id + lane_id` 隔离 cache/agent/silence 三类时钟、窗口 Bark 开关、CAS 版本和 lease，`agent_wake_runs` 以 `wake_id` 保存幂等运行状态；窗口永久删除时只清理同 profile/session 的两类 wake 记录。`bark_profile_configs` 按 profile 保存 server URL、device key、加密 key 和分段策略，读取只返回掩码；`notification_outbox` 在可见 agent wake turn 的同一事务内按 `profile_id + turn_id + segment_index + splitter_version` 幂等创建，独立 worker 顺序发送、失败重试并在重启后恢复。
 
 Dashboard 从窗口状态恢复最后活跃 CC lane、Persona、冻结 prompt 与 resume id，通过统一协调器串行进入同一个 Agent SDK iterator；成功用户/wake turn 在 Haven 单事务提交消息、活动/cache 时间、turn-local wake 决定和 silence timer。Haven Brain 每 30 秒按持久 `due_at` 领取任务，Dashboard 取得后台协调器门禁后再原子 begin；旧 version、无效 silence 来源、重复 callback、过期 lease、失败退避、24 小时无用户活动和滚动后台 turn 上限均由持久状态恢复与约束。
 
@@ -361,6 +362,7 @@ Dashboard 从窗口状态恢复最后活跃 CC lane、Persona、冻结 prompt �
 - 附件先按窗口暂存，严格写入把有序 ID + SHA-256 纳入幂等指纹并在同一事务绑定轮次；图片接受 JPEG/PNG/WebP（压缩后单张不超过 2MB），文件接受 PDF/DOCX/MD/TXT/CSV（单个不超过 4MB，并保存浏览器提取的受限正文），每轮两类合计不超过 4 个。私有读取必须经 Bearer 网关，未绑定附件 24 小时后在后续上传时清理；按 `kind=image/file` 分类清除互不影响，文件清除同时擦除解析正文。
 - `/api/conversation/turn?request_id=` 可在进程重启或换设备后读回严格写入结果；调用端校验 session/persona/user 原文后重放已保存过程，不再请求上游。
 - `cc_overrides_json` 保存当前 CC Pro/API 路由及各自模型、力度、thinking 和 API provider 选择；`cc_lanes_json` 按 `subscription` / `api:<provider_id>` 分别保存 Claude 原生 `cc_session_id` 与 `seen_round_id`。只有该线路的 CC 轮次严格写入成功才推进自身游标；旧 `cc_seen_round_id` 仅保留兼容。
+- `rolling_context_json` 保存固定窗口/按天滚动策略、时区、日界小时和逐日 `raw/review/omit` 三态；每次真实修改递增 `context_revision`，并记录当时 `context_turn_watermark`。CC lane 写入同轮 revision，调用端不得用旧 revision 的 `cc_session_id` 恢复新配置。滚动模式的桶排除集合只覆盖当前 `raw` 日期内的召回/新建桶，日期变为 `review/omit` 后允许再次召回。
 - `context_gc_json` 按窗口保存默认关闭的 05:30 自动开关、始终保留 key、最近 20 次释放估算和旧/新 Claude session 指针。减负只更新 `cc_lanes_json` 指针与 GC 日志，不复制或改写 `conversation_turns`；提交必须同时命中 `state_version` 和旧 `cc_session_id`，否则冲突失败。
 - 已召回桶继续落 `injected_buckets`；本窗口新建桶落 `session_created_buckets`，二者并集为该 session 的排除集合。召回冷却读取 `injected_at` 时把旧无时区值与新 UTC-aware 值统一按 UTC 计算，避免混合时间格式导致 hook recall 500。
 - 永久删除会先删除该窗口附件文件，再清理带 `profile_id` 的窗口数据，不删除长期记忆桶；旧的无 profile 诊断/冷却表暂不清理。

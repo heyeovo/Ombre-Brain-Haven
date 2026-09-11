@@ -2828,6 +2828,8 @@ class GatewayService:
                     "profile_id": turn["profile_id"],
                     "session_id": turn["session_id"],
                     "round_id": turn["round_id"],
+                    "user_message_id": turn["user_message_id"],
+                    "assistant_message_id": turn["assistant_message_id"],
                     "source": turn["source"],
                     "raw_chars": len(raw_json),
                 }
@@ -3390,6 +3392,10 @@ class GatewayService:
         except ValueError:
             limit = 50
         source = str(request.query_params.get("source", "") or "").strip()
+        chat_days = [
+            item.strip() for item in str(request.query_params.get("chat_days", "") or "").split(",")
+            if item.strip()
+        ]
         persona_id = str(request.query_params.get("persona_id", "") or "").strip()
         deleted_only = str(request.query_params.get("deleted", "") or "").strip().lower() in {
             "1", "true", "yes"
@@ -3450,6 +3456,7 @@ class GatewayService:
             before_id=before_id,
             after_round_id=after_round_id,
             source=source,
+            chat_days=chat_days,
             include_raw=include_raw,
         )
         return JSONResponse(
@@ -3477,11 +3484,35 @@ class GatewayService:
             if not state:
                 return JSONResponse({"error": "session not found"}, status_code=404)
             payload: dict[str, Any] = {"ok": True, "session": state}
+            if self._truthy_header(request.query_params.get("include_context_days")):
+                payload["context_days"] = self.state_store.list_conversation_context_days(
+                    profile_id=profile_id,
+                    session_id=session_id,
+                    persona_id=str(state.get("persona_id") or "ombre"),
+                )
             if self._truthy_header(request.query_params.get("include_bucket_exclusions")):
+                rolling = state.get("rolling_context") if isinstance(state.get("rolling_context"), dict) else {}
+                visible_chat_days: set[str] | None = None
+                if rolling.get("strategy") == "daily_rolling":
+                    modes = rolling.get("day_modes") if isinstance(rolling.get("day_modes"), dict) else {}
+                    context_days = self.state_store.list_conversation_context_days(
+                        profile_id=profile_id,
+                        session_id=session_id,
+                        persona_id=str(state.get("persona_id") or "ombre"),
+                    )
+                    visible_chat_days = {
+                        str(item.get("day") or "")
+                        for item in context_days
+                        if int(item.get("turn_count") or 0) > 0
+                        and str(modes.get(str(item.get("day") or "")) or "raw") == "raw"
+                    }
                 payload["bucket_exclusion_ids"] = sorted(
                     self.state_store.get_session_bucket_exclusion_ids(
                         profile_id=profile_id,
                         session_id=session_id,
+                        visible_chat_days=visible_chat_days,
+                        timezone_name=str(rolling.get("timezone") or "Asia/Shanghai"),
+                        day_start_hour=int(rolling.get("day_start_hour") or 4),
                     )
                 )
             return JSONResponse(payload)
@@ -3523,6 +3554,40 @@ class GatewayService:
                 session_id=session_id,
             )
             return JSONResponse({"ok": True, "deleted": True, "session": metadata})
+
+        if "rolling_context" in body:
+            persona_id = str(body.get("persona_id") or "").strip()
+            if not persona_id:
+                return JSONResponse({"error": "persona_id is required"}, status_code=400)
+            try:
+                state = self.state_store.patch_conversation_rolling_context(
+                    profile_id=profile_id,
+                    session_id=session_id,
+                    persona_id=persona_id,
+                    config=body.get("rolling_context"),
+                    expected_state_version=body.get("expected_state_version"),
+                )
+            except ConversationPersonaConflictError as exc:
+                return JSONResponse(
+                    {
+                        "error": "conversation_persona_conflict",
+                        "expected_persona_id": exc.expected_persona_id,
+                        "actual_persona_id": exc.actual_persona_id,
+                    },
+                    status_code=409,
+                )
+            except SessionStateConflictError as exc:
+                return JSONResponse(
+                    {
+                        "error": "session_state_conflict",
+                        "expected_state_version": exc.expected_version,
+                        "actual_state_version": exc.actual_version,
+                    },
+                    status_code=409,
+                )
+            except (TypeError, ValueError) as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            return JSONResponse({"ok": True, "session": state})
 
         if "context_gc_preferences" in body or "context_gc_commit" in body:
             persona_id = str(body.get("persona_id") or "").strip()

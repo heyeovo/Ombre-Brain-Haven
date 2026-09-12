@@ -3832,6 +3832,9 @@ class GatewayStateStore:
             # 只描述紧邻上一 revision，供 Dashboard 判断旧滚动 transcript 是否
             # 必须做保真迁移；不属于用户可编辑配置，也不参与上面的等价比较。
             next_config["previous_strategy"] = str(current.get("strategy") or "fixed_window")
+            next_config["previous_day_modes"] = (
+                current.get("day_modes") if isinstance(current.get("day_modes"), dict) else {}
+            )
 
             next_revision = int(row["context_revision"] or 0) + 1
             watermark_row = conn.execute(

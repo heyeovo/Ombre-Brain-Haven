@@ -3815,11 +3815,23 @@ class GatewayStateStore:
                 next_config["selected_pinned_ids"] = selected_pinned_ids
             if selected_journal_ids is not None:
                 next_config["selected_journal_ids"] = selected_journal_ids
-            if next_config == current:
+            comparable_current = {
+                key: current[key]
+                for key in (
+                    "strategy", "timezone", "day_start_hour", "day_modes",
+                    "selected_pinned_ids", "selected_journal_ids",
+                )
+                if key in current
+            }
+            if next_config == comparable_current:
                 conn.rollback()
                 return self.get_conversation_session_state(
                     profile_id=safe_profile_id, session_id=safe_session_id,
                 )
+
+            # 只描述紧邻上一 revision，供 Dashboard 判断旧滚动 transcript 是否
+            # 必须做保真迁移；不属于用户可编辑配置，也不参与上面的等价比较。
+            next_config["previous_strategy"] = str(current.get("strategy") or "fixed_window")
 
             next_revision = int(row["context_revision"] or 0) + 1
             watermark_row = conn.execute(

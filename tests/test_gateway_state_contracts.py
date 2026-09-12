@@ -400,6 +400,7 @@ class GatewayStateContractsTest(unittest.TestCase):
         self.assertEqual(saved["context_revision"], 1)
         self.assertEqual(saved["context_turn_watermark"], 1)
         self.assertEqual(saved["rolling_context"]["strategy"], "daily_rolling")
+        self.assertEqual(saved["rolling_context"]["previous_strategy"], "fixed_window")
         self.assertEqual(saved["rolling_context"]["day_modes"]["2026-09-10"], "review")
 
         unchanged = store.patch_conversation_rolling_context(
@@ -410,12 +411,24 @@ class GatewayStateContractsTest(unittest.TestCase):
             config=saved["rolling_context"],
         )
         self.assertEqual(unchanged["context_revision"], 1)
+        changed_again = store.patch_conversation_rolling_context(
+            profile_id="default",
+            session_id="session-1",
+            persona_id="ombre",
+            expected_state_version=unchanged["state_version"],
+            config={
+                **unchanged["rolling_context"],
+                "day_modes": {"2026-09-10": "omit", "2026-09-11": "raw"},
+            },
+        )
+        self.assertEqual(changed_again["context_revision"], 2)
+        self.assertEqual(changed_again["rolling_context"]["previous_strategy"], "daily_rolling")
         conn = sqlite3.connect(self.root / "gateway_state.db")
         version_count = conn.execute(
             "SELECT COUNT(*) FROM conversation_context_versions WHERE session_id = 'session-1'"
         ).fetchone()[0]
         conn.close()
-        self.assertEqual(version_count, 1)
+        self.assertEqual(version_count, 2)
 
     def test_atomic_commit_tracks_idempotency_cursor_and_buckets(self):
         store = self.make_store()

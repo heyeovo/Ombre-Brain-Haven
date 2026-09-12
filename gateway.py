@@ -24,6 +24,8 @@ from starlette.routing import Route
 
 from bucket_manager import BucketManager
 from bark_notifications import BarkNotificationStore
+from conversation_slice_engine import SEGMENTER_VERSION, SLICE_PROMPT_VERSION
+from conversation_slice_store import SLICE_SCHEMA_VERSION, ConversationSliceStore
 from dehydrator import Dehydrator
 from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
@@ -532,6 +534,7 @@ class GatewayService:
         self.state_store = state_store or GatewayStateStore(
             os.path.join(config["buckets_dir"], "gateway_state.db")
         )
+        self.conversation_slice_store = ConversationSliceStore(self.state_store.db_path)
         self._session_handoff_blocks: dict[str, str] = {}
         self.raw_event_store = raw_event_store or RawEventStore(config)
         self.reminder_store = ReminderStore(config)
@@ -3602,6 +3605,9 @@ class GatewayService:
             persona_id = str(body.get("persona_id") or "").strip()
             if not persona_id:
                 return JSONResponse({"error": "persona_id is required"}, status_code=400)
+            before_state = self.state_store.get_conversation_session_state(
+                profile_id=profile_id, session_id=session_id,
+            )
             try:
                 state = self.state_store.patch_conversation_rolling_context(
                     profile_id=profile_id,
@@ -3630,6 +3636,13 @@ class GatewayService:
                 )
             except (TypeError, ValueError) as exc:
                 return JSONResponse({"error": str(exc)}, status_code=400)
+            self._enqueue_raw_exit_slice_tasks(
+                profile_id=profile_id,
+                persona_id=persona_id,
+                session_id=session_id,
+                before_state=before_state,
+                after_state=state,
+            )
             return JSONResponse({"ok": True, "session": state})
 
         if "context_gc_preferences" in body or "context_gc_commit" in body:
@@ -3729,6 +3742,72 @@ class GatewayService:
                 session_id=session_id,
             )
         return JSONResponse({"ok": True, "session": state})
+
+    def _enqueue_raw_exit_slice_tasks(
+        self,
+        *,
+        profile_id: str,
+        persona_id: str,
+        session_id: str,
+        before_state: dict[str, Any],
+        after_state: dict[str, Any],
+    ) -> None:
+        """Queue missing slices after raw leaves Context; never block settings save."""
+        before = before_state.get("rolling_context") if isinstance(before_state, dict) else {}
+        after = after_state.get("rolling_context") if isinstance(after_state, dict) else {}
+        before_modes = before.get("day_modes") if isinstance(before, dict) else {}
+        after_modes = after.get("day_modes") if isinstance(after, dict) else {}
+        if not isinstance(before_modes, dict) or not isinstance(after_modes, dict):
+            return
+        changed_days = [
+            str(day)
+            for day in set(before_modes) | set(after_modes)
+            if str(before_modes.get(day) or "raw") == "raw"
+            and str(after_modes.get(day) or "raw") in {"review", "omit"}
+        ]
+        for chat_day in sorted(changed_days):
+            try:
+                if self.conversation_slice_store.has_active_batch(
+                    profile_id=profile_id, persona_id=persona_id,
+                    session_id=session_id, chat_day=chat_day,
+                ):
+                    continue
+                snapshot = self.conversation_slice_store.build_source_snapshot(
+                    profile_id=profile_id, persona_id=persona_id,
+                    session_id=session_id, chat_day=chat_day,
+                )
+                if int(snapshot.get("source_message_count") or 0) <= 0:
+                    continue
+                batch_key = self.conversation_slice_store.batch_idempotency_key(
+                    profile_id=profile_id,
+                    persona_id=persona_id,
+                    session_id=session_id,
+                    chat_day=chat_day,
+                    session_source_snapshot_hash=str(snapshot["session_source_snapshot_hash"]),
+                    segmenter_version=SEGMENTER_VERSION,
+                    slice_prompt_version=SLICE_PROMPT_VERSION,
+                    slice_schema_version=SLICE_SCHEMA_VERSION,
+                    reslice_revision=1,
+                )
+                self.conversation_slice_store.create_task(
+                    profile_id=profile_id,
+                    persona_id=persona_id,
+                    session_id=session_id,
+                    chat_day=chat_day,
+                    trigger_type="raw_exit",
+                    batch_idempotency_key=batch_key,
+                    reslice_revision=1,
+                    message_count=int(snapshot["source_message_count"]),
+                    estimated_input_tokens=count_tokens_approx(
+                        json.dumps(snapshot.get("messages") or [], ensure_ascii=False)
+                    ),
+                    estimated_call_count=1,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Conversation slice raw-exit enqueue failed | session=%s day=%s error=%s",
+                    session_id, chat_day, exc,
+                )
 
     async def handle_daily_reviews(self, request: Request) -> JSONResponse:
         auth_result = self._authorize(request.headers.get("Authorization", ""))

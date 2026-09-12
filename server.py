@@ -133,6 +133,8 @@ from daily_review_engine import (
     DAILY_REVIEW_INSTRUCTION,
     DailyReviewEngine,
 )
+from conversation_slice_engine import ConversationSliceEngine
+from conversation_slice_store import ConversationSliceStore
 from automation_store import AutomationStore
 from automation_model_runner import AutomationModelError, AutomationModelRouter
 from automation_scheduler import (
@@ -336,6 +338,14 @@ daily_review_engine = DailyReviewEngine(
     gateway_state_store,
     prompt_resolver=prompt_store.get_effective,
     message_client=daily_review_model_router,
+)
+conversation_slice_store = ConversationSliceStore(gateway_state_store.db_path)
+conversation_slice_engine = ConversationSliceEngine(
+    config,
+    gateway_state_store,
+    message_client=daily_review_model_router,
+    daily_review_engine=daily_review_engine,
+    slice_store=conversation_slice_store,
 )
 weekly_journey_model_router = AutomationModelRouter(
     WEEKLY_JOURNEY_TASK_TYPE, automation_store, daily_review_api_client,
@@ -13927,11 +13937,11 @@ async def api_daily_reviews_run(request):
         model=choice["model"],
     )
     try:
-        result = await daily_review_engine.generate(
+        result = await conversation_slice_engine.generate_daily_bundle(
             profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
             persona_id=persona_id,
             review_date=review_date,
-            force=_bool_value(body.get("force"), False),
+            force_daily_review=_bool_value(body.get("force"), False),
             override_user_edit=_bool_value(body.get("override_user_edit"), False),
         )
     except Exception as exc:
@@ -13943,10 +13953,136 @@ async def api_daily_reviews_run(request):
         )
         logger.warning("Daily review API failed: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
+    failed = result.get("status") == "failed"
     execution = automation_store.finish_execution(
-        execution["execution_id"], status="completed",
+        execution["execution_id"],
+        status="failed" if failed else "completed",
+        error_code="conversation_slice_generation_failed" if failed else "",
+        error=str(result.get("reason") or "") if failed else "",
     )
-    return JSONResponse({**result, "execution": execution})
+    return JSONResponse({**result, "execution": execution}, status_code=500 if failed else 200)
+
+
+@mcp.custom_route("/api/conversation-slices", methods=["GET", "POST", "PATCH"])
+async def api_conversation_slices(request):
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    profile_id = str(getattr(persona_engine, "profile_id", "") or "default")
+    if request.method == "GET":
+        persona_id = str(request.query_params.get("persona_id") or "").strip()
+        if not persona_id:
+            return JSONResponse({"error": "persona_id is required"}, status_code=400)
+        slice_id = str(request.query_params.get("slice_id") or "").strip()
+        chat_day = str(request.query_params.get("chat_day") or "").strip()
+        try:
+            if slice_id:
+                return JSONResponse({
+                    "ok": True,
+                    "source": conversation_slice_store.get_slice_source(
+                        profile_id=profile_id, slice_id=slice_id,
+                    ),
+                })
+            if chat_day:
+                return JSONResponse({
+                    "ok": True,
+                    "day": conversation_slice_store.get_inspection_day(
+                        profile_id=profile_id, persona_id=persona_id, chat_day=chat_day,
+                    ),
+                })
+            return JSONResponse({
+                "ok": True,
+                "days": conversation_slice_store.list_inspection_days(
+                    profile_id=profile_id,
+                    persona_id=persona_id,
+                    limit=_int_between(request.query_params.get("limit"), 366, 1, 3660),
+                ),
+                "tasks": conversation_slice_store.list_tasks(
+                    profile_id=profile_id, persona_id=persona_id, limit=200,
+                ),
+            })
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid conversation slice request"}, status_code=400)
+    action = str(body.get("action") or "").strip()
+    try:
+        if request.method == "PATCH":
+            if action == "review":
+                result = conversation_slice_store.review_slice(
+                    profile_id=profile_id,
+                    slice_id=str(body.get("slice_id") or ""),
+                    review_status=str(body.get("review_status") or ""),
+                    review_reason=str(body.get("review_reason") or ""),
+                    review_note=str(body.get("review_note") or ""),
+                )
+                return JSONResponse({"ok": True, "slice": result})
+            if action in {"pause", "resume", "retry"}:
+                task_id = str(body.get("task_id") or "")
+                current = conversation_slice_store.get_task(profile_id=profile_id, task_id=task_id)
+                if not current:
+                    raise ValueError("conversation slice task not found")
+                required_status = {"pause": "queued", "resume": "paused", "retry": "failed"}[action]
+                if current["status"] != required_status:
+                    raise ValueError(f"task must be {required_status} before {action}")
+                status = "paused" if action == "pause" else "queued"
+                result = conversation_slice_store.set_task_status(
+                    task_id, profile_id=profile_id, status=status,
+                )
+                return JSONResponse({"ok": True, "task": result})
+            return JSONResponse({"error": "unsupported PATCH action"}, status_code=400)
+
+        persona_id = str(body.get("persona_id") or "").strip()
+        session_id = str(body.get("session_id") or "").strip()
+        if action == "estimate_backfill":
+            estimate = conversation_slice_engine.estimate_backfill(
+                profile_id=profile_id, persona_id=persona_id, session_id=session_id,
+                start_date=str(body.get("start_date") or ""),
+                end_date=str(body.get("end_date") or ""),
+            )
+            return JSONResponse({"ok": True, "estimate": estimate})
+        if action == "create_backfill":
+            estimate = conversation_slice_engine.estimate_backfill(
+                profile_id=profile_id, persona_id=persona_id, session_id=session_id,
+                start_date=str(body.get("start_date") or ""),
+                end_date=str(body.get("end_date") or ""),
+            )
+            tasks = conversation_slice_engine.create_backfill_tasks(
+                estimate, estimate_signature=str(body.get("estimate_signature") or ""),
+            )
+            return JSONResponse({"ok": True, "created": len(tasks), "tasks": tasks})
+        if action in {"generate_date", "reslice"}:
+            task = conversation_slice_engine.enqueue_scope(
+                profile_id=profile_id, persona_id=persona_id, session_id=session_id,
+                chat_day=str(body.get("chat_day") or ""),
+                trigger_type="manual_reslice" if action == "reslice" else "slice_recovery",
+                manual_reslice=action == "reslice",
+                expected_revision=(
+                    int(body["expected_revision"])
+                    if body.get("expected_revision") is not None else None
+                ),
+            )
+            result = await conversation_slice_engine.run_task(
+                task["task_id"], profile_id=profile_id,
+            )
+            return JSONResponse({"ok": result.get("status") != "failed", **result})
+        if action == "run_task":
+            result = await conversation_slice_engine.run_task(
+                str(body.get("task_id") or ""), profile_id=profile_id,
+            )
+            return JSONResponse({"ok": result.get("status") != "failed", **result})
+        return JSONResponse({"error": "unsupported POST action"}, status_code=400)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.warning("Conversation slice API failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 def _store_daily_activity_summary_result(result: dict, portrait_engine_arg=None) -> dict:
@@ -14850,7 +14986,7 @@ async def api_config_update(request):
     """Hot-update runtime config. Optionally persist to config.yaml."""
     from starlette.responses import JSONResponse
     import yaml
-    global dream_engine, persona_engine, portrait_engine, reflection_engine, reranker_engine, daily_review_api_client, daily_review_model_router, daily_review_engine, weekly_journey_model_router, weekly_journey_engine, automation_executor
+    global dream_engine, persona_engine, portrait_engine, reflection_engine, reranker_engine, daily_review_api_client, daily_review_model_router, daily_review_engine, conversation_slice_engine, weekly_journey_model_router, weekly_journey_engine, automation_executor
     err = _require_dashboard_auth(request)
     if err:
         return err
@@ -15446,6 +15582,13 @@ async def api_config_update(request):
             gateway_state_store,
             prompt_resolver=prompt_store.get_effective,
             message_client=daily_review_model_router,
+        )
+        conversation_slice_engine = ConversationSliceEngine(
+            config,
+            gateway_state_store,
+            message_client=daily_review_model_router,
+            daily_review_engine=daily_review_engine,
+            slice_store=conversation_slice_store,
         )
         daily_schedule_payload = automation_schedule_payload(
             DAILY_REVIEW_TASK_TYPE,
@@ -16641,8 +16784,14 @@ if __name__ == "__main__":
                                 message_client=local_router,
                             )
                             review_date = (due_at.astimezone(ZoneInfo(AUTOMATION_TIMEZONE)).date() - timedelta(days=1)).isoformat()
+                            local_slice_engine = ConversationSliceEngine(
+                                config,
+                                local_store,
+                                message_client=local_router,
+                                daily_review_engine=local_engine,
+                            )
                             results = [
-                                await local_engine.generate(
+                                await local_slice_engine.generate_daily_bundle(
                                     profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
                                     persona_id=str(persona.get("id") or ""),
                                     review_date=review_date,
@@ -16653,13 +16802,16 @@ if __name__ == "__main__":
                             model_failure = next(
                                 (
                                     item for item in results
-                                    if item.get("status") == "skipped"
-                                    and item.get("reason") == "model_not_configured"
+                                    if item.get("status") == "failed"
+                                    or (
+                                        item.get("status") == "skipped"
+                                        and item.get("reason") == "model_not_configured"
+                                    )
                                 ),
                                 None,
                             )
                             if model_failure:
-                                run_error = "automation model is not configured"
+                                run_error = str(model_failure.get("reason") or "daily bundle failed")
                             logger.info("Daily review scheduled results / 日回顾定时结果: %s", results)
                         else:
                             result = await weekly_journey_engine.run_scheduled(
@@ -16701,6 +16853,15 @@ if __name__ == "__main__":
                                 )
                             except Exception:
                                 automation_store.release_task_lease(task_type=task_type, owner=owner)
+                try:
+                    recovery_results = await conversation_slice_engine.run_recovery(
+                        profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
+                        limit=2,
+                    )
+                    if recovery_results:
+                        logger.info("Conversation slice recovery results: %s", recovery_results)
+                except Exception as e:
+                    logger.warning("Conversation slice recovery failed: %s", e)
                 await asyncio.sleep(30)
 
         def _start_automation_scheduler():

@@ -131,6 +131,8 @@ API 路线继续使用 Haven 已有的日回顾模型连接。Claude Pro 路线�
 
 日回顾先汇总目标 OB 日内各窗口保存的用户与助手可见正文。完整材料不超过 `daily_review.max_input_chars` 时直接一次生成；只有超预算才压缩工作窗口的较早轮次，并为每个工作窗口保留 `work_tail_turns`（默认 10）轮最近原文。多个工作窗口轮流补回较近原文，不再从最终材料尾部整体截断；thinking 与 Bash、Read、Grep、MCP 等工具正文不属于日回顾输入。
 
+同一离线日界任务会在一次材料读取和一次模型调用中，同时产出全日回顾与按 `session_id + chat_day` 隔离的第一人称聊天切片；两类结果分别校验、保存和重试，已有或人工修改过的日回顾不会因补切片被覆盖。切片保存在独立 SQLite 表组，不进入 bucket；可在 Dashboard 按日期检查永久 message ID 原文、批准/拒绝或重切。历史补生成在创建任务前必须展示消息数、预计输入 token 和调用次数，首次最多 14 个真实聊天日。当前切片只用于离线生成和人工检查，没有关键词/向量召回，也不会注入正式聊天 Context。
+
 `weekly_journey` 从上次人工确认的截止日下一天连续读取到最近完整 OB 日；失败两天后手动补跑会自然形成 7+2 天区间，下次周任务只处理剩余天数。积压单次最多处理最早 31 天，确认后再继续下一段。输入包括当前开放 journey、区间日回顾、新桶、独立 feel 与旧桶新增的 feel 年轮；旧 `daily_impression`、`weekly_impression`、`relationship_weather` feel 明确排除。同一协作者已有待确认/执行中/待重试候选时不重复调用模型。
 
 候选只能经认证接口人工编辑、拒绝或确认。关系轨迹页显示输入完整性、原始 preview、当前 draft/revision/hash、证据桶和预计差异。编辑保存为新 revision 并保留原始 preview；确认只接收页面已展示 revision 的 hash，由服务端冻结 approved payload/hash。白名单执行器当前只注册 `weekly_journey`：`no_change` 不写 journey，但人工确认后与正常写入候选一样推进“已梳理至”；`append_current` 返回最多 5000 字符的 `revised_content`，把旧正文与新变化去重整合后替换开放阶段，不再在末尾追加周报式片段；`transition` 使用独立 `:close` / `:create` operation ID。候选完成与游标推进为同一 SQLite 事务；失败、拒绝、冲突和仅生成均不推进。

@@ -182,6 +182,20 @@ def initialize_conversation_slice_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    task_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(conversation_slice_tasks)").fetchall()
+    }
+    for name, ddl in {
+        "message_count": "INTEGER NOT NULL DEFAULT 0",
+        "estimated_input_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "estimated_call_count": "INTEGER NOT NULL DEFAULT 1",
+        "started_at": "TEXT",
+        "paused_at": "TEXT",
+        "completed_at": "TEXT",
+        "failed_at": "TEXT",
+    }.items():
+        if name not in task_columns:
+            conn.execute(f"ALTER TABLE conversation_slice_tasks ADD COLUMN {name} {ddl}")
 
 
 def delete_conversation_slice_session_records(
@@ -340,9 +354,15 @@ class ConversationSliceStore:
         messages: list[dict[str, Any]] = []
         for turn in turns:
             attachments = [
-                {"attachment_id": str(row["attachment_id"]), "content_hash": str(row["sha256"])}
+                {
+                    "attachment_id": str(row["attachment_id"]),
+                    "content_hash": str(row["sha256"]),
+                    "filename": str(row["filename"] or ""),
+                    "text_content": str(row["text_content"] or ""),
+                }
                 for row in conn.execute(
-                    """SELECT attachment_id, sha256 FROM conversation_attachments
+                    """SELECT attachment_id, sha256, filename, text_content
+                       FROM conversation_attachments
                        WHERE profile_id = ? AND session_id = ? AND turn_id = ?
                          AND cleared_at IS NULL
                        ORDER BY created_at ASC, attachment_id ASC""",
@@ -373,7 +393,13 @@ class ConversationSliceStore:
             "message_id": item["message_id"],
             "role": item["role"],
             "content": item["content"],
-            "attachments": item["attachments"],
+            "attachments": [
+                {
+                    "attachment_id": attachment["attachment_id"],
+                    "content_hash": attachment["content_hash"],
+                }
+                for attachment in item["attachments"]
+            ],
         } for item in messages]
         return {
             "profile_id": profile_id,
@@ -405,6 +431,44 @@ class ConversationSliceStore:
             )
         finally:
             conn.close()
+
+    @staticmethod
+    def daily_source_snapshot_hash(session_snapshots: list[dict[str, Any]]) -> str:
+        return _sha256_json([
+            {
+                "session_id": str(snapshot.get("session_id") or ""),
+                "session_source_snapshot_hash": str(
+                    snapshot.get("session_source_snapshot_hash") or ""
+                ),
+            }
+            for snapshot in sorted(
+                session_snapshots,
+                key=lambda item: str(item.get("session_id") or ""),
+            )
+        ])
+
+    def has_active_batch(
+        self, *, profile_id: str, persona_id: str, session_id: str, chat_day: str,
+    ) -> bool:
+        conn = self._connect()
+        row = conn.execute(
+            """SELECT session_source_snapshot_hash FROM conversation_slice_batches
+               WHERE profile_id = ? AND persona_id = ? AND session_id = ? AND chat_day = ?
+                 AND status = 'active' LIMIT 1""",
+            (profile_id, persona_id, session_id, chat_day),
+        ).fetchone()
+        if row is None:
+            conn.close()
+            return False
+        snapshot = self._source_snapshot_with_conn(
+            conn,
+            profile_id=profile_id,
+            persona_id=persona_id,
+            session_id=session_id,
+            chat_day=chat_day,
+        )
+        conn.close()
+        return str(row["session_source_snapshot_hash"]) == str(snapshot["session_source_snapshot_hash"])
 
     def get_reslice_revision(
         self,
@@ -557,7 +621,13 @@ class ConversationSliceStore:
                 "message_id": message["message_id"],
                 "role": message["role"],
                 "content": message["content"],
-                "attachments": message["attachments"],
+                "attachments": [
+                    {
+                        "attachment_id": attachment["attachment_id"],
+                        "content_hash": attachment["content_hash"],
+                    }
+                    for attachment in message["attachments"]
+                ],
             } for message in selected_messages]
             normalized.append({
                 "sequence_no": sequence_no,
@@ -979,6 +1049,9 @@ class ConversationSliceStore:
         trigger_type: str,
         batch_idempotency_key: str,
         reslice_revision: int,
+        message_count: int = 0,
+        estimated_input_tokens: int = 0,
+        estimated_call_count: int = 1,
     ) -> dict[str, Any]:
         if not str(trigger_type or "").strip() or not str(batch_idempotency_key or "").strip():
             raise ValueError("trigger_type and batch_idempotency_key are required")
@@ -993,11 +1066,14 @@ class ConversationSliceStore:
             """INSERT OR IGNORE INTO conversation_slice_tasks
                (task_id, profile_id, persona_id, session_id, chat_day,
                 trigger_type, idempotency_key, status, reslice_revision,
+                message_count, estimated_input_tokens, estimated_call_count,
                 created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)""",
             (
                 task_id, profile_id, persona_id, session_id, chat_day,
-                trigger_type, task_key, int(reslice_revision), now, now,
+                trigger_type, task_key, int(reslice_revision),
+                max(0, int(message_count)), max(0, int(estimated_input_tokens)),
+                max(1, int(estimated_call_count)), now, now,
             ),
         )
         conn.commit()
@@ -1006,9 +1082,353 @@ class ConversationSliceStore:
             (task_key,),
         ).fetchone()
         conn.close()
+        return self._task_payload(row)
+
+    @staticmethod
+    def _task_payload(row: sqlite3.Row) -> dict[str, Any]:
+        keys = set(row.keys())
         return {
             "task_id": str(row["task_id"]),
+            "profile_id": str(row["profile_id"]),
+            "persona_id": str(row["persona_id"]),
+            "session_id": str(row["session_id"]),
+            "chat_day": str(row["chat_day"]),
+            "trigger_type": str(row["trigger_type"]),
             "idempotency_key": str(row["idempotency_key"]),
             "status": str(row["status"]),
             "reslice_revision": int(row["reslice_revision"]),
+            "batch_id": str(row["batch_id"] or ""),
+            "attempt_count": int(row["attempt_count"] or 0),
+            "message_count": int(row["message_count"] or 0) if "message_count" in keys else 0,
+            "estimated_input_tokens": (
+                int(row["estimated_input_tokens"] or 0)
+                if "estimated_input_tokens" in keys else 0
+            ),
+            "estimated_call_count": (
+                int(row["estimated_call_count"] or 1)
+                if "estimated_call_count" in keys else 1
+            ),
+            "error_code": str(row["error_code"] or ""),
+            "error_detail": str(row["error_detail"] or ""),
+            "created_at": str(row["created_at"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+        }
+
+    def list_tasks(
+        self,
+        *,
+        profile_id: str,
+        persona_id: str = "",
+        session_id: str = "",
+        chat_day: str = "",
+        statuses: tuple[str, ...] = (),
+        trigger_types: tuple[str, ...] = (),
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        clauses = ["profile_id = ?"]
+        params: list[Any] = [str(profile_id or "default")]
+        for column, value in (("persona_id", persona_id), ("session_id", session_id), ("chat_day", chat_day)):
+            if str(value or "").strip():
+                clauses.append(f"{column} = ?")
+                params.append(str(value).strip())
+        if statuses:
+            clauses.append("status IN (" + ",".join("?" for _ in statuses) + ")")
+            params.extend(statuses)
+        if trigger_types:
+            clauses.append("trigger_type IN (" + ",".join("?" for _ in trigger_types) + ")")
+            params.extend(trigger_types)
+        params.append(max(1, min(1000, int(limit or 200))))
+        conn = self._connect()
+        rows = conn.execute(
+            f"SELECT * FROM conversation_slice_tasks WHERE {' AND '.join(clauses)} "
+            "ORDER BY created_at DESC LIMIT ?",
+            params,
+        ).fetchall()
+        conn.close()
+        return [self._task_payload(row) for row in rows]
+
+    def get_task(self, *, profile_id: str, task_id: str) -> dict[str, Any]:
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT * FROM conversation_slice_tasks WHERE profile_id = ? AND task_id = ?",
+            (str(profile_id or "default"), str(task_id or "")),
+        ).fetchone()
+        conn.close()
+        return self._task_payload(row) if row is not None else {}
+
+    def set_task_status(
+        self,
+        task_id: str,
+        *,
+        profile_id: str = "",
+        status: str,
+        batch_id: str = "",
+        error_code: str = "",
+        error_detail: str = "",
+        increment_attempt: bool = False,
+    ) -> dict[str, Any]:
+        safe_status = str(status or "").strip()
+        allowed = {"queued", "running", "paused", "completed", "failed"}
+        if safe_status not in allowed:
+            raise ValueError("invalid conversation slice task status")
+        safe_task_id = str(task_id or "").strip()
+        if not safe_task_id:
+            raise ValueError("task_id is required")
+        now = _now_iso()
+        timestamp_column = {
+            "running": "started_at",
+            "paused": "paused_at",
+            "completed": "completed_at",
+            "failed": "failed_at",
+        }.get(safe_status)
+        assignments = ["status = ?", "updated_at = ?", "error_code = ?", "error_detail = ?"]
+        params: list[Any] = [safe_status, now, str(error_code or ""), str(error_detail or "")[:2000]]
+        if batch_id:
+            assignments.append("batch_id = ?")
+            params.append(str(batch_id))
+        if increment_attempt:
+            assignments.append("attempt_count = attempt_count + 1")
+        if timestamp_column:
+            assignments.append(f"{timestamp_column} = ?")
+            params.append(now)
+        where = "task_id = ?"
+        params.append(safe_task_id)
+        if str(profile_id or "").strip():
+            where += " AND profile_id = ?"
+            params.append(str(profile_id).strip())
+        conn = self._connect()
+        cursor = conn.execute(
+            f"UPDATE conversation_slice_tasks SET {', '.join(assignments)} WHERE {where}",
+            params,
+        )
+        if int(cursor.rowcount or 0) != 1:
+            conn.rollback()
+            conn.close()
+            raise ValueError("conversation slice task not found")
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM conversation_slice_tasks WHERE task_id = ?", (safe_task_id,)
+        ).fetchone()
+        conn.close()
+        return self._task_payload(row)
+
+    def claim_task(self, *, profile_id: str, task_id: str) -> dict[str, Any]:
+        """Atomically move one queued task to running; concurrent callers get no claim."""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            now = _now_iso()
+            cursor = conn.execute(
+                """UPDATE conversation_slice_tasks
+                   SET status = 'running', attempt_count = attempt_count + 1,
+                       started_at = ?, updated_at = ?, error_code = '', error_detail = ''
+                   WHERE profile_id = ? AND task_id = ? AND status = 'queued'""",
+                (now, now, str(profile_id or "default"), str(task_id or "")),
+            )
+            row = conn.execute(
+                "SELECT * FROM conversation_slice_tasks WHERE profile_id = ? AND task_id = ?",
+                (str(profile_id or "default"), str(task_id or "")),
+            ).fetchone()
+            conn.commit()
+            if row is None:
+                raise ValueError("conversation slice task not found")
+            return self._task_payload(row) if int(cursor.rowcount or 0) == 1 else {}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def list_inspection_days(
+        self, *, profile_id: str, persona_id: str, limit: int = 366,
+    ) -> list[dict[str, Any]]:
+        conn = self._connect()
+        day_rows = conn.execute(
+            """SELECT chat_day FROM (
+                    SELECT chat_day FROM conversation_turns turns
+                    JOIN conversation_sessions sessions
+                      ON sessions.profile_id = turns.profile_id AND sessions.session_id = turns.session_id
+                    WHERE turns.profile_id = ? AND sessions.persona_id = ? AND turns.chat_day != ''
+                    UNION
+                    SELECT chat_day FROM conversation_slice_batches WHERE profile_id = ? AND persona_id = ?
+                    UNION
+                    SELECT chat_day FROM conversation_slice_tasks WHERE profile_id = ? AND persona_id = ?
+               ) days ORDER BY chat_day DESC LIMIT ?""",
+            (
+                profile_id, persona_id, profile_id, persona_id, profile_id, persona_id,
+                max(1, min(3660, int(limit or 366))),
+            ),
+        ).fetchall()
+        output: list[dict[str, Any]] = []
+        for day_row in day_rows:
+            chat_day = str(day_row["chat_day"])
+            slice_stats = conn.execute(
+                """SELECT COUNT(*) AS slice_count,
+                          SUM(CASE WHEN slices.review_status = 'unreviewed' THEN 1 ELSE 0 END) AS unreviewed_count,
+                          GROUP_CONCAT(DISTINCT batches.slice_prompt_version) AS prompt_versions
+                   FROM conversation_slice_batches batches
+                   JOIN conversation_slices slices ON slices.batch_id = batches.batch_id
+                   WHERE batches.profile_id = ? AND batches.persona_id = ? AND batches.chat_day = ?
+                     AND batches.status = 'active' AND slices.lifecycle_status = 'active'""",
+                (profile_id, persona_id, chat_day),
+            ).fetchone()
+            task_stats = conn.execute(
+                """SELECT SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+                          GROUP_CONCAT(DISTINCT status) AS task_statuses
+                   FROM conversation_slice_tasks
+                   WHERE profile_id = ? AND persona_id = ? AND chat_day = ?""",
+                (profile_id, persona_id, chat_day),
+            ).fetchone()
+            invalid_count = conn.execute(
+                """SELECT COUNT(*) FROM conversation_slices
+                   WHERE profile_id = ? AND persona_id = ? AND chat_day = ?
+                     AND lifecycle_status = 'source_changed'""",
+                (profile_id, persona_id, chat_day),
+            ).fetchone()[0]
+            output.append({
+                "chat_day": chat_day,
+                "slice_count": int(slice_stats["slice_count"] or 0),
+                "unreviewed_count": int(slice_stats["unreviewed_count"] or 0),
+                "issue_count": int(task_stats["failed_count"] or 0) + int(invalid_count or 0),
+                "prompt_versions": [value for value in str(slice_stats["prompt_versions"] or "").split(",") if value],
+                "task_statuses": [value for value in str(task_stats["task_statuses"] or "").split(",") if value],
+            })
+        conn.close()
+        return output
+
+    def get_inspection_day(
+        self, *, profile_id: str, persona_id: str, chat_day: str,
+    ) -> dict[str, Any]:
+        conn = self._connect()
+        batch_rows = conn.execute(
+            """SELECT batches.*, COALESCE(sessions.title, '') AS session_title
+               FROM conversation_slice_batches batches
+               LEFT JOIN conversation_sessions sessions
+                 ON sessions.profile_id = batches.profile_id AND sessions.session_id = batches.session_id
+               WHERE batches.profile_id = ? AND batches.persona_id = ? AND batches.chat_day = ?
+                 AND batches.status = 'active'
+               ORDER BY batches.session_id""",
+            (profile_id, persona_id, chat_day),
+        ).fetchall()
+        sessions: list[dict[str, Any]] = []
+        for batch in batch_rows:
+            slice_rows = conn.execute(
+                "SELECT * FROM conversation_slices WHERE batch_id = ? ORDER BY sequence_no",
+                (str(batch["batch_id"]),),
+            ).fetchall()
+            sessions.append({
+                "session_id": str(batch["session_id"]),
+                "session_title": str(batch["session_title"] or ""),
+                "batch_id": str(batch["batch_id"]),
+                "batch_status": str(batch["status"]),
+                "source_message_count": int(batch["source_message_count"] or 0),
+                "segmenter_version": str(batch["segmenter_version"]),
+                "slice_prompt_version": str(batch["slice_prompt_version"]),
+                "slice_schema_version": str(batch["slice_schema_version"]),
+                "generator_provider": str(batch["generator_provider"] or ""),
+                "generator_model": str(batch["generator_model"] or ""),
+                "reslice_revision": int(batch["reslice_revision"] or 1),
+                "coverage": json.loads(str(batch["coverage_json"] or "{}")),
+                "slices": [{
+                    "slice_id": str(row["slice_id"]),
+                    "sequence_no": int(row["sequence_no"]),
+                    "summary": str(row["summary"]),
+                    "source_message_ids": json.loads(str(row["source_message_ids_json"])),
+                    "source_time_start": str(row["source_time_start"] or ""),
+                    "source_time_end": str(row["source_time_end"] or ""),
+                    "event_time_start": row["event_time_start"],
+                    "event_time_end": row["event_time_end"],
+                    "boundary_reason": str(row["boundary_reason"]),
+                    "lifecycle_status": str(row["lifecycle_status"]),
+                    "review_status": str(row["review_status"]),
+                    "review_reason": str(row["review_reason"] or ""),
+                    "review_note": str(row["review_note"] or ""),
+                    "reviewed_at": str(row["reviewed_at"] or ""),
+                } for row in slice_rows],
+            })
+        tasks = conn.execute(
+            """SELECT * FROM conversation_slice_tasks
+               WHERE profile_id = ? AND persona_id = ? AND chat_day = ?
+               ORDER BY created_at DESC""",
+            (profile_id, persona_id, chat_day),
+        ).fetchall()
+        conn.close()
+        return {
+            "chat_day": chat_day,
+            "sessions": sessions,
+            "tasks": [self._task_payload(row) for row in tasks],
+        }
+
+    def get_slice_source(
+        self, *, profile_id: str, slice_id: str,
+    ) -> dict[str, Any]:
+        conn = self._connect()
+        row = conn.execute(
+            """SELECT slices.*, batches.persona_id
+               FROM conversation_slices slices
+               JOIN conversation_slice_batches batches ON batches.batch_id = slices.batch_id
+               WHERE slices.profile_id = ? AND slices.slice_id = ?""",
+            (profile_id, slice_id),
+        ).fetchone()
+        if row is None:
+            conn.close()
+            raise ValueError("conversation slice not found")
+        wanted = json.loads(str(row["source_message_ids_json"] or "[]"))
+        snapshot = self._source_snapshot_with_conn(
+            conn,
+            profile_id=profile_id,
+            persona_id=str(row["persona_id"]),
+            session_id=str(row["session_id"]),
+            chat_day=str(row["chat_day"]),
+        )
+        by_id = {str(item["message_id"]): item for item in snapshot["messages"]}
+        messages = [by_id[message_id] for message_id in wanted if message_id in by_id]
+        conn.close()
+        return {
+            "slice_id": slice_id,
+            "session_id": str(row["session_id"]),
+            "chat_day": str(row["chat_day"]),
+            "messages": messages,
+        }
+
+    def review_slice(
+        self,
+        *,
+        profile_id: str,
+        slice_id: str,
+        review_status: str,
+        review_reason: str = "",
+        review_note: str = "",
+    ) -> dict[str, Any]:
+        status = str(review_status or "").strip()
+        if status not in {"approved", "rejected"}:
+            raise ValueError("review_status must be approved or rejected")
+        reason = str(review_reason or "").strip()
+        allowed_reasons = {"fabricated", "stiff", "emotion", "missing", "boundary", "duplicate", "other"}
+        if status == "rejected" and reason not in allowed_reasons:
+            raise ValueError("a valid review_reason is required for rejected slices")
+        now = _now_iso()
+        conn = self._connect()
+        cursor = conn.execute(
+            """UPDATE conversation_slices
+               SET review_status = ?, review_reason = ?, review_note = ?, reviewed_at = ?, updated_at = ?
+               WHERE profile_id = ? AND slice_id = ?""",
+            (status, reason if status == "rejected" else "", str(review_note or "")[:1000], now, now, profile_id, slice_id),
+        )
+        if int(cursor.rowcount or 0) != 1:
+            conn.rollback()
+            conn.close()
+            raise ValueError("conversation slice not found")
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM conversation_slices WHERE profile_id = ? AND slice_id = ?",
+            (profile_id, slice_id),
+        ).fetchone()
+        conn.close()
+        return {
+            "slice_id": str(row["slice_id"]),
+            "review_status": str(row["review_status"]),
+            "review_reason": str(row["review_reason"] or ""),
+            "review_note": str(row["review_note"] or ""),
+            "reviewed_at": str(row["reviewed_at"] or ""),
         }

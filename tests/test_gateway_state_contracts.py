@@ -395,6 +395,7 @@ class GatewayStateContractsTest(unittest.TestCase):
                 "timezone": "Asia/Shanghai",
                 "day_start_hour": 4,
                 "day_modes": {"2026-09-10": "review", "2026-09-11": "raw"},
+                "allow_fixed_body_restore": True,
             },
         )
         self.assertEqual(saved["context_revision"], 1)
@@ -402,6 +403,7 @@ class GatewayStateContractsTest(unittest.TestCase):
         self.assertEqual(saved["rolling_context"]["strategy"], "daily_rolling")
         self.assertEqual(saved["rolling_context"]["previous_strategy"], "fixed_window")
         self.assertEqual(saved["rolling_context"]["previous_day_modes"], {})
+        self.assertTrue(saved["rolling_context"]["allow_fixed_body_restore"])
         self.assertEqual(saved["rolling_context"]["day_modes"]["2026-09-10"], "review")
 
         unchanged = store.patch_conversation_rolling_context(

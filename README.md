@@ -272,7 +272,7 @@ Persona 不是事实记忆，不能回答“发生过什么”，也不应覆盖
 
 Gateway 会把成功完成的 user / assistant 轮次持久保存到 `conversation_turns`。这张表也是 cc、Polaris 历史导入和未来 API 聊天共用的对话原文层；它不再按 `conversation_turns_max_entries` 自动删除旧轮次，该旧参数只保留调用兼容，运行时始终覆盖为 `0`。旧 `config.yaml` / `config.example.yaml` 即使仍显示 `500` 也不会生效。当问题包含“刚才、刚刚、上一句、之前那个”等近指表达时，Gateway 会从已保存原文中优先选择最近相关轮次，拼成 `Just Now Chat Context`，而不是用长期语义记忆猜测。
 
-Dashboard 可把一个逻辑聊天切换为手动按天滚动：每个聊天日选择保留原文、仅保留对应日回顾或暂不带入。Haven 为每条 user/assistant 消息分配永久 ID，并保存聊天日期；每次保存滚动配置只新增配置 revision 与当时的 turn watermark，不逐请求复制整份上下文。CC 只用同 revision 的原生 session 续接，watermark 后的新消息留在原生会话自然增长；selfhost 因无状态而每轮按当前选择重组。当前仍是人工维护，自动切片摘要不属于这一阶段。
+Dashboard 可把一个逻辑聊天切换为手动按天滚动：每个聊天日选择保留原文、仅保留对应日回顾或暂不带入。Haven 为每条 user/assistant 消息分配永久 ID，并保存聊天日期；每次保存滚动配置只新增配置 revision 与当时的 turn watermark，不逐请求复制整份上下文。CC 只用同 revision 的原生 session 续接，watermark 后的新消息留在原生会话自然增长；首次从固定窗口切换时，Dashboard 优先从 SDK 默认 transcript 完整迁移所选 raw 日期的 thinking、召回和工具链，源缺失时只有用户明确同意才可退化为 Haven 可见正文恢复。selfhost 因无状态而每轮按当前选择重组。当前仍是人工维护，自动切片摘要不属于这一阶段。
 
 每个 cc 协作者可手动指定一个主窗；该标记只控制 Dashboard 列表置顶，不自动改变上下文模式。软删除窗口时 Haven 同时清除置顶与主动唤醒记录，并拒绝后续 turn 写入，避免已删除窗口被后台活动隐式恢复。
 

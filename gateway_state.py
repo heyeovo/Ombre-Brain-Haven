@@ -3789,6 +3789,12 @@ class GatewayStateStore:
             if len(day_modes) > 3660:
                 raise ValueError("rolling_context.day_modes is too large")
 
+            allow_fixed_body_restore = config.get(
+                "allow_fixed_body_restore", current.get("allow_fixed_body_restore", False)
+            )
+            if not isinstance(allow_fixed_body_restore, bool):
+                raise ValueError("rolling_context.allow_fixed_body_restore must be boolean")
+
             raw_pinned_ids = config.get("selected_pinned_ids", current.get("selected_pinned_ids"))
             if raw_pinned_ids is not None:
                 if not isinstance(raw_pinned_ids, list) or not all(isinstance(v, str) for v in raw_pinned_ids):
@@ -3815,11 +3821,13 @@ class GatewayStateStore:
                 next_config["selected_pinned_ids"] = selected_pinned_ids
             if selected_journal_ids is not None:
                 next_config["selected_journal_ids"] = selected_journal_ids
+            if allow_fixed_body_restore:
+                next_config["allow_fixed_body_restore"] = True
             comparable_current = {
                 key: current[key]
                 for key in (
                     "strategy", "timezone", "day_start_hour", "day_modes",
-                    "selected_pinned_ids", "selected_journal_ids",
+                    "selected_pinned_ids", "selected_journal_ids", "allow_fixed_body_restore",
                 )
                 if key in current
             }

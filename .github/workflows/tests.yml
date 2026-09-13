@@ -27,14 +27,8 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-asyncio
 
-      - name: Run local tests (no API key needed)
-        run: python -m pytest tests/test_scoring.py tests/test_feel_flow.py -v --asyncio-mode=auto
-
-      - name: Run LLM quality tests
-        if: env.OMBRE_API_KEY != ''
-        env:
-          OMBRE_API_KEY: ${{ secrets.OMBRE_API_KEY }}
-        run: python -m pytest tests/test_llm_quality.py -v --asyncio-mode=auto
+      - name: Run test suite
+        run: python -m pytest tests -v --asyncio-mode=auto
 
   deploy-haven:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

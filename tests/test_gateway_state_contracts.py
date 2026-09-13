@@ -726,6 +726,81 @@ class GatewayStateContractsTest(unittest.TestCase):
                 },
             )
 
+    def test_explicit_rolling_body_recovery_atomically_switches_one_lane(self):
+        store = self.make_store()
+        self.commit(
+            store,
+            request_id="recovery-source",
+            expected=0,
+            source="cc",
+            raw_json=json.dumps({
+                "cred_mode": "subscription",
+                "model": "claude-sonnet-5",
+                "cc_session_id": "damaged-native",
+            }),
+        )
+        state = store.get_conversation_session_state(
+            profile_id="default", session_id="session-1"
+        )
+        rolling = store.patch_conversation_rolling_context(
+            profile_id="default",
+            session_id="session-1",
+            persona_id="ombre",
+            config={"strategy": "daily_rolling", "day_modes": {"2026-09-11": "raw"}},
+            expected_state_version=state["state_version"],
+        )
+        recovered = store.commit_conversation_rolling_recovery(
+            profile_id="default",
+            session_id="session-1",
+            persona_id="ombre",
+            expected_state_version=rolling["state_version"],
+            commit={
+                "lane_id": "subscription",
+                "expected_cc_session_id": "damaged-native",
+                "next_cc_session_id": "body-restored-native",
+                "context_revision": rolling["context_revision"],
+                "turn_count": 7,
+                "entry_count": 14,
+            },
+        )
+        lane = recovered["cc_lanes"]["subscription"]
+        self.assertEqual(lane["cc_session_id"], "body-restored-native")
+        self.assertEqual(lane["context_revision"], rolling["context_revision"])
+        self.assertEqual(lane["previous_cc_session_id"], "damaged-native")
+        self.assertEqual(lane["last_body_recovery"]["source"], "haven_body")
+        self.assertEqual(lane["last_body_recovery"]["turn_count"], 7)
+        self.assertEqual(
+            store.get_conversation_session_state(
+                profile_id="another-profile", session_id="session-1"
+            ),
+            {},
+        )
+        with self.assertRaises(SessionStateConflictError):
+            store.commit_conversation_rolling_recovery(
+                profile_id="default",
+                session_id="session-1",
+                persona_id="ombre",
+                expected_state_version=rolling["state_version"],
+                commit={
+                    "lane_id": "subscription",
+                    "expected_cc_session_id": "body-restored-native",
+                    "next_cc_session_id": "must-not-win",
+                    "context_revision": rolling["context_revision"],
+                },
+            )
+        with self.assertRaises(ValueError):
+            store.commit_conversation_rolling_recovery(
+                profile_id="default",
+                session_id="session-1",
+                persona_id="ombre",
+                expected_state_version=recovered["state_version"],
+                commit={
+                    "lane_id": "subscription",
+                    "expected_cc_session_id": "damaged-native",
+                    "next_cc_session_id": "must-not-win",
+                    "context_revision": rolling["context_revision"],
+                },
+            )
     def test_daily_review_snapshot_is_recent_fixed_and_optional(self):
         store = self.make_store()
         today = datetime.now(timezone(timedelta(hours=8))).date()

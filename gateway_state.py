@@ -4094,6 +4094,91 @@ class GatewayStateStore:
             session_id=safe_session_id,
         )
 
+    def commit_conversation_rolling_recovery(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        persona_id: str,
+        commit: dict[str, Any],
+        expected_state_version: int | None = None,
+    ) -> dict[str, Any]:
+        """Atomically move one rolling lane to an explicitly body-restored transcript."""
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "").strip()
+        safe_persona_id = str(persona_id or "").strip()
+        if not safe_session_id or not safe_persona_id:
+            raise ValueError("session_id and persona_id are required")
+        if not isinstance(commit, dict):
+            raise ValueError("rolling_recovery_commit must be an object")
+        lane_id = str(commit.get("lane_id") or "").strip()[:300]
+        expected_cc_id = str(commit.get("expected_cc_session_id") or "").strip()[:500]
+        next_cc_id = str(commit.get("next_cc_session_id") or "").strip()[:500]
+        expected_revision = max(0, int(commit.get("context_revision") or 0))
+        if not lane_id or not expected_cc_id or not next_cc_id or expected_cc_id == next_cc_id:
+            raise ValueError("rolling recovery requires lane_id and distinct CC session ids")
+
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT persona_id, cc_lanes_json, rolling_context_json,
+                          context_revision, state_version
+                   FROM conversation_sessions
+                   WHERE profile_id = ? AND session_id = ?""",
+                (safe_profile_id, safe_session_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("session not found")
+            actual_persona_id = str(row["persona_id"] or "ombre")
+            if actual_persona_id != safe_persona_id:
+                raise ConversationPersonaConflictError(safe_persona_id, actual_persona_id)
+            current_version = int(row["state_version"] or 0)
+            if expected_state_version is not None and int(expected_state_version) != current_version:
+                raise SessionStateConflictError(int(expected_state_version), current_version)
+            rolling = self._json_object(row["rolling_context_json"])
+            if str(rolling.get("strategy") or "fixed_window") != "daily_rolling":
+                raise ValueError("rolling recovery requires a daily rolling session")
+            current_revision = max(0, int(row["context_revision"] or 0))
+            if current_revision != expected_revision:
+                raise ValueError("context_revision_conflict")
+
+            lanes = self._json_object(row["cc_lanes_json"])
+            lane = lanes.get(lane_id)
+            if not isinstance(lane, dict) or str(lane.get("cc_session_id") or "").strip() != expected_cc_id:
+                raise ValueError("cc_session_id_conflict")
+            recovered_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            lanes[lane_id] = {
+                **lane,
+                "previous_cc_session_id": expected_cc_id,
+                "previous_context_revision": max(0, int(lane.get("context_revision") or 0)),
+                "previous_seen_round_id": max(0, int(lane.get("seen_round_id") or 0)),
+                "cc_session_id": next_cc_id,
+                "context_revision": current_revision,
+                "last_body_recovery": {
+                    "at": recovered_at,
+                    "source": "haven_body",
+                    "turn_count": max(0, int(commit.get("turn_count") or 0)),
+                    "entry_count": max(0, int(commit.get("entry_count") or 0)),
+                },
+            }
+            conn.execute(
+                """UPDATE conversation_sessions
+                   SET cc_lanes_json = ?, state_version = state_version + 1, updated_at = ?
+                   WHERE profile_id = ? AND session_id = ?""",
+                (json.dumps(lanes, ensure_ascii=False), recovered_at, safe_profile_id, safe_session_id),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return self.get_conversation_session_state(
+            profile_id=safe_profile_id,
+            session_id=safe_session_id,
+        )
+
     def patch_conversation_session_state(
         self,
         *,

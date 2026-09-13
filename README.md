@@ -356,7 +356,7 @@ docker compose -f compose.hk.yml up -d --build
 /srv/ob-data/haven-test/config  → /config
 ```
 
-Gateway 首次启动时会把镜像内的基础配置初始化为 `/config/config.yaml`；Brain 只读该持久配置。运行时配置仍写入 `/state/config.runtime.yaml`。部署文件要求在 Coolify 中设置非秘密的 `HAVEN_RELEASE_SHA`，Brain 与 Gateway 的构建源共同引用这个完整 Git commit SHA；变量为空时 Compose 校验会直接失败，不会退回 `main`。Coolify Service 不绑定 Git push，普通 push 不会更新 VPS；正式发布时只需更新一次 `HAVEN_RELEASE_SHA` 后手动 Restart/Redeploy，回滚时改回上一完整 SHA。
+Gateway 首次启动时会把镜像内的基础配置初始化为 `/config/config.yaml`；Brain 只读该持久配置。运行时配置仍写入 `/state/config.runtime.yaml`。部署文件要求在 Coolify 中设置非秘密的 `HAVEN_RELEASE_SHA`，Brain 与 Gateway 的构建源共同引用这个完整 Git commit SHA；变量为空时 Compose 校验会直接失败，不会退回 `main`。Coolify Service 不直接绑定 Git source；`main` 的 push 通过 GitHub Actions 运行测试，测试成功后自动把 `HAVEN_RELEASE_SHA` 更新为本次完整 SHA 并触发部署。测试失败和 pull request 不部署；自动化不可用时仍可手动填写已验收 SHA 后 Restart/Redeploy，回滚时改回上一完整 SHA。
 
 上游模型密钥只注入 Gateway 服务；Brain 与 Dashboard 不得接收 `OMBRE_GATEWAY_UPSTREAM_API_KEY` 或各 provider 的真实 key。多 upstream 应通过各自的 `api_key_env` 引用 Gateway 私密环境项。
 

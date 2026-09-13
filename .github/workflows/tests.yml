@@ -35,3 +35,37 @@ jobs:
         env:
           OMBRE_API_KEY: ${{ secrets.OMBRE_API_KEY }}
         run: python -m pytest tests/test_llm_quality.py -v --asyncio-mode=auto
+
+  deploy-haven:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    concurrency:
+      group: haven-production-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Update the pinned Haven release SHA
+        env:
+          COOLIFY_BASE_URL: ${{ vars.COOLIFY_BASE_URL }}
+          COOLIFY_SERVICE_UUID: ${{ vars.COOLIFY_SERVICE_UUID }}
+          COOLIFY_WRITE_TOKEN: ${{ secrets.COOLIFY_WRITE_TOKEN }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          payload="$(jq -n --arg value "$RELEASE_SHA" '{key:"HAVEN_RELEASE_SHA", value:$value}')"
+          curl --fail-with-body --silent --show-error \
+            --request PATCH \
+            --url "$COOLIFY_BASE_URL/api/v1/services/$COOLIFY_SERVICE_UUID/envs" \
+            --header "Authorization: Bearer $COOLIFY_WRITE_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data "$payload"
+
+      - name: Deploy the pinned Haven release
+        env:
+          COOLIFY_BASE_URL: ${{ vars.COOLIFY_BASE_URL }}
+          COOLIFY_SERVICE_UUID: ${{ vars.COOLIFY_SERVICE_UUID }}
+          COOLIFY_DEPLOY_TOKEN: ${{ secrets.COOLIFY_DEPLOY_TOKEN }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --url "$COOLIFY_BASE_URL/api/v1/deploy?uuid=$COOLIFY_SERVICE_UUID&force=false" \
+            --header "Authorization: Bearer $COOLIFY_DEPLOY_TOKEN"

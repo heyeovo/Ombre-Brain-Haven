@@ -131,7 +131,7 @@
 - Gateway：`OMBRE_GATEWAY_HOST=0.0.0.0`、`OMBRE_GATEWAY_PORT=8010`，并与 Brain 共用 `/data` 和 `/state`。
 - Brain 通过 `OMBRE_GATEWAY_ADMIN_URL=http://haven-gateway:8010/api/config` 使用内部服务名连接 Gateway。
 - 密钥变量只从 Coolify 环境注入；Compose 文件不包含真实值。上游模型密钥只允许注入 Gateway，Brain / Dashboard 不得接收。该栈不发布宿主机端口。
-- Coolify Service 不绑定 Git push；发布时先把 `HAVEN_RELEASE_SHA` 改为已验收 commit，再手动 Restart/Redeploy。回滚时把它改回上一完整 SHA 后重新部署。
+- Coolify Service 不直接绑定 Git source；`main` 的 push 在 GitHub Actions 测试成功后，通过 Coolify API 自动把 `HAVEN_RELEASE_SHA` 更新为本次完整 commit SHA 并触发部署。测试失败和 pull request 不发布；自动化不可用时可手动填写已验收 SHA 后 Restart/Redeploy。回滚时把它改回上一完整 SHA 后重新部署。
 
 ## ChatGPT OAuth（Headless 模式）
 

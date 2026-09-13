@@ -24,8 +24,8 @@
 
 - 涉及 VPS、Coolify、发布、回滚或 Dashboard/Haven 跨仓库联动时，开始前必须同时读取本文件与相邻 `ob-dashboard2/AGENTS.md`；不能只读当前仓库规则。
 - 修改 Haven 代码后运行与改动对应的测试；涉及持久化契约时至少覆盖迁移、幂等、冲突和隔离边界。
-- VPS 正式 Haven 是 Coolify 中保存 Compose 的手动 Service，不绑定 Git push；用户 commit + push 只更新 GitHub，不会上线，也不再以 Zeabur deployment 作为验收目标。
-- Brain 与 Gateway 的构建源共同读取必填的 `HAVEN_RELEASE_SHA`。需要正式发布时，必须先提醒用户复制已验收 commit 的完整 SHA，在 Coolify `Ombre Brain → production → haven-test-stack → Environment Variables` 更新该值，再执行普通 Restart/Deploy；不得选择 `Restart (pull latest)`。
+- VPS 正式 Haven 是 Coolify 中保存 Compose 的 Service，不直接绑定 Git source；`main` 的 push 先运行 GitHub Actions `Tests`，测试成功后由 `deploy-haven` job 通过 Coolify API 把 `HAVEN_RELEASE_SHA` 更新为该次完整 commit SHA，再触发普通部署。测试失败或 pull request 不得触发正式部署，也不再以 Zeabur deployment 作为验收目标。
+- Brain 与 Gateway 的构建源共同读取必填的 `HAVEN_RELEASE_SHA`。自动发布必须继续固定完整 SHA，不得改为跟随 `main` 或 `latest`，也不得选择 `Restart (pull latest)`。自动化不可用时，才由用户在 Coolify `Ombre Brain → production → haven-test-stack → Environment Variables` 手动更新已验收的完整 SHA 后执行普通 Restart/Deploy。
 - 发布后必须查看构建/部署输出，确认目标 SHA 被采用，并等 Brain 与 Gateway 都恢复 `Running (healthy)`；只看到 GitHub push 成功不算部署完成。
 - 回滚时把 `HAVEN_RELEASE_SHA` 改回上一完整 SHA 后重新部署。旧代码可能与当前正式数据不兼容，实际回滚前必须再次取得用户确认，不得为了验证路径擅自让正式数据运行旧代码。
 - 每次涉及可部署代码的任务收尾，都要主动告诉用户“本次是否需要上线”。需要上线时给出上述点击路径；不需要上线时明确说“本次不用部署”。不得默认 commit/push 已经更新 VPS。

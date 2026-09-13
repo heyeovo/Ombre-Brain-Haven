@@ -204,6 +204,7 @@ class GatewayStateStore:
         lane_id: str,
         turn_id: int,
         turn_kind: str,
+        has_visible_assistant_message: bool,
         update: dict[str, Any],
         now_iso: str,
     ) -> dict[str, Any]:
@@ -249,6 +250,8 @@ class GatewayStateStore:
                 )[:80]
         else:
             values["last_heartbeat_at"] = model_activity_at or now_iso
+            if has_visible_assistant_message:
+                values["keepalive_paused_until_user"] = 0
             wake_cause = str(update.get("wake_cause") or "")
             wake_event = update.get("agent_wake") if isinstance(update.get("agent_wake"), dict) else {}
             wake_at = cls._agent_wake_timestamp(wake_event.get("at")) if wake_event.get("at") else ""
@@ -2604,6 +2607,9 @@ class GatewayStateStore:
                     lane_id=safe_lane_id,
                     turn_id=turn_id,
                     turn_kind=safe_turn_kind,
+                    has_visible_assistant_message=(
+                        safe_turn_kind == "agent_wake" and bool(str(assistant_text or "").strip())
+                    ),
                     update=wake_update,
                     now_iso=created_iso,
                 )

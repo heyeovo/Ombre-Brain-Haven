@@ -1295,7 +1295,7 @@ class GatewayStateContractsTest(unittest.TestCase):
             session_id="session-1",
             lane_id="subscription",
             expected_version=schedule["schedule_version"],
-            changes={"agent_wake_enabled": True},
+            changes={"agent_wake_enabled": True, "keepalive_paused_until_user": True},
         )
         at = datetime(2026, 8, 31, 13, 0, tzinfo=timezone.utc)
         result = store.commit_conversation_turn(
@@ -1322,6 +1322,10 @@ class GatewayStateContractsTest(unittest.TestCase):
         raw = json.loads(restored["raw_json"])
         self.assertEqual(raw["agent_wake"]["outcome"], "noop")
         self.assertEqual(raw["next_wake"]["reason"], "稍后再看")
+        unchanged = store.get_agent_wake_schedule(
+            profile_id="default", session_id="session-1", lane_id="subscription"
+        )
+        self.assertTrue(unchanged["keepalive_paused_until_user"])
 
     def test_agent_schedule_is_consumed_once_without_overwriting_a_new_decision(self):
         store = self.make_store()
@@ -1332,7 +1336,12 @@ class GatewayStateContractsTest(unittest.TestCase):
         store.patch_agent_wake_schedule(
             profile_id="default", session_id="session-1", lane_id="subscription",
             expected_version=schedule["schedule_version"],
-            changes={"agent_wake_enabled": True, "next_agent_wake_at": at.isoformat(), "wake_reason": "旧计划"},
+            changes={
+                "agent_wake_enabled": True,
+                "keepalive_paused_until_user": True,
+                "next_agent_wake_at": at.isoformat(),
+                "wake_reason": "旧计划",
+            },
         )
         store.commit_conversation_turn(
             profile_id="default", session_id="session-1", persona_id="ombre",
@@ -1351,6 +1360,7 @@ class GatewayStateContractsTest(unittest.TestCase):
         )
         self.assertEqual(updated["next_agent_wake_at"], (at + timedelta(minutes=20)).isoformat(timespec="seconds"))
         self.assertEqual(updated["wake_reason"], "新计划")
+        self.assertFalse(updated["keepalive_paused_until_user"])
 
     def test_silence_wake_never_samples_a_followup_silence_timer(self):
         store = self.make_store()

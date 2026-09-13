@@ -40,7 +40,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 |------|------|
 | `server.py` | **Brain** 入口（~640KB）。MCP 工具注册（`@mcp.custom_route`）+ REST API + 记忆核心 |
 | `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线 + cc 持久化路由（`Route()` 注册） |
-| `gateway_state.py` | Gateway/cc SQLite 状态：带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式、固定 handoff、版本化按天滚动配置及 turn watermark、每协作者唯一主窗标记、软删除防复活、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision、Context GC 配置/历史、按可见原文日期过滤的桶排除账本；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox |
+| `gateway_state.py` | Gateway/cc SQLite 状态：带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式、固定 handoff、版本化按天滚动配置及 turn watermark、每协作者唯一主窗标记、软删除防复活、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision、Context GC 配置/历史、按可见原文日期过滤的桶排除账本；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox，正式主动消息还会在该事务内解除缓存保活的临时暂停，no-op 不解除 |
 | `conversation_slice_store.py` | CC 自动聊天切片的独立 SQLite 契约：在 `gateway_state.db` 中维护版本化批次、切片、任务状态、CAS 重切 revision 与独立 embedding 元数据；负责永久消息规范化 hash、source/coverage 校验、幂等创建、原子激活、source 变化失效及窗口永久删除级联。本模块不调用模型、不做召回或 Context 注入 |
 | `conversation_slice_engine.py` | CC 自动聊天切片离线生成的未完成工作流：保留版本化硬约束、按 session 隔离的切片、slice-only、raw 退出入队、人工重切、最多 14 个真实聊天日的首批回填估算与显式任务执行；正式日回顾不调用本模块，后台暂不自动消费恢复队列，也不做召回或 Context 注入 |
 | `agent_wake_store.py` | CC 主动唤醒的 Haven 持久控制面：在 `gateway_state.db` 中维护 profile/session/lane 级 schedule、双开关、cache/agent/silence 时钟、版本 CAS、到期 claim、可恢复 lease 与幂等 wake run；只负责持久契约，不执行模型 turn |

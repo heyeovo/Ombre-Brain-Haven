@@ -42,7 +42,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线 + cc 持久化路由（`Route()` 注册） |
 | `gateway_state.py` | Gateway/cc SQLite 状态：带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式、固定 handoff、版本化按天滚动配置及 turn watermark、每协作者唯一主窗标记、软删除防复活、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision、Context GC 配置/历史、按可见原文日期过滤的桶排除账本；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox |
 | `conversation_slice_store.py` | CC 自动聊天切片的独立 SQLite 契约：在 `gateway_state.db` 中维护版本化批次、切片、任务状态、CAS 重切 revision 与独立 embedding 元数据；负责永久消息规范化 hash、source/coverage 校验、幂等创建、原子激活、source 变化失效及窗口永久删除级联。本模块不调用模型、不做召回或 Context 注入 |
-| `conversation_slice_engine.py` | CC 自动聊天切片离线生成：以版本化硬约束/风格 Prompt 联合生成日回顾与按 session 隔离的切片，支持 slice-only 恢复、raw 退出入队、人工重切、最多 14 个真实聊天日的首批回填估算与任务执行；不做召回或 Context 注入 |
+| `conversation_slice_engine.py` | CC 自动聊天切片离线生成的未完成工作流：保留版本化硬约束、按 session 隔离的切片、slice-only、raw 退出入队、人工重切、最多 14 个真实聊天日的首批回填估算与显式任务执行；正式日回顾不调用本模块，后台暂不自动消费恢复队列，也不做召回或 Context 注入 |
 | `agent_wake_store.py` | CC 主动唤醒的 Haven 持久控制面：在 `gateway_state.db` 中维护 profile/session/lane 级 schedule、双开关、cache/agent/silence 时钟、版本 CAS、到期 claim、可恢复 lease 与幂等 wake run；只负责持久契约，不执行模型 turn |
 | `agent_wake_scheduler.py` | CC 主动唤醒的 30 秒持久调度桥：领取 Haven due schedule，以独立 Bearer callback 调用 Dashboard 后台 runner，并把完成、deferred、失败与重试状态写回 wake run |
 | `bark_notifications.py` | profile 级 Bark 私密配置、持久 notification outbox 与独立发送 worker；按已保存 `display_segments` 顺序推送，支持幂等、lease、失败重试、重启恢复、deep link、正文隐藏和 AES-128-CBC 加密 |
@@ -353,7 +353,7 @@ dashboards 的 `/api/gateway/[...path]` 代理到这些路由，Bearer 网关鉴
 
 自动聊天切片同样使用 `gateway_state.db`，但不进入任何 bucket 表：`conversation_slice_batches` 保存包含合法 0 切片结果的不可变版本批次，`conversation_slices` 保存同一 session/chat day 内连续且不重叠的永久 message ID 范围，`conversation_slice_tasks` 保存任务幂等状态、消息/token/调用预估和运行时间，`conversation_slice_revisions` 用 `BEGIN IMMEDIATE` + expected revision 分配人工重切序号，`conversation_slice_embeddings` 只预留独立 slice embedding 元数据。source hash 使用固定顺序 JSON，仅包含永久 message ID、角色、最终可见正文及已绑定附件 ID/SHA-256；不含 thinking、工具日志、重试或更新时间。批次完整校验后才在单事务替换上一 active；失败保持旧 active。source hash 改变会令旧切片 `source_changed` 并退出 active 读取；排队后 source 改变的任务不会调用模型，会失败并为新快照创建恢复任务。窗口软删除只动态停止切片资格，数据保留；永久删除在同一 profile/session 事务内清理批次、切片、任务、revision 和 embedding。
 
-日界后的正常路径由 `ConversationSliceEngine.generate_daily_bundle()` 一次读取全日材料、一次模型调用返回日回顾与按 session 隔离的切片，两类产物分别校验和保存；已有或人工编辑过的日回顾走 slice-only，不被切片重跑覆盖。切片失败只排 `slice_recovery`，从原文态退出只排 `raw_exit`，两者由持久调度限量执行。`/api/conversation-slices` 提供离线检查和人工任务控制；历史任务先返回消息数、估算输入 token、预计调用次数及签名，确认签名后只创建 queued 任务，首批最多 14 个真实聊天日。当前仍没有切片关键词/向量召回、召回透镜线路或正式 Context 注入。
+正式日回顾的定时与手动入口直接调用 `DailyReviewEngine.generate()`，不经过切片联合 JSON。`ConversationSliceEngine.generate_daily_bundle()` 作为未完成能力保留，但不接入正式日界任务；从原文态退出仍只排 `raw_exit`，切片失败仍可排 `slice_recovery`，后台暂不自动消费这两类队列，只有 `/api/conversation-slices` 的人工任务控制会显式运行。历史任务先返回消息数、估算输入 token、预计调用次数及签名，确认签名后只创建 queued 任务，首批最多 14 个真实聊天日。当前仍没有切片关键词/向量召回、召回透镜线路或正式 Context 注入。
 
 Dashboard 从窗口状态恢复最后活跃 CC lane、Persona、冻结 prompt 与 resume id，通过统一协调器串行进入同一个 Agent SDK iterator；成功用户/wake turn 在 Haven 单事务提交消息、活动/cache 时间、turn-local wake 决定和 silence timer。Haven Brain 每 30 秒按持久 `due_at` 领取任务，Dashboard 取得后台协调器门禁后再原子 begin；旧 version、无效 silence 来源、重复 callback、过期 lease、失败退避、24 小时无用户活动和滚动后台 turn 上限均由持久状态恢复与约束。
 

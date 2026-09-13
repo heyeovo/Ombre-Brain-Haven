@@ -520,6 +520,60 @@ class WeeklyJourneyEngineContractsTest(unittest.IsolatedAsyncioTestCase):
 
 
 class AutomationRoutesContractTest(unittest.IsolatedAsyncioTestCase):
+    async def test_manual_daily_review_uses_plain_review_engine_not_slice_bundle(self):
+        class FakeJSONResponse:
+            def __init__(self, body, status_code=200):
+                self.body = body
+                self.status_code = status_code
+
+        daily_engine = SimpleNamespace(generate=AsyncMock(return_value={
+            "status": "created",
+            "review": {"review_date": "2026-09-12", "content": "独立日回顾正文"},
+        }))
+        slice_engine = SimpleNamespace(generate_daily_bundle=AsyncMock())
+        store = SimpleNamespace(
+            start_execution=lambda **kwargs: {"execution_id": "execution-1"},
+            finish_execution=lambda execution_id, **kwargs: {
+                "execution_id": execution_id,
+                "status": kwargs["status"],
+            },
+        )
+        route = load_server_function("api_daily_reviews_run", {
+            "_require_dashboard_auth": lambda request: None,
+            "daily_review_engine": daily_engine,
+            "conversation_slice_engine": slice_engine,
+            "daily_review_model_router": SimpleNamespace(
+                choice=lambda: {"engine": "pro", "model": "claude-sonnet-4-6"},
+            ),
+            "automation_store": store,
+            "DAILY_REVIEW_TASK_TYPE": "daily_review",
+            "persona_engine": SimpleNamespace(profile_id="default"),
+            "_bool_value": lambda value, default=False: bool(value),
+            "logger": SimpleNamespace(warning=lambda *args: None),
+        })
+        request = SimpleNamespace(json=AsyncMock(return_value={
+            "persona_id": "yan-zhi",
+            "review_date": "2026-09-12",
+            "force": True,
+        }))
+        fake_responses = SimpleNamespace(JSONResponse=FakeJSONResponse)
+        with patch.dict(sys.modules, {
+            "starlette": SimpleNamespace(responses=fake_responses),
+            "starlette.responses": fake_responses,
+        }):
+            response = await route(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.body["review"]["content"], "独立日回顾正文")
+        daily_engine.generate.assert_awaited_once_with(
+            profile_id="default",
+            persona_id="yan-zhi",
+            review_date="2026-09-12",
+            force=True,
+            override_user_edit=False,
+        )
+        slice_engine.generate_daily_bundle.assert_not_awaited()
+
     async def test_public_run_exposes_snapshot_evidence_names_without_content(self):
         public_run = load_server_function("_automation_public_run", {})
         result = public_run({

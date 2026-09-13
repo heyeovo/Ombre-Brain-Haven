@@ -13937,11 +13937,11 @@ async def api_daily_reviews_run(request):
         model=choice["model"],
     )
     try:
-        result = await conversation_slice_engine.generate_daily_bundle(
+        result = await daily_review_engine.generate(
             profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
             persona_id=persona_id,
             review_date=review_date,
-            force_daily_review=_bool_value(body.get("force"), False),
+            force=_bool_value(body.get("force"), False),
             override_user_edit=_bool_value(body.get("override_user_edit"), False),
         )
     except Exception as exc:
@@ -13957,7 +13957,7 @@ async def api_daily_reviews_run(request):
     execution = automation_store.finish_execution(
         execution["execution_id"],
         status="failed" if failed else "completed",
-        error_code="conversation_slice_generation_failed" if failed else "",
+        error_code="daily_review_generation_failed" if failed else "",
         error=str(result.get("reason") or "") if failed else "",
     )
     return JSONResponse({**result, "execution": execution}, status_code=500 if failed else 200)
@@ -16784,14 +16784,8 @@ if __name__ == "__main__":
                                 message_client=local_router,
                             )
                             review_date = (due_at.astimezone(ZoneInfo(AUTOMATION_TIMEZONE)).date() - timedelta(days=1)).isoformat()
-                            local_slice_engine = ConversationSliceEngine(
-                                config,
-                                local_store,
-                                message_client=local_router,
-                                daily_review_engine=local_engine,
-                            )
                             results = [
-                                await local_slice_engine.generate_daily_bundle(
+                                await local_engine.generate(
                                     profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
                                     persona_id=str(persona.get("id") or ""),
                                     review_date=review_date,
@@ -16853,15 +16847,9 @@ if __name__ == "__main__":
                                 )
                             except Exception:
                                 automation_store.release_task_lease(task_type=task_type, owner=owner)
-                try:
-                    recovery_results = await conversation_slice_engine.run_recovery(
-                        profile_id=str(getattr(persona_engine, "profile_id", "") or "default"),
-                        limit=2,
-                    )
-                    if recovery_results:
-                        logger.info("Conversation slice recovery results: %s", recovery_results)
-                except Exception as e:
-                    logger.warning("Conversation slice recovery failed: %s", e)
+                # Conversation slicing is still an unfinished, manually inspected workflow.
+                # Keep queued tasks and explicit run controls available, but do not spend
+                # automation-model quota or couple failures to production automations yet.
                 await asyncio.sleep(30)
 
         def _start_automation_scheduler():

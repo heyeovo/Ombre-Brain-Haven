@@ -577,6 +577,79 @@ class GatewayStateContractsTest(unittest.TestCase):
             {},
         )
 
+    def test_cc_lane_never_advances_revision_without_matching_session_id(self):
+        store = self.make_store()
+        self.commit(
+            store,
+            request_id="rolling-complete",
+            expected=0,
+            source="cc",
+            raw_json=json.dumps(
+                {
+                    "cred_mode": "subscription",
+                    "cc_session_id": "rolling-session-v1",
+                    "rolling_context_revision": 1,
+                }
+            ),
+        )
+        self.commit(
+            store,
+            request_id="rolling-missing-session",
+            expected=1,
+            source="cc",
+            raw_json=json.dumps(
+                {
+                    "cred_mode": "subscription",
+                    "rolling_context_revision": 2,
+                }
+            ),
+        )
+
+        lane = store.get_conversation_session_state(
+            profile_id="default", session_id="session-1"
+        )["cc_lanes"]["subscription"]
+        self.assertEqual(lane["seen_round_id"], 2)
+        self.assertEqual(lane["cc_session_id"], "rolling-session-v1")
+        self.assertEqual(lane["context_revision"], 1)
+
+    def test_cc_lane_retains_the_previous_complete_resume_checkpoint(self):
+        store = self.make_store()
+        self.commit(
+            store,
+            request_id="rolling-v1",
+            expected=0,
+            source="cc",
+            raw_json=json.dumps(
+                {
+                    "cred_mode": "subscription",
+                    "cc_session_id": "rolling-session-v1",
+                    "rolling_context_revision": 1,
+                }
+            ),
+        )
+        self.commit(
+            store,
+            request_id="rolling-v2",
+            expected=1,
+            source="cc",
+            raw_json=json.dumps(
+                {
+                    "cred_mode": "subscription",
+                    "cc_session_id": "rolling-session-v2",
+                    "rolling_context_revision": 2,
+                }
+            ),
+        )
+
+        lane = store.get_conversation_session_state(
+            profile_id="default", session_id="session-1"
+        )["cc_lanes"]["subscription"]
+        self.assertEqual(lane["cc_session_id"], "rolling-session-v2")
+        self.assertEqual(lane["context_revision"], 2)
+        self.assertEqual(lane["previous_cc_session_id"], "rolling-session-v1")
+        self.assertEqual(lane["previous_context_revision"], 1)
+        self.assertEqual(lane["previous_seen_round_id"], 1)
+
     def test_context_gc_preferences_and_lane_switch_are_profile_scoped_and_atomic(self):
         store = self.make_store()
         self.commit(

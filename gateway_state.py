@@ -2457,17 +2457,30 @@ class GatewayStateStore:
                 effort = str(settings.get("effort") or "").strip()[:40]
                 thinking = settings.get("thinking_on") is not False
                 lane_state = self._json_object(next_cc_lanes.get(lane_id))
+                prior_lane_seen_round_id = max(0, int(lane_state.get("seen_round_id") or 0))
                 lane_state.update(
                     {
                         "cred": cred_mode,
                         "provider_id": provider_id,
                         "model": model_name,
                         "seen_round_id": next_round,
-                        "context_revision": max(0, int(raw_payload.get("rolling_context_revision") or 0)),
                     }
                 )
                 if cc_session_id:
+                    # Claude session id 与它对应的 rolling revision 是同一个恢复指针。
+                    # 未拿到新 session id 时只推进消息游标，不得让 revision
+                    # 单独跳到新版本后继续指向旧 transcript。
+                    previous_cc_session_id = str(lane_state.get("cc_session_id") or "").strip()
+                    if previous_cc_session_id and previous_cc_session_id != cc_session_id:
+                        lane_state["previous_cc_session_id"] = previous_cc_session_id
+                        lane_state["previous_context_revision"] = max(
+                            0, int(lane_state.get("context_revision") or 0)
+                        )
+                        lane_state["previous_seen_round_id"] = prior_lane_seen_round_id
                     lane_state["cc_session_id"] = cc_session_id
+                    lane_state["context_revision"] = max(
+                        0, int(raw_payload.get("rolling_context_revision") or 0)
+                    )
                 next_cc_lanes[lane_id] = lane_state
                 subscription = self._json_object(next_cc_overrides.get("subscription"))
                 api = self._json_object(next_cc_overrides.get("api"))

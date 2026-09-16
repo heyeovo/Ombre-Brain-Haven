@@ -2717,6 +2717,51 @@ class GatewayStateStore:
             if str(row["bucket_id"] or "").strip()
         }
 
+    def get_session_bucket_exclusion_history(
+        self,
+        *,
+        profile_id: str,
+        session_id: str,
+        bucket_ids: set[str],
+        visible_chat_days: set[str] | None = None,
+        timezone_name: str = "Asia/Shanghai",
+        day_start_hour: int = 4,
+    ) -> dict[str, list[dict[str, str]]]:
+        """Explain persisted exclusion records without changing recall eligibility."""
+        ids = {str(item).strip() for item in bucket_ids if str(item).strip()}
+        if not session_id or not ids:
+            return {}
+        conn = self._connect()
+        try:
+            recalled = conn.execute(
+                "SELECT bucket_id, injected_at FROM injected_buckets WHERE session_id = ?",
+                (session_id,),
+            ).fetchall()
+            created = conn.execute(
+                """SELECT bucket_id, created_at FROM session_created_buckets
+                   WHERE profile_id = ? AND session_id = ?""",
+                (profile_id, session_id),
+            ).fetchall()
+        finally:
+            conn.close()
+        details: dict[str, list[dict[str, str]]] = {}
+        for kind, rows, time_key in (
+            ("recalled", recalled, "injected_at"),
+            ("created", created, "created_at"),
+        ):
+            for row in rows:
+                bucket_id = str(row["bucket_id"] or "").strip()
+                if bucket_id not in ids:
+                    continue
+                chat_day = _conversation_chat_day(row[time_key], timezone_name, day_start_hour)
+                if visible_chat_days is not None and chat_day not in visible_chat_days:
+                    continue
+                entry = {"kind": kind, "chat_day": chat_day}
+                bucket_details = details.setdefault(bucket_id, [])
+                if entry not in bucket_details:
+                    bucket_details.append(entry)
+        return details
+
     def import_conversation_archive(
         self,
         *,

@@ -413,6 +413,21 @@ class RecallCardRenderingContractsTest(unittest.TestCase):
             {"returned", "new-hold"},
         )
         self.assertEqual(candidates, [{"id": "eligible"}])
+        debug = GatewayService._preexcluded_recall_bucket_debug(
+            [
+                {"id": "returned", "metadata": {"name": "旧召回"}},
+                {"id": "new-hold", "metadata": {"name": "钉选"}},
+                {"id": "eligible"},
+            ],
+            {"returned", "new-hold"},
+            {"returned": [{"kind": "recalled", "chat_day": "2026-09-15"}]},
+        )
+        self.assertEqual(debug, [
+            {"bucket_id": "returned", "bucket_name": "旧召回", "exclusion_history": [
+                {"kind": "recalled", "chat_day": "2026-09-15"},
+            ]},
+            {"bucket_id": "new-hold", "bucket_name": "钉选", "exclusion_history": []},
+        ])
 
     def test_explicit_related_edges_render_as_one_short_line_with_names_and_ids(self):
         service = GatewayService.__new__(GatewayService)

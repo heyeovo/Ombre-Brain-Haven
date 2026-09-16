@@ -515,6 +515,19 @@ class GatewayStateContractsTest(unittest.TestCase):
             ),
             {"visible-recall", "visible-created"},
         )
+        self.assertEqual(
+            store.get_session_bucket_exclusion_history(
+                profile_id="default",
+                session_id="session-1",
+                bucket_ids={"visible-recall", "visible-created", "summarized-recall"},
+                visible_chat_days={"2026-09-12"},
+            ),
+            {
+                "visible-recall": [{"kind": "recalled", "chat_day": "2026-09-12"}],
+                "visible-created": [{"kind": "created", "chat_day": "2026-09-12"}],
+            },
+        )
+
     def test_cc_lanes_keep_independent_resume_points_and_cursors(self):
         store = self.make_store()
         api_raw = json.dumps(

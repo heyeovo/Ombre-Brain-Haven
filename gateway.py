@@ -20726,6 +20726,41 @@ class GatewayService:
                 },
             })
         search_query = self._dynamic_recall_search_query(domain_query or query, memory_sentinel_debug)
+        preexcluded_buckets: list[dict[str, Any]] = []
+        if exclude_ids:
+            exclusion_history: dict[str, list[dict[str, str]]] = {}
+            try:
+                state = self.state_store.get_conversation_session_state(
+                    profile_id=self._conversation_profile_id, session_id=session_id,
+                ) or {}
+                rolling = state.get("rolling_context") if isinstance(state.get("rolling_context"), dict) else {}
+                visible_chat_days: set[str] | None = None
+                if rolling.get("strategy") == "daily_rolling":
+                    modes = rolling.get("day_modes") if isinstance(rolling.get("day_modes"), dict) else {}
+                    context_days = self.state_store.list_conversation_context_days(
+                        profile_id=self._conversation_profile_id,
+                        session_id=session_id,
+                        persona_id=str(state.get("persona_id") or "ombre"),
+                    )
+                    visible_chat_days = {
+                        str(item.get("day") or "")
+                        for item in context_days
+                        if int(item.get("turn_count") or 0) > 0
+                        and str(modes.get(str(item.get("day") or "")) or "raw") == "raw"
+                    }
+                exclusion_history = self.state_store.get_session_bucket_exclusion_history(
+                    profile_id=self._conversation_profile_id,
+                    session_id=session_id,
+                    bucket_ids=exclude_ids,
+                    visible_chat_days=visible_chat_days,
+                    timezone_name=str(rolling.get("timezone") or "Asia/Shanghai"),
+                    day_start_hour=int(rolling.get("day_start_hour") or 4),
+                )
+            except Exception as exc:
+                logger.warning("Gateway recall exclusion history unavailable | session=%s error=%s", session_id, exc)
+            preexcluded_buckets = self._preexcluded_recall_bucket_debug(
+                all_buckets, exclude_ids, exclusion_history,
+            )
         recall_candidate_buckets = self._without_excluded_recall_buckets(all_buckets, exclude_ids)
         selected_buckets, suppressed_buckets, query_planner_debug = await self._select_dynamic_buckets(
             query,
@@ -20781,6 +20816,8 @@ class GatewayService:
                 self._format_suppressed_bucket_debug(item, query=query)
                 for item in (suppressed_buckets or [])[:20]
             ],
+            "preexcluded_bucket_candidates": preexcluded_buckets[:50],
+            "preexcluded_bucket_count": len(preexcluded_buckets),
             "hook_recall_debug": {
                 "mode": "fast_bucket",
                 "search_query": search_query,
@@ -20904,6 +20941,28 @@ class GatewayService:
             ]
             output.append(enriched)
         return output
+
+    @staticmethod
+    def _preexcluded_recall_bucket_debug(
+        all_buckets: list[dict],
+        exclude_ids: set[str] | None,
+        history: dict[str, list[dict[str, str]]],
+    ) -> list[dict[str, Any]]:
+        excluded = set(exclude_ids or ())
+        rows: list[dict[str, Any]] = []
+        for bucket in all_buckets or []:
+            if not isinstance(bucket, dict):
+                continue
+            bucket_id = str(bucket.get("id") or "")
+            if bucket_id not in excluded:
+                continue
+            metadata = bucket.get("metadata") if isinstance(bucket.get("metadata"), dict) else {}
+            rows.append({
+                "bucket_id": bucket_id,
+                "bucket_name": str(metadata.get("name") or bucket.get("name") or bucket_id),
+                "exclusion_history": history.get(bucket_id, []),
+            })
+        return rows
 
     @staticmethod
     def _without_excluded_recall_buckets(

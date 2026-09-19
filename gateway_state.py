@@ -145,6 +145,8 @@ class GatewayStateStore:
             and str(values.get("conversation_silence_check_at") or "")
         ):
             candidates.append(str(values["conversation_silence_check_at"]))
+        if bool(values.get("agent_wake_enabled")) and str(values.get("followup_at") or ""):
+            candidates.append(str(values["followup_at"]))
         return min(candidates) if candidates else ""
 
     @staticmethod
@@ -161,6 +163,8 @@ class GatewayStateStore:
             ("schedule_version", 0), ("background_turn_limit", 48),
             ("agent_wake_min_minutes", 10), ("silence_min_minutes", 8),
             ("silence_max_minutes", 25), ("silence_source_turn_id", 0),
+            ("followup_source_turn_id", 0), ("followup_min_minutes", 3),
+            ("followup_max_count", 3), ("followup_count", 0),
             ("consecutive_failures", 0),
         ):
             payload[key] = int(payload.get(key) or fallback)
@@ -259,14 +263,21 @@ class GatewayStateStore:
                 values["conversation_silence_check_at"] = ""
                 values["silence_source_turn_id"] = 0
                 values["silence_policy_version"] = ""
+            elif wake_cause == "agent_followup":
+                values["followup_at"] = ""
+                values["followup_source_turn_id"] = 0
+                values["followup_count"] = int(values.get("followup_count") or 0) + 1
             elif wake_cause == "agent_schedule" and wake_at and str(values.get("next_agent_wake_at") or "") == wake_at:
                 values["next_agent_wake_at"] = ""
                 values["wake_reason"] = ""
             elif wake_cause == "cache_keepalive" and not cache_refresh_at:
-                # A successful model turn without confirmed cache usage must not spin
-                # forever on the already-expired keepalive deadline.
                 values["cache_keepalive_deadline"] = ""
                 values["cache_state"] = "cold"
+
+        if turn_kind == "user":
+            values["followup_at"] = ""
+            values["followup_source_turn_id"] = 0
+            values["followup_count"] = 0
 
         decision = update.get("wake_decision")
         if isinstance(decision, dict):
@@ -274,9 +285,15 @@ class GatewayStateStore:
             if action == "cancel":
                 values["next_agent_wake_at"] = ""
                 values["wake_reason"] = ""
+                values["followup_at"] = ""
+                values["followup_source_turn_id"] = 0
+                values["followup_count"] = 0
             elif action == "schedule" and bool(values.get("agent_wake_enabled")):
                 values["next_agent_wake_at"] = cls._agent_wake_timestamp(decision.get("at"))
                 values["wake_reason"] = str(decision.get("reason") or "").strip()[:90]
+            elif action == "followup" and bool(values.get("agent_wake_enabled")):
+                values["followup_at"] = cls._agent_wake_timestamp(decision.get("at"))
+                values["followup_source_turn_id"] = int(turn_id)
 
         values["due_at"] = cls._agent_wake_due_at(values)
         conn.execute(
@@ -286,7 +303,9 @@ class GatewayStateStore:
                 last_model_activity_at = ?, last_cache_refresh_at = ?, last_heartbeat_at = ?,
                 next_agent_wake_at = ?, wake_reason = ?,
                 conversation_silence_check_at = ?, silence_source_turn_id = ?,
-                silence_policy_version = ?, cache_keepalive_deadline = ?, due_at = ?,
+                silence_policy_version = ?, cache_keepalive_deadline = ?,
+                followup_at = ?, followup_source_turn_id = ?, followup_count = ?,
+                due_at = ?,
                 cache_state = ?, retry_at = '', consecutive_failures = 0, last_error = '',
                 schedule_version = schedule_version + 1,
                 lease_owner = '', lease_until = '', updated_at = ?
@@ -302,7 +321,11 @@ class GatewayStateStore:
                 str(values.get("conversation_silence_check_at") or ""),
                 int(values.get("silence_source_turn_id") or 0),
                 str(values.get("silence_policy_version") or ""),
-                str(values.get("cache_keepalive_deadline") or ""), str(values.get("due_at") or ""),
+                str(values.get("cache_keepalive_deadline") or ""),
+                str(values.get("followup_at") or ""),
+                int(values.get("followup_source_turn_id") or 0),
+                int(values.get("followup_count") or 0),
+                str(values.get("due_at") or ""),
                 str(values.get("cache_state") or "unarmed"), now_iso,
                 profile_id, session_id, lane_id,
             ),
@@ -2100,6 +2123,8 @@ class GatewayStateStore:
             "next_agent_wake_at", "wake_reason", "agent_wake_min_minutes",
             "silence_min_minutes", "silence_max_minutes", "background_turn_limit",
             "conversation_silence_check_at", "silence_source_turn_id", "silence_policy_version",
+            "followup_at", "followup_source_turn_id", "followup_min_minutes",
+            "followup_max_count", "followup_count",
         }
         unknown = set(changes) - allowed
         if unknown:
@@ -2121,7 +2146,7 @@ class GatewayStateStore:
                     "conversation_silence_enabled", "bark_notification_enabled",
                 }:
                     values[key] = int(bool(value))
-                elif key in {"next_agent_wake_at", "conversation_silence_check_at"}:
+                elif key in {"next_agent_wake_at", "conversation_silence_check_at", "followup_at"}:
                     values[key] = self._agent_wake_timestamp(value)
                 elif key == "wake_reason":
                     reason = str(value or "").strip()
@@ -2140,6 +2165,12 @@ class GatewayStateStore:
                         raise ValueError("background_turn_limit cannot be negative")
                     if key == "silence_source_turn_id" and number < 0:
                         raise ValueError("silence_source_turn_id cannot be negative")
+                    if key == "followup_min_minutes" and not 1 <= number <= 60:
+                        raise ValueError("followup_min_minutes must be between 1 and 60")
+                    if key == "followup_max_count" and not 1 <= number <= 10:
+                        raise ValueError("followup_max_count must be between 1 and 10")
+                    if key in {"followup_source_turn_id", "followup_count"} and number < 0:
+                        raise ValueError(f"{key} cannot be negative")
                     values[key] = number
             if not bool(values.get("conversation_silence_enabled")):
                 values["conversation_silence_check_at"] = ""
@@ -2156,6 +2187,8 @@ class GatewayStateStore:
                     next_agent_wake_at = ?, wake_reason = ?, agent_wake_min_minutes = ?,
                     silence_min_minutes = ?, silence_max_minutes = ?, background_turn_limit = ?,
                     conversation_silence_check_at = ?, silence_source_turn_id = ?, silence_policy_version = ?,
+                    followup_at = ?, followup_source_turn_id = ?,
+                    followup_min_minutes = ?, followup_max_count = ?, followup_count = ?,
                     due_at = ?, retry_at = '', consecutive_failures = 0, last_error = '',
                     schedule_version = schedule_version + 1,
                     lease_owner = '', lease_until = '', updated_at = ?
@@ -2174,6 +2207,11 @@ class GatewayStateStore:
                     str(values.get("conversation_silence_check_at") or ""),
                     int(values.get("silence_source_turn_id") or 0),
                     str(values.get("silence_policy_version") or ""),
+                    str(values.get("followup_at") or ""),
+                    int(values.get("followup_source_turn_id") or 0),
+                    int(values.get("followup_min_minutes") or 3),
+                    int(values.get("followup_max_count") or 3),
+                    int(values.get("followup_count") or 0),
                     str(values.get("due_at") or ""), now_iso,
                     profile, session, lane,
                 ),
@@ -2220,13 +2258,18 @@ class GatewayStateStore:
                 values["silence_policy_version"] = ""
             values["last_user_activity_at"] = activity_iso
             values["keepalive_paused_until_user"] = 0
+            values["followup_at"] = ""
+            values["followup_source_turn_id"] = 0
+            values["followup_count"] = 0
             values["due_at"] = self._agent_wake_due_at(values)
             conn.execute(
                 """
                 UPDATE agent_wake_schedules
                 SET last_user_activity_at = ?, keepalive_paused_until_user = 0,
                     conversation_silence_check_at = ?, silence_source_turn_id = ?,
-                    silence_policy_version = ?, due_at = ?,
+                    silence_policy_version = ?,
+                    followup_at = '', followup_source_turn_id = 0, followup_count = 0,
+                    due_at = ?,
                     retry_at = '', consecutive_failures = 0, last_error = '',
                     schedule_version = schedule_version + 1,
                     lease_owner = '', lease_until = '', updated_at = ?

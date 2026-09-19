@@ -52,6 +52,7 @@ class AgentWakeScheduler:
             "due_at": run["due_at"],
             "reason": schedule.get("wake_reason", "") if run["cause"] == "agent_schedule" else "",
             "silence_source_turn_id": schedule.get("silence_source_turn_id", 0),
+            "followup_source_turn_id": schedule.get("followup_source_turn_id", 0),
         }
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:

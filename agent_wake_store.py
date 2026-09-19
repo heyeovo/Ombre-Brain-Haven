@@ -128,6 +128,11 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
             "agent_wake_min_minutes": "INTEGER NOT NULL DEFAULT 10",
             "silence_min_minutes": "INTEGER NOT NULL DEFAULT 8",
             "silence_max_minutes": "INTEGER NOT NULL DEFAULT 25",
+            "followup_at": "TEXT NOT NULL DEFAULT ''",
+            "followup_source_turn_id": "INTEGER NOT NULL DEFAULT 0",
+            "followup_min_minutes": "INTEGER NOT NULL DEFAULT 3",
+            "followup_max_count": "INTEGER NOT NULL DEFAULT 3",
+            "followup_count": "INTEGER NOT NULL DEFAULT 0",
             "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
             "last_error": "TEXT NOT NULL DEFAULT ''",
             "gc_eligible_at": "TEXT NOT NULL DEFAULT ''",
@@ -264,6 +269,7 @@ class AgentWakeStore:
         "next_agent_wake_at",
         "conversation_silence_check_at",
         "cache_keepalive_deadline",
+        "followup_at",
         "retry_at",
         "gc_eligible_at",
     }
@@ -276,6 +282,10 @@ class AgentWakeStore:
         "agent_wake_min_minutes",
         "silence_min_minutes",
         "silence_max_minutes",
+        "followup_source_turn_id",
+        "followup_min_minutes",
+        "followup_max_count",
+        "followup_count",
         "consecutive_failures",
         "last_error",
     }
@@ -322,6 +332,8 @@ class AgentWakeStore:
             and str(values.get("conversation_silence_check_at") or "")
         ):
             candidates.append(str(values["conversation_silence_check_at"]))
+        if bool(values.get("agent_wake_enabled")) and str(values.get("followup_at") or ""):
+            candidates.append(str(values["followup_at"]))
         return min(candidates) if candidates else ""
 
     @staticmethod
@@ -337,6 +349,10 @@ class AgentWakeStore:
         payload["silence_min_minutes"] = int(payload.get("silence_min_minutes") or 8)
         payload["silence_max_minutes"] = int(payload.get("silence_max_minutes") or 25)
         payload["silence_source_turn_id"] = int(payload.get("silence_source_turn_id") or 0)
+        payload["followup_source_turn_id"] = int(payload.get("followup_source_turn_id") or 0)
+        payload["followup_min_minutes"] = int(payload.get("followup_min_minutes") or 3)
+        payload["followup_max_count"] = int(payload.get("followup_max_count") or 3)
+        payload["followup_count"] = int(payload.get("followup_count") or 0)
         payload["consecutive_failures"] = int(payload.get("consecutive_failures") or 0)
         return payload
 
@@ -383,6 +399,11 @@ class AgentWakeStore:
             "agent_wake_min_minutes": 10,
             "silence_min_minutes": 8,
             "silence_max_minutes": 25,
+            "followup_at": "",
+            "followup_source_turn_id": 0,
+            "followup_min_minutes": 3,
+            "followup_max_count": 3,
+            "followup_count": 0,
             "consecutive_failures": 0,
             "last_error": "",
             "retry_at": "",
@@ -508,6 +529,8 @@ class AgentWakeStore:
             elif key in {
                 "background_turn_limit", "consecutive_failures", "silence_source_turn_id",
                 "agent_wake_min_minutes", "silence_min_minutes", "silence_max_minutes",
+                "followup_source_turn_id", "followup_min_minutes", "followup_max_count",
+                "followup_count",
             }:
                 number = int(value)
                 if number < 0:
@@ -516,6 +539,10 @@ class AgentWakeStore:
                     raise ValueError("agent_wake_min_minutes must be between 1 and 10080")
                 if key in {"silence_min_minutes", "silence_max_minutes"} and not 1 <= number <= 24 * 60:
                     raise ValueError(f"{key} must be between 1 and 1440")
+                if key == "followup_min_minutes" and not 1 <= number <= 60:
+                    raise ValueError("followup_min_minutes must be between 1 and 60")
+                if key == "followup_max_count" and not 1 <= number <= 10:
+                    raise ValueError("followup_max_count must be between 1 and 10")
                 normalized[key] = number
             elif key == "silence_policy_version":
                 normalized[key] = str(value or "").strip()[:80]
@@ -644,6 +671,8 @@ class AgentWakeStore:
     @staticmethod
     def _cause(row: sqlite3.Row) -> str:
         due_at = str(row["due_at"] or "")
+        if str(row["followup_at"] or "") == due_at:
+            return "agent_followup"
         if str(row["conversation_silence_check_at"] or "") == due_at:
             return "conversation_silence"
         if str(row["next_agent_wake_at"] or "") == due_at:
@@ -901,6 +930,49 @@ class AgentWakeStore:
                              AND schedule_version = ? AND lease_owner = ?""",
                         (
                             self._computed_due_at({**dict(schedule), "conversation_silence_check_at": ""}),
+                            now_iso, run["profile_id"], run["session_id"], run["lane_id"],
+                            run["schedule_version"], safe_owner,
+                        ),
+                    )
+                    conn.commit()
+                    return {"status": "superseded", "run": self.get_run(str(wake_id))}
+
+            if str(run["cause"]) == "agent_followup":
+                source_turn_id = int(schedule["followup_source_turn_id"] or 0)
+                later_user = conn.execute(
+                    """
+                    SELECT 1 FROM conversation_turns
+                    WHERE profile_id = ? AND session_id = ? AND turn_kind = 'user' AND id > ?
+                    LIMIT 1
+                    """,
+                    (run["profile_id"], run["session_id"], source_turn_id),
+                ).fetchone()
+                max_count = int(schedule["followup_max_count"] or 3)
+                current_count = int(schedule["followup_count"] or 0)
+                valid_followup = (
+                    later_user is None
+                    and source_turn_id > 0
+                    and current_count < max_count
+                    and bool(schedule["agent_wake_enabled"])
+                    and str(schedule["followup_at"] or "") == str(run["due_at"])
+                )
+                if not valid_followup:
+                    reason = "user_replied" if later_user else "followup_invalid"
+                    conn.execute(
+                        """UPDATE agent_wake_runs
+                           SET status = 'superseded', completed_at = ?, error = ?, updated_at = ?
+                           WHERE wake_id = ?""",
+                        (now_iso, reason, now_iso, str(wake_id)),
+                    )
+                    conn.execute(
+                        """UPDATE agent_wake_schedules
+                           SET followup_at = '', followup_source_turn_id = 0,
+                               followup_count = 0, due_at = ?,
+                               lease_owner = '', lease_until = '', updated_at = ?
+                           WHERE profile_id = ? AND session_id = ? AND lane_id = ?
+                             AND schedule_version = ? AND lease_owner = ?""",
+                        (
+                            self._computed_due_at({**dict(schedule), "followup_at": ""}),
                             now_iso, run["profile_id"], run["session_id"], run["lane_id"],
                             run["schedule_version"], safe_owner,
                         ),

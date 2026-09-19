@@ -396,6 +396,9 @@ class GatewayStateContractsTest(unittest.TestCase):
                 "day_start_hour": 4,
                 "day_modes": {"2026-09-10": "review", "2026-09-11": "raw"},
                 "allow_fixed_body_restore": True,
+                "selected_recent_ids": [" recent-1 ", "recent-2"],
+                "selected_feel_ids": ["feel-1"],
+                "selected_random_high_importance_ids": ["high-1"],
             },
         )
         self.assertEqual(saved["context_revision"], 1)
@@ -405,6 +408,9 @@ class GatewayStateContractsTest(unittest.TestCase):
         self.assertEqual(saved["rolling_context"]["previous_day_modes"], {})
         self.assertTrue(saved["rolling_context"]["allow_fixed_body_restore"])
         self.assertEqual(saved["rolling_context"]["day_modes"]["2026-09-10"], "review")
+        self.assertEqual(saved["rolling_context"]["selected_recent_ids"], ["recent-1", "recent-2"])
+        self.assertEqual(saved["rolling_context"]["selected_feel_ids"], ["feel-1"])
+        self.assertEqual(saved["rolling_context"]["selected_random_high_importance_ids"], ["high-1"])
 
         unchanged = store.patch_conversation_rolling_context(
             profile_id="default",

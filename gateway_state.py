@@ -3918,6 +3918,20 @@ class GatewayStateStore:
             else:
                 selected_journal_ids = None
 
+            selected_bucket_groups: dict[str, list[str] | None] = {}
+            for field in (
+                "selected_recent_ids",
+                "selected_feel_ids",
+                "selected_random_high_importance_ids",
+            ):
+                raw_ids = config.get(field, current.get(field))
+                if raw_ids is not None:
+                    if not isinstance(raw_ids, list) or not all(isinstance(v, str) for v in raw_ids):
+                        raise ValueError(f"rolling_context.{field} must be a string array")
+                    selected_bucket_groups[field] = [value.strip() for value in raw_ids if value.strip()]
+                else:
+                    selected_bucket_groups[field] = None
+
             next_config: dict[str, Any] = {
                 "strategy": strategy,
                 "timezone": timezone_name,
@@ -3928,13 +3942,18 @@ class GatewayStateStore:
                 next_config["selected_pinned_ids"] = selected_pinned_ids
             if selected_journal_ids is not None:
                 next_config["selected_journal_ids"] = selected_journal_ids
+            for field, selected_ids in selected_bucket_groups.items():
+                if selected_ids is not None:
+                    next_config[field] = selected_ids
             if allow_fixed_body_restore:
                 next_config["allow_fixed_body_restore"] = True
             comparable_current = {
                 key: current[key]
                 for key in (
                     "strategy", "timezone", "day_start_hour", "day_modes",
-                    "selected_pinned_ids", "selected_journal_ids", "allow_fixed_body_restore",
+                    "selected_pinned_ids", "selected_journal_ids", "selected_recent_ids",
+                    "selected_feel_ids", "selected_random_high_importance_ids",
+                    "allow_fixed_body_restore",
                 )
                 if key in current
             }

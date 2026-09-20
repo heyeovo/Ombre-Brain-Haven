@@ -337,7 +337,7 @@ class BucketManager:
 
         # --- Pinned/protected buckets: lock importance to 10 ---
         # --- 钉选/保护桶：importance 强制锁定为 10 ---
-        if pinned or protected:
+        if protected or (pinned and bucket_type != "feel"):
             importance = 10
 
         # --- Build YAML frontmatter metadata / 构建元数据 ---
@@ -754,6 +754,20 @@ class BucketManager:
             logger.warning(f"Failed to load bucket for update / 加载桶失败: {file_path}: {e}")
             return False
 
+        def _marker_set(value) -> set[str]:
+            values = value if isinstance(value, list) else [value]
+            return {str(item).strip().lower() for item in values if item is not None}
+
+        # Pinning is only a selection preference for feel buckets.  It must not
+        # change their type, directory, importance, or decay/retrieval behavior.
+        feel_markers = _marker_set(post.get("domain")) | _marker_set(post.get("tags"))
+        was_feel = (
+            str(post.get("type") or "").strip().lower() == "feel"
+            or str(post.get("type_before_pin") or "").strip().lower() == "feel"
+            or "feel" in feel_markers
+            or "沉淀物" in feel_markers
+        )
+
         # --- Noise marking: save/restore importance_before_noise ---
         # --- 噪声标记：保存/恢复 importance_before_noise ---
         was_noise = bool(post.get("resolved", False) and post.get("importance") == 1)
@@ -792,24 +806,31 @@ class BucketManager:
         pinning = requested_pinned is True and not was_pinned
         unpinning = (requested_pinned is False or requested_pinned == 0) and was_pinned
 
-        if pinning:
+        if pinning and not was_feel:
             if "importance_before_pin" not in post:
                 post["importance_before_pin"] = int(post.get("importance", 5))
             if "type_before_pin" not in post:
                 post["type_before_pin"] = str(post.get("type") or "dynamic")
 
         if unpinning and not is_protected:
-            # Old pinned buckets did not keep backups. Restore them to a neutral
-            # dynamic bucket instead of leaving permanent/importance=10 residues.
-            kwargs["importance"] = int(post.get("importance_before_pin", 5))
-            post["type"] = str(post.get("type_before_pin") or "dynamic")
+            if was_feel:
+                post["type"] = "feel"
+                current_importance = int(post.get("importance", 5))
+                kwargs["importance"] = int(
+                    post.get("importance_before_pin", 5 if current_importance == 10 else current_importance)
+                )
+            else:
+                # Old pinned buckets did not keep backups. Restore them to a neutral
+                # dynamic bucket instead of leaving permanent/importance=10 residues.
+                kwargs["importance"] = int(post.get("importance_before_pin", 5))
+                post["type"] = str(post.get("type_before_pin") or "dynamic")
             if "importance_before_pin" in post:
                 del post["importance_before_pin"]
             if "type_before_pin" in post:
                 del post["type_before_pin"]
 
         # --- Pinned/protected buckets keep importance locked except while unpinning. ---
-        if is_protected or (was_pinned and not unpinning):
+        if is_protected or (was_pinned and not unpinning and not was_feel):
             kwargs.pop("importance", None)  # silently ignore importance update
 
         # --- Update only fields that were passed in / 只改传入的字段 ---
@@ -833,7 +854,7 @@ class BucketManager:
             post["resolved"] = bool(kwargs["resolved"])
         if "pinned" in kwargs:
             post["pinned"] = bool(kwargs["pinned"])
-            if kwargs["pinned"]:
+            if kwargs["pinned"] and not was_feel:
                 post["importance"] = 10  # pinned → lock importance to 10
         if "anchor" in kwargs:
             post["anchor"] = bool(kwargs["anchor"])
@@ -917,21 +938,20 @@ class BucketManager:
         # 注意：resolved 桶不在此自动归档，留在 dynamic/ 随衰减引擎自然归档。
 
         domain = post.get("domain", ["未分类"])
-        if kwargs.get("pinned") and post.get("type") not in ("permanent", "feel", "journal"):
+        if was_feel:
+            if post.get("type") != "feel":
+                post["type"] = "feel"
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(frontmatter.dumps(post))
+            self._move_bucket(file_path, self.feel_dir, ["沉淀物"])
+        elif kwargs.get("pinned") and post.get("type") not in ("permanent", "feel", "journal"):
             post["type"] = "permanent"
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(frontmatter.dumps(post))
             self._move_bucket(file_path, self.permanent_dir, domain)
         elif unpinning and not is_protected:
             restored_type = str(post.get("type") or "dynamic")
-            domain_set = {str(d).strip().lower() for d in (post.get("domain") or [])}
-            if restored_type == "feel" or "沉淀物" in domain_set:
-                if restored_type != "feel":
-                    post["type"] = "feel"
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        f.write(frontmatter.dumps(post))
-                target_dir = self.feel_dir
-            elif restored_type == "journal":
+            if restored_type == "journal":
                 target_dir = self.journal_dir
             elif restored_type == "permanent":
                 target_dir = self.permanent_dir

@@ -58,6 +58,66 @@ class PinTransitionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored["metadata"]["importance"], 5)
         self.assertNotEqual(self.decay.calculate_score(restored["metadata"]), 999.0)
 
+    async def test_feel_pin_is_selection_only_and_never_changes_type_or_importance(self):
+        bucket_id = await self.manager.create(
+            content="一条独立感受",
+            name="独立感受",
+            importance=5,
+            bucket_type="feel",
+            domain=[],
+        )
+
+        self.assertTrue(await self.manager.update(bucket_id, pinned=True))
+        pinned = await self.manager.get(bucket_id)
+        self.assertTrue(pinned["metadata"]["pinned"])
+        self.assertEqual(pinned["metadata"]["type"], "feel")
+        self.assertEqual(pinned["metadata"]["importance"], 5)
+        self.assertEqual(Path(pinned["path"]).parent.name, "沉淀物")
+        self.assertEqual(Path(pinned["path"]).parent.parent.name, "feel")
+
+        self.assertTrue(await self.manager.update(bucket_id, pinned=False))
+        restored = await self.manager.get(bucket_id)
+        self.assertFalse(restored["metadata"]["pinned"])
+        self.assertEqual(restored["metadata"]["type"], "feel")
+        self.assertEqual(restored["metadata"]["importance"], 5)
+        self.assertEqual(Path(restored["path"]).parent.name, "沉淀物")
+        self.assertEqual(Path(restored["path"]).parent.parent.name, "feel")
+
+    async def test_feel_created_pinned_keeps_normal_feel_metadata(self):
+        bucket_id = await self.manager.create(
+            content="默认常驻的感受",
+            name="默认常驻感受",
+            importance=5,
+            bucket_type="feel",
+            pinned=True,
+            domain=[],
+        )
+        bucket = await self.manager.get(bucket_id)
+        self.assertTrue(bucket["metadata"]["pinned"])
+        self.assertEqual(bucket["metadata"]["type"], "feel")
+        self.assertEqual(bucket["metadata"]["importance"], 5)
+        self.assertEqual(Path(bucket["path"]).parent.name, "沉淀物")
+        self.assertEqual(Path(bucket["path"]).parent.parent.name, "feel")
+
+    async def test_legacy_feel_marker_restores_feel_on_unpin(self):
+        bucket_id = await self.manager.create(
+            content="旧版误改类型的感受",
+            name="旧版感受",
+            importance=10,
+            bucket_type="permanent",
+            pinned=True,
+            tags=["feel"],
+            domain=[],
+        )
+
+        self.assertTrue(await self.manager.update(bucket_id, pinned=False))
+        restored = await self.manager.get(bucket_id)
+        self.assertFalse(restored["metadata"]["pinned"])
+        self.assertEqual(restored["metadata"]["type"], "feel")
+        self.assertEqual(restored["metadata"]["importance"], 5)
+        self.assertEqual(Path(restored["path"]).parent.name, "沉淀物")
+        self.assertEqual(Path(restored["path"]).parent.parent.name, "feel")
+
 
 if __name__ == "__main__":
     unittest.main()

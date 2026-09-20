@@ -84,7 +84,7 @@ AI 对这段经历的理解、关系侧学习或以后应怎样做。
 
 `bucket` 模式可用于对照测试：它跳过 moment 图刷新和扩散，但仍执行统一 relevance 与 utility。
 
-Gateway 使用单一路线生成正式结果：先把本轮分成 `none`、`explicit` 或 `contextual`，再对本轮有界检索池统一执行 relevance 和 `promote / neutral / reject` utility，最终最多注入一张桶卡。普通关键词或纯标题命中不能单独证明相关；明确回忆和可用前文的接续指代可优先，无法确定增量价值的自然 contextual 保持 neutral，完全重复才 reject。排序使用不含 freshness 的分数，长期记忆不会因为变旧而失去排序优势；重要度、相关性证据和 session 防重复仍保留。语义查询默认最多等待 5 秒；在 `query_timeout / query_failed / query_embedding_unavailable / query_embedding_failed` 时，`explicit` 只有“可信主题同时命中标题与正文 + keyword >= 0.65”才可降级进入 Utility；自然 `contextual` 则要求“可信主题命中正文 + keyword >= 0.83”。调用方主动关闭语义或仅有标题命中都不适用故障降级。`recall_shadow_debug` 是沿用的 Debug 字段名，记录统一决策审核、最终结果与未入选/拒绝候选，不再表示两套算法并行。Dashboard 提供的 session 排除 ID 会先从候选池移除，并在最终出卡时再次硬过滤：本窗口已召回桶和本窗口真正新建的 hold 桶都不会再次参与召回，也不会抢占唯一候选位。Hook 卡片会在正文后附最多一行显式关联边的桶名与 ID，不展开关联正文。
+Gateway 使用单一路线生成正式结果：先把本轮分成 `none`、`explicit` 或 `contextual`，再对本轮有界检索池统一执行 relevance 和 `promote / neutral / reject` utility，最终最多注入一张桶卡。普通关键词或纯标题命中不能单独证明相关；明确回忆和可用前文的接续指代可优先，无法确定增量价值的自然 contextual 保持 neutral，完全重复才 reject。排序使用不含 freshness 的分数，长期记忆不会因为变旧而失去排序优势；重要度、相关性证据和 session 防重复仍保留。语义查询默认最多等待 5 秒；在 `query_timeout / query_failed / query_embedding_unavailable / query_embedding_failed` 时，`explicit` 只有“可信主题同时命中标题与正文 + keyword >= 0.65”才可降级进入 Utility；自然 `contextual` 则要求“可信主题命中正文 + keyword >= 0.83”。调用方主动关闭语义或仅有标题命中都不适用故障降级。`recall_shadow_debug` 是沿用的 Debug 字段名，记录统一决策审核、最终结果与未入选/拒绝候选，不再表示两套算法并行。Dashboard 提供的 session 排除 ID 会先从候选池移除，并在最终出卡时再次硬过滤。按天滚动时，排除集合跟当前模型 Context 同步：保留原文日内由 `hold` 写入/合并的桶、原文日 `breath` 结果展示过的桶，以及最新原文日或最近 context revision 重建后自动注入的桶。旧召回正文从 Context 剥离后，若没有其他排除原因，该桶重新参与召回。Hook 卡片会在正文后附最多一行显式关联边的桶名与 ID，不展开关联正文。
 
 ### 4. Word Map Lite
 
@@ -101,7 +101,7 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 
 ### 手动写入
 
-`grow` 用于保存值得长期保留的记忆。`hold` 适合短暂抓住当前片段，`comment_bucket` 用于给已有记忆增加年轮。`hold` 成功时统一返回 `{status, action, bucket_id, bucket_name}`：`action` 为 `created` 或 `merged`。会话客户端只把 `status=success, action=created` 的 bucket 写入本窗口召回排除账本；合并不会被误记为新桶。年轮由 `comment_bucket` 单独写入。钉选会保存钉选前的 importance/type；取消钉选时恢复，旧无备份钉选桶回退为 importance 5 的普通 dynamic 桶，不再残留 999 权重。
+`grow` 用于保存值得长期保留的记忆。`hold` 适合短暂抓住当前片段，`comment_bucket` 用于给已有记忆增加年轮。`hold` 成功时统一返回 `{status, action, bucket_id, bucket_name}`：`action` 为 `created` 或 `merged`。会话客户端会把成功 `hold` 返回的 bucket 记为当前原文期已写入，无论新建还是合并，都避免同一份内容紧接着被自动召回。年轮由 `comment_bucket` 单独写入。钉选会保存钉选前的 importance/type；取消钉选时恢复，旧无备份钉选桶回退为 importance 5 的普通 dynamic 桶，不再残留 999 权重。
 
 衰减引擎只计算用于排序的活跃得分。它不再自动把低重要度旧桶标为 `resolved`，也不再将低于阈值的桶归档；`resolved`、`digested` 和归档都只能由用户或 LLM 主动操作。
 
@@ -272,7 +272,7 @@ Persona 不是事实记忆，不能回答“发生过什么”，也不应覆盖
 
 Gateway 会把成功完成的 user / assistant 轮次持久保存到 `conversation_turns`。这张表也是 cc、Polaris 历史导入和未来 API 聊天共用的对话原文层；它不再按 `conversation_turns_max_entries` 自动删除旧轮次，该旧参数只保留调用兼容，运行时始终覆盖为 `0`。旧 `config.yaml` / `config.example.yaml` 即使仍显示 `500` 也不会生效。当问题包含“刚才、刚刚、上一句、之前那个”等近指表达时，Gateway 会从已保存原文中优先选择最近相关轮次，拼成 `Just Now Chat Context`，而不是用长期语义记忆猜测。
 
-Dashboard 可把一个逻辑聊天切换为手动按天滚动：每个聊天日选择保留原文、仅保留对应日回顾或暂不带入。长期层可逐项选择钉选桶、未锁定日记、最近普通桶、feel 和随机高重要度桶；除钉选桶外，普通桶候选会排除归档、噪音、已解决和已消化状态，实际拼接时也会重新检查，避免已经失效的旧选择继续进入上下文。Haven 为每条 user/assistant 消息分配永久 ID，并保存聊天日期；日期清单分别估算正文、工具、附件内容、召回、thinking、运行时时间戳、消息框架和 agent wake，占用无法从已清除旧附件恢复时会明确计为未知。每次保存滚动配置只新增配置 revision 与当时的 turn watermark，不逐请求复制整份上下文。CC 只用同 revision 的原生 session 续接，Haven 将 session ID 与 revision 成对推进并保留上一已知检查点，watermark 后的新消息留在原生会话自然增长；首次从固定窗口切换时，Dashboard 优先从 SDK 默认 transcript 完整迁移所选 raw 日期的 thinking、召回和工具链，源缺失时只有用户明确同意才可退化为 Haven 可见正文恢复。前台用户轮与后台唤醒共用同一保真判定，非首次明确迁移找不到完整 transcript 时直接停止，不会静默改用 Haven 正文。对已经损坏且无法可靠对齐的滚动窗口，用户可在当前窗口明确确认：保留 Haven 页面历史和滚动配置，仅以当前 raw 日期的成功 user/assistant 正文创建全新 transcript，并舍弃旧工具、动态召回、图片、thinking 与未落库失败轮次；Dashboard 先持久化新 transcript，Haven 再以 CAS 原子切换当前 lane。selfhost 因无状态而每轮按当前选择重组。当前仍是人工维护，自动切片摘要不属于这一阶段。
+Dashboard 可把一个逻辑聊天切换为手动按天滚动：每个聊天日选择保留原文、仅保留对应日回顾或暂不带入。长期层可逐项选择钉选桶、未锁定日记、最近普通桶、feel 和随机高重要度桶；除钉选桶外，普通桶候选会排除归档、噪音、已解决和已消化状态，实际拼接时也会重新检查，避免已经失效的旧选择继续进入上下文。Haven 为每条 user/assistant 消息分配永久 ID，并保存聊天日期；日期清单分别估算正文、工具、附件内容、召回、thinking、运行时时间戳、消息框架和 agent wake，占用无法从已清除旧附件恢复时会明确计为未知。每次保存滚动配置只新增配置 revision 与当时的 turn watermark，不逐请求复制整份上下文。CC 只用同 revision 的原生 session 续接，Haven 将 session ID 与 revision 成对推进并保留上一已知检查点，watermark 后的新消息留在原生会话自然增长；首次从固定窗口切换时，Dashboard 优先从 SDK 默认 transcript 完整迁移所选 raw 日期的 thinking、召回和工具链；以后每次重建只保留最新一个有对话原文日的 thinking 和动态召回，较早原文日的两类内容会直接删除且不在模型 Context 留占位符，设置页只显示已剥离的 token 估算。源缺失时只有用户明确同意才可退化为 Haven 可见正文恢复。前台用户轮与后台唤醒共用同一保真判定，非首次明确迁移找不到完整 transcript 时直接停止，不会静默改用 Haven 正文。对已经损坏且无法可靠对齐的滚动窗口，用户可在当前窗口明确确认：保留 Haven 页面历史和滚动配置，仅以当前 raw 日期的成功 user/assistant 正文创建全新 transcript，并舍弃旧工具、动态召回、图片、thinking 与未落库失败轮次；Dashboard 先持久化新 transcript，Haven 再以 CAS 原子切换当前 lane。selfhost 因无状态而每轮按当前选择重组。当前仍是人工维护，自动切片摘要不属于这一阶段。
 
 每个 cc 协作者可手动指定一个主窗；该标记只控制 Dashboard 列表置顶，不自动改变上下文模式。软删除窗口时 Haven 同时清除置顶与主动唤醒记录，并拒绝后续 turn 写入，避免已删除窗口被后台活动隐式恢复。
 

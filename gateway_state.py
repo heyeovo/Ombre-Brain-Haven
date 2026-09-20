@@ -4,6 +4,7 @@ import sqlite3
 import hashlib
 import io
 import random
+import re
 import uuid
 import zipfile
 from datetime import date, datetime, timedelta, timezone
@@ -1008,6 +1009,35 @@ class GatewayStateStore:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS conversation_bucket_exclusions (
+                profile_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                round_id INTEGER NOT NULL,
+                bucket_id TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                context_revision INTEGER NOT NULL DEFAULT 0,
+                observed_at TEXT NOT NULL,
+                PRIMARY KEY (profile_id, session_id, round_id, bucket_id, source_kind)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_conversation_bucket_exclusions_lookup
+            ON conversation_bucket_exclusions
+            (profile_id, session_id, source_kind, context_revision, observed_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gateway_schema_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_session_created_buckets_lookup
             ON session_created_buckets (profile_id, session_id, created_at DESC)
             """
@@ -1103,8 +1133,85 @@ class GatewayStateStore:
                     "INSERT INTO conversation_turns_fts(rowid, user_text, assistant_text, session_id) "
                     "SELECT id, user_text, assistant_text, session_id FROM conversation_turns"
                 )
+        self._backfill_conversation_bucket_exclusions(conn)
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def _saved_tool_bucket_ids(value: Any) -> set[str]:
+        if value is None:
+            return set()
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        ids: set[str] = set()
+        for pattern in (
+            r"\[bucket_id:([A-Za-z0-9][A-Za-z0-9_-]{5,127})\]",
+            r"\bbucket_id\s*[=:]\s*[\"']?([A-Za-z0-9][A-Za-z0-9_-]{5,127})",
+            r'"bucket_id"\s*:\s*"([A-Za-z0-9][A-Za-z0-9_-]{5,127})"',
+        ):
+            ids.update(re.findall(pattern, text, flags=re.IGNORECASE))
+        return ids
+
+    def _backfill_conversation_bucket_exclusions(self, conn: sqlite3.Connection) -> None:
+        """One-time recovery for hold/breath IDs saved before the unified ledger existed."""
+        migration = "conversation_bucket_exclusions_v1"
+        if conn.execute(
+            "SELECT 1 FROM gateway_schema_migrations WHERE name = ?", (migration,)
+        ).fetchone():
+            return
+        rows = conn.execute(
+            """
+            SELECT profile_id, session_id, round_id, created_at, raw_json
+            FROM conversation_turns
+            WHERE raw_json != ''
+            """
+        ).fetchall()
+        events: set[tuple[str, str, int, str, str, int, str]] = set()
+        for row in rows:
+            raw = self._json_object(row["raw_json"])
+            try:
+                revision = max(0, int(raw.get("rolling_context_revision") or 0))
+            except (TypeError, ValueError):
+                revision = 0
+            saved_created = raw.get("created_bucket_ids")
+            saved_breath = raw.get("breath_bucket_ids")
+            by_kind = {
+                "created": {
+                    str(item).strip() for item in saved_created
+                    if str(item or "").strip()
+                } if isinstance(saved_created, list) else set(),
+                "breath": {
+                    str(item).strip() for item in saved_breath
+                    if str(item or "").strip()
+                } if isinstance(saved_breath, list) else set(),
+            }
+            for tool in raw.get("tools", []) if isinstance(raw.get("tools"), list) else []:
+                if not isinstance(tool, dict) or str(tool.get("status") or "") == "error":
+                    continue
+                name = str(tool.get("name") or "")
+                if name == "hold" or name.endswith("__hold"):
+                    by_kind["created"].update(self._saved_tool_bucket_ids(tool.get("result")))
+                if name == "breath" or name.endswith("__breath"):
+                    by_kind["breath"].update(self._saved_tool_bucket_ids(tool.get("result")))
+            for kind, bucket_ids in by_kind.items():
+                for bucket_id in bucket_ids:
+                    events.add((
+                        str(row["profile_id"]), str(row["session_id"]), int(row["round_id"]),
+                        bucket_id, kind, revision, str(row["created_at"]),
+                    ))
+        if events:
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO conversation_bucket_exclusions
+                (profile_id, session_id, round_id, bucket_id, source_kind,
+                 context_revision, observed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                sorted(events),
+            )
+        conn.execute(
+            "INSERT INTO gateway_schema_migrations (name, applied_at) VALUES (?, ?)",
+            (migration, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+        )
 
     def save_handoff_block(self, session_id: str, handoff_block: str) -> None:
         from utils import now_iso
@@ -2505,6 +2612,7 @@ class GatewayStateStore:
         attachment_ids: list[str] | None = None,
         recalled_bucket_ids: list[str] | None = None,
         created_bucket_ids: list[str] | None = None,
+        breath_bucket_ids: list[str] | None = None,
         lane_id: str = "",
         agent_wake_update: dict[str, Any] | None = None,
         created_at: datetime | None = None,
@@ -2544,6 +2652,14 @@ class GatewayStateStore:
         created_ids = list(dict.fromkeys(
             str(item or "").strip() for item in (created_bucket_ids or []) if str(item or "").strip()
         ))
+        breath_ids = list(dict.fromkeys(
+            str(item or "").strip() for item in (breath_bucket_ids or []) if str(item or "").strip()
+        ))
+        raw_payload_for_exclusions = self._json_object(raw_json)
+        try:
+            context_revision = max(0, int(raw_payload_for_exclusions.get("rolling_context_revision") or 0))
+        except (TypeError, ValueError):
+            context_revision = 0
         requested_attachment_ids = list(dict.fromkeys(
             str(item or "").strip() for item in (attachment_ids or []) if str(item or "").strip()
         ))
@@ -2590,25 +2706,26 @@ class GatewayStateStore:
                     raise ValueError("attachment not found")
                 attachment_rows = [by_id[item] for item in requested_attachment_ids]
             legacy_fingerprint_payload = {
-                    "session_id": safe_session_id,
-                    "persona_id": safe_persona_id,
-                    "expected_last_round_id": expected_round,
-                    "user_text": str(user_text or ""),
-                    "assistant_text": str(assistant_text or ""),
-                    "model": str(model or ""),
-                    "client": str(client or ""),
-                    "route": str(route or ""),
-                    "source": str(source or "gateway").strip() or "gateway",
-                    "attachments": [
-                        {"id": str(row["attachment_id"]), "sha256": str(row["sha256"])}
-                        for row in attachment_rows
-                    ],
-                    "recalled_bucket_ids": sorted(recalled_ids),
-                    "created_bucket_ids": sorted(created_ids),
+                "session_id": safe_session_id,
+                "persona_id": safe_persona_id,
+                "expected_last_round_id": expected_round,
+                "user_text": str(user_text or ""),
+                "assistant_text": str(assistant_text or ""),
+                "model": str(model or ""),
+                "client": str(client or ""),
+                "route": str(route or ""),
+                "source": str(source or "gateway").strip() or "gateway",
+                "attachments": [
+                    {"id": str(row["attachment_id"]), "sha256": str(row["sha256"])}
+                    for row in attachment_rows
+                ],
+                "recalled_bucket_ids": sorted(recalled_ids),
+                "created_bucket_ids": sorted(created_ids),
             }
             legacy_fingerprint = self._conversation_request_fingerprint(legacy_fingerprint_payload)
             fingerprint = self._conversation_request_fingerprint({
                 **legacy_fingerprint_payload,
+                "breath_bucket_ids": sorted(breath_ids),
                 "turn_kind": safe_turn_kind,
                 "lane_id": safe_lane_id,
                 "agent_wake_update": wake_update,
@@ -2845,6 +2962,28 @@ class GatewayStateStore:
                     ],
                 )
 
+            exclusion_rows = [
+                *[(bucket_id, "recalled") for bucket_id in recalled_ids],
+                *[(bucket_id, "created") for bucket_id in created_ids],
+                *[(bucket_id, "breath") for bucket_id in breath_ids],
+            ]
+            if exclusion_rows:
+                conn.executemany(
+                    """
+                    INSERT OR IGNORE INTO conversation_bucket_exclusions
+                    (profile_id, session_id, round_id, bucket_id, source_kind,
+                     context_revision, observed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            safe_profile_id, safe_session_id, next_round, bucket_id,
+                            source_kind, context_revision, created_iso,
+                        )
+                        for bucket_id, source_kind in exclusion_rows
+                    ],
+                )
+
             turn_id = int(cursor.lastrowid or 0)
             if wake_update:
                 self._apply_agent_wake_turn_update(
@@ -2915,6 +3054,8 @@ class GatewayStateStore:
         profile_id: str,
         session_id: str,
         visible_chat_days: set[str] | None = None,
+        current_context_revision: int = 0,
+        latest_raw_chat_day: str = "",
         timezone_name: str = "Asia/Shanghai",
         day_start_hour: int = 4,
     ) -> set[str]:
@@ -2923,33 +3064,85 @@ class GatewayStateStore:
         if not safe_session_id:
             return set()
         conn = self._connect()
-        recalled = conn.execute(
+        legacy_recalled = conn.execute(
             "SELECT DISTINCT bucket_id, injected_at FROM injected_buckets WHERE session_id = ?",
             (safe_session_id,),
         ).fetchall()
-        created = conn.execute(
+        legacy_created = conn.execute(
             """
             SELECT bucket_id, created_at FROM session_created_buckets
             WHERE profile_id = ? AND session_id = ?
             """,
             (safe_profile_id, safe_session_id),
         ).fetchall()
+        events = conn.execute(
+            """
+            SELECT bucket_id, source_kind, context_revision, observed_at
+            FROM conversation_bucket_exclusions
+            WHERE profile_id = ? AND session_id = ?
+            """,
+            (safe_profile_id, safe_session_id),
+        ).fetchall()
+        revision_row = conn.execute(
+            """
+            SELECT created_at FROM conversation_context_versions
+            WHERE profile_id = ? AND session_id = ? AND revision = ?
+            """,
+            (safe_profile_id, safe_session_id, max(0, int(current_context_revision or 0))),
+        ).fetchone()
         conn.close()
-        rows = [*recalled, *created]
-        if visible_chat_days is not None:
-            rows = [
-                row for row in rows
-                if _conversation_chat_day(
-                    row["injected_at"] if "injected_at" in row.keys() else row["created_at"],
-                    timezone_name,
-                    day_start_hour,
-                ) in visible_chat_days
-            ]
-        return {
+        if visible_chat_days is None:
+            return {
+                str(row["bucket_id"])
+                for row in [*legacy_recalled, *legacy_created, *events]
+                if str(row["bucket_id"] or "").strip()
+            }
+
+        revision_started_at = str(revision_row["created_at"] or "") if revision_row else ""
+
+        def recalled_is_live(observed_at: str, event_revision: int | None = None) -> bool:
+            chat_day = _conversation_chat_day(observed_at, timezone_name, day_start_hour)
+            if latest_raw_chat_day and chat_day == latest_raw_chat_day:
+                return True
+            active_revision = max(0, int(current_context_revision or 0))
+            if active_revision <= 0:
+                return chat_day in visible_chat_days
+            if event_revision is not None and event_revision >= active_revision:
+                return True
+            if revision_started_at:
+                try:
+                    observed = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
+                    started = datetime.fromisoformat(revision_started_at.replace("Z", "+00:00"))
+                    if observed.tzinfo is None:
+                        observed = observed.replace(tzinfo=timezone.utc)
+                    if started.tzinfo is None:
+                        started = started.replace(tzinfo=timezone.utc)
+                    return observed >= started
+                except ValueError:
+                    return False
+            return False
+
+        ids = {
             str(row["bucket_id"])
-            for row in rows
-            if str(row["bucket_id"] or "").strip()
+            for row in legacy_created
+            if _conversation_chat_day(row["created_at"], timezone_name, day_start_hour) in visible_chat_days
         }
+        ids.update(
+            str(row["bucket_id"])
+            for row in legacy_recalled
+            if recalled_is_live(str(row["injected_at"] or ""))
+        )
+        for row in events:
+            kind = str(row["source_kind"] or "")
+            observed_at = str(row["observed_at"] or "")
+            chat_day = _conversation_chat_day(observed_at, timezone_name, day_start_hour)
+            if kind == "recalled":
+                live = recalled_is_live(observed_at, int(row["context_revision"] or 0))
+            else:
+                live = kind in {"created", "breath"} and chat_day in visible_chat_days
+            if live and str(row["bucket_id"] or "").strip():
+                ids.add(str(row["bucket_id"]))
+        return ids
 
     def get_session_bucket_exclusion_history(
         self,
@@ -2958,6 +3151,8 @@ class GatewayStateStore:
         session_id: str,
         bucket_ids: set[str],
         visible_chat_days: set[str] | None = None,
+        current_context_revision: int = 0,
+        latest_raw_chat_day: str = "",
         timezone_name: str = "Asia/Shanghai",
         day_start_hour: int = 4,
     ) -> dict[str, list[dict[str, str]]]:
@@ -2966,34 +3161,60 @@ class GatewayStateStore:
         if not session_id or not ids:
             return {}
         conn = self._connect()
-        try:
-            recalled = conn.execute(
-                "SELECT bucket_id, injected_at FROM injected_buckets WHERE session_id = ?",
-                (session_id,),
-            ).fetchall()
-            created = conn.execute(
-                """SELECT bucket_id, created_at FROM session_created_buckets
-                   WHERE profile_id = ? AND session_id = ?""",
-                (profile_id, session_id),
-            ).fetchall()
-        finally:
-            conn.close()
+        legacy_recalled = conn.execute(
+            "SELECT bucket_id, injected_at FROM injected_buckets WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+        legacy_created = conn.execute(
+            """SELECT bucket_id, created_at FROM session_created_buckets
+               WHERE profile_id = ? AND session_id = ?""",
+            (profile_id, session_id),
+        ).fetchall()
+        events = conn.execute(
+            """
+            SELECT bucket_id, source_kind, context_revision, observed_at
+            FROM conversation_bucket_exclusions
+            WHERE profile_id = ? AND session_id = ?
+            """,
+            (profile_id, session_id),
+        ).fetchall()
+        conn.close()
+        live_ids = self.get_session_bucket_exclusion_ids(
+            profile_id=profile_id,
+            session_id=session_id,
+            visible_chat_days=visible_chat_days,
+            current_context_revision=current_context_revision,
+            latest_raw_chat_day=latest_raw_chat_day,
+            timezone_name=timezone_name,
+            day_start_hour=day_start_hour,
+        )
         details: dict[str, list[dict[str, str]]] = {}
         for kind, rows, time_key in (
-            ("recalled", recalled, "injected_at"),
-            ("created", created, "created_at"),
+            ("recalled", legacy_recalled, "injected_at"),
+            ("created", legacy_created, "created_at"),
         ):
             for row in rows:
                 bucket_id = str(row["bucket_id"] or "").strip()
-                if bucket_id not in ids:
+                if bucket_id not in ids or bucket_id not in live_ids:
                     continue
-                chat_day = _conversation_chat_day(row[time_key], timezone_name, day_start_hour)
-                if visible_chat_days is not None and chat_day not in visible_chat_days:
-                    continue
-                entry = {"kind": kind, "chat_day": chat_day}
+                entry = {
+                    "kind": kind,
+                    "chat_day": _conversation_chat_day(row[time_key], timezone_name, day_start_hour),
+                }
                 bucket_details = details.setdefault(bucket_id, [])
                 if entry not in bucket_details:
                     bucket_details.append(entry)
+        for row in events:
+            bucket_id = str(row["bucket_id"] or "").strip()
+            if bucket_id not in ids or bucket_id not in live_ids:
+                continue
+            entry = {
+                "kind": str(row["source_kind"] or ""),
+                "chat_day": _conversation_chat_day(row["observed_at"], timezone_name, day_start_hour),
+            }
+            bucket_details = details.setdefault(bucket_id, [])
+            if entry not in bucket_details:
+                bucket_details.append(entry)
         return details
 
     def import_conversation_archive(
@@ -4820,6 +5041,7 @@ class GatewayStateStore:
                 "conversation_sessions",
                 "conversation_import_archives",
                 "session_created_buckets",
+                "conversation_bucket_exclusions",
             ):
                 cursor = conn.execute(
                     f"DELETE FROM {table} WHERE profile_id = ? AND session_id = ?",

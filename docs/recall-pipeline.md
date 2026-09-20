@@ -112,6 +112,16 @@ Gateway 先生成轮级 `RecallNecessityPlan`，再由统一 relevance 与 utili
 - hook_recall 展开卡片显示: `search_query`, `residue_terms`, `candidates` 计数
 - payload 中 `memory_sentinel_debug.searchable_residue_terms` 包含提取的搜索词列表
 
+## 滚动 Context 召回隔离
+
+Dashboard 在严格写入会话轮次时同步三类 bucket ID：
+
+- `created`：当前原文期通过 `hold` 新建、更新或合并后出现在工具结果中的桶；
+- `breath`：当前原文期的 `breath` 结果实际展示过的桶；
+- `recalled`：自动动态召回已注入的桶。
+
+`conversation_bucket_exclusions` 按 profile/session/round 保存原因、context revision 与观测时间。按天滚动查询时，`created` 和 `breath` 只覆盖当前 raw 日；`recalled` 只覆盖最新 raw 日和当前 revision 重建后的注入。Dashboard 重建 transcript 时只保留最新一个有对话 raw 日的动态召回；更旧召回直接删除、不留占位符。因此只由旧自动召回触发的排除会在下次重建后自动释放；若同一桶仍有 raw 日 `created` 或 `breath` 原因，则继续排除。
+
 ## 衰减 (freshness)
 
 - `bucket_manager._calc_time_score`: `exp(-0.02 * days)`，用于 bucket_manager.search()

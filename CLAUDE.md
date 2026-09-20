@@ -40,7 +40,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 |------|------|
 | `server.py` | **Brain** 入口（~640KB）。MCP 工具注册（`@mcp.custom_route`）+ REST API + 记忆核心 |
 | `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线（透镜调试区分检索前排除与相关性拒绝）+ cc 持久化路由（`Route()` 注册） |
-| `gateway_state.py` | Gateway/cc SQLite 状态：带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式、固定 handoff、版本化按天滚动配置及 turn watermark、每协作者唯一主窗标记、软删除防复活、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision 成对指针及上一检查点、显式 Haven 正文恢复的原子 lane 切换记录、Context GC 配置/历史、按可见原文日期过滤的桶排除账本及其召回/创建日期诊断；日期清单按日汇总正文、工具、附件视觉/文件正文、召回、thinking、运行时时间戳、消息框架和 agent wake 的 token 预估；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox，正式主动消息还会在该事务内解除缓存保活的临时暂停，no-op 不解除 |
+| `gateway_state.py` | Gateway/cc SQLite 状态：带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式、固定 handoff、版本化按天滚动配置及 turn watermark、每协作者唯一主窗标记、软删除防复活、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision 成对指针及上一检查点、显式 Haven 正文恢复的原子 lane 切换记录、Context GC 配置/历史、带 `created/recalled/breath` 原因与 context revision 生命周期的召回隔离账本；日期清单按日汇总正文、工具、附件视觉/文件正文、召回、thinking、运行时时间戳、消息框架和 agent wake 的 token 预估；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox，正式主动消息还会在该事务内解除缓存保活的临时暂停，no-op 不解除 |
 | `conversation_slice_store.py` | CC 自动聊天切片的独立 SQLite 契约：在 `gateway_state.db` 中维护版本化批次、切片、任务状态、CAS 重切 revision 与独立 embedding 元数据；负责永久消息规范化 hash、source/coverage 校验、幂等创建、原子激活、source 变化失效及窗口永久删除级联。本模块不调用模型、不做召回或 Context 注入 |
 | `conversation_slice_engine.py` | CC 自动聊天切片离线生成的未完成工作流：保留版本化硬约束、按 session 隔离的切片、slice-only、raw 退出入队、人工重切、最多 14 个真实聊天日的首批回填估算与显式任务执行；正式日回顾不调用本模块，后台暂不自动消费恢复队列，也不做召回或 Context 注入 |
 | `agent_wake_store.py` | CC 主动唤醒的 Haven 持久控制面：在 `gateway_state.db` 中维护 profile/session/lane 级 schedule、双开关、cache/agent/silence 时钟、版本 CAS、到期 claim、可恢复 lease 与幂等 wake run；只负责持久契约，不执行模型 turn |
@@ -205,7 +205,7 @@ GET    /gateway/api/conversation/turns?session_id=&after_round_id=&source=&chat_
 GET    /gateway/api/conversation/sessions?source=&persona_id=&deleted=1&limit=&offset=
        # 默认只列活动窗口；deleted=1 只列软删除窗口；响应返回当前页 count、真实 total、offset 与各窗口 pinned_at
 GET    /gateway/api/conversation/session?session_id=&include_bucket_exclusions=1&include_context_days=1
-       # 窗口状态、滚动配置/revision/watermark、可选日期清单（含正文/工具/附件/召回/thinking/运行时开销的按日 token 预估及未知附件数），以及按当前可见原文日期过滤的桶排除集合
+       # 窗口状态、滚动配置/revision/watermark、可选日期清单（含正文/工具/附件/召回/thinking/运行时开销的按日 token 预估及未知附件数），以及按原文日和 context revision 计算的 created/recalled/breath 桶排除集合
 PATCH  /gateway/api/conversation/session
        # 修改持久窗口覆盖；pinned 设置每个 persona 唯一主窗；rolling_context 以 state_version CAS 生成不可变配置版本；rolling_recovery_commit 以旧 CC session ID + revision + state_version 原子切换人工正文恢复 transcript；Context GC 路径保持原契约
 DELETE /gateway/api/conversation/session
@@ -287,7 +287,7 @@ POST /api/daily-reviews/run                                             # 指定
 GET /breath-hook                      # SessionStart hook（自动 breath）
 GET /dream-hook                       # 自动 dream
 GET /introspection-hook               # 自省 hook
-GET /api/debug/injections             # 注入调试；含检索前排除桶及其历史召回/创建日期（见 README「Gateway 注入边界」）
+GET /api/debug/injections             # 注入调试；含检索前排除桶及 recalled/created/breath 原因与日期（见 README「Gateway 注入边界」）
 ```
 
 ---
@@ -370,9 +370,9 @@ Dashboard 从窗口状态恢复最后活跃 CC lane、Persona、冻结 prompt �
 - 附件先按窗口暂存，严格写入把有序 ID + SHA-256 纳入幂等指纹并在同一事务绑定轮次；图片接受 JPEG/PNG/WebP（压缩后单张不超过 2MB），上传时从文件头保存宽高并按 Anthropic 视觉缩放规则估算 token；文件接受 PDF/DOCX/MD/TXT/CSV（单个不超过 4MB，并保存浏览器提取的受限正文及其完整注入包装估算），每轮两类合计不超过 4 个。私有读取必须经 Bearer 网关，未绑定附件 24 小时后在后续上传时清理；按 `kind=image/file` 分类清除互不影响，文件清除同时擦除解析正文，但已保存 token 估算保留供历史统计。
 - `/api/conversation/turn?request_id=` 可在进程重启或换设备后读回严格写入结果；调用端校验 session/persona/user 原文后重放已保存过程，不再请求上游。
 - `cc_overrides_json` 保存当前 CC Pro/API 路由及各自模型、力度、thinking 和 API provider 选择；`cc_lanes_json` 按 `subscription` / `api:<provider_id>` 分别保存 Claude 原生 `cc_session_id`、同一恢复指针的 `context_revision` 与 `seen_round_id`。新 CC 会话编号只能和它对应的 revision 成对更新；本轮未取得编号时只推进游标，不得让新 revision 继续指向旧 transcript。编号真实切换时同时保留 `previous_cc_session_id` / `previous_context_revision` / `previous_seen_round_id` 作为上一已知检查点。人工正文恢复必须由 Dashboard 先持久化新 transcript，再以旧 ID、当前 revision 和 `state_version` 三重 CAS 调用 `rolling_recovery_commit`；成功后在 lane 写入 `last_body_recovery` 计数，不修改或复制 `conversation_turns`。只有该线路的 CC 轮次严格写入成功才推进自身游标；旧 `cc_seen_round_id` 仅保留兼容。
-- `rolling_context_json` 保存固定窗口/按天滚动策略、时区、日界小时、逐日 `raw/review/omit` 三态，以及钉选桶、日记、最近普通桶、feel、随机高重要度桶的已选 ID；每轮由 Dashboard 按 ID 读取最新正文，并再次排除已归档、噪音、已解决或已消化的非钉选桶。每次真实修改递增 `context_revision`，记录当时 `context_turn_watermark`，并以 `previous_strategy`、`previous_day_modes` 标明紧邻上一 revision 的策略和日期模式。首次 fixed→rolling 可同时保存用户明确确认的 `allow_fixed_body_restore`：Dashboard 仍优先迁移 SDK 默认 transcript，只有旧 transcript 缺失或部分 raw 轮次无法对齐时才可正文恢复。CC lane 写入同轮 revision，调用端不得用旧 revision 的 `cc_session_id` 直接恢复新配置；Dashboard 据此强制保真迁移 raw→raw 日期，只允许 review/omit→raw 日期恢复 Haven 正文，迁移类型未知或持久 transcript 缺失时不得静默降级。滚动模式的桶排除集合只覆盖当前 `raw` 日期内的召回/新建桶，日期变为 `review/omit` 后允许再次召回。
+- `rolling_context_json` 保存固定窗口/按天滚动策略、时区、日界小时、逐日 `raw/review/omit` 三态，以及钉选桶、日记、最近普通桶、feel、随机高重要度桶的已选 ID；每轮由 Dashboard 按 ID 读取最新正文，并再次排除已归档、噪音、已解决或已消化的非钉选桶。每次真实修改递增 `context_revision`，记录当时 `context_turn_watermark`，并以 `previous_strategy`、`previous_day_modes` 标明紧邻上一 revision 的策略和日期模式。首次 fixed→rolling 可同时保存用户明确确认的 `allow_fixed_body_restore`：Dashboard 仍优先迁移 SDK 默认 transcript，只有旧 transcript 缺失或部分 raw 轮次无法对齐时才可正文恢复。CC lane 写入同轮 revision，调用端不得用旧 revision 的 `cc_session_id` 直接恢复新配置；Dashboard 据此强制保真迁移 raw→raw 日期，只允许 review/omit→raw 日期恢复 Haven 正文，迁移类型未知或持久 transcript 缺失时不得静默降级。滚动模式的桶排除集合同步当前 Context：`created` / `breath` 覆盖所有当前 raw 日，`recalled` 覆盖最新 raw 日与当前 revision 重建后的注入；旧召回被剥离或日期退出 raw 后，若无其他原因则允许再次召回。
 - `context_gc_json` 按窗口保存默认关闭的 05:30 自动开关、始终保留 key、最近 20 次释放估算和旧/新 Claude session 指针。减负只更新 `cc_lanes_json` 指针与 GC 日志，不复制或改写 `conversation_turns`；提交必须同时命中 `state_version` 和旧 `cc_session_id`，否则冲突失败。
-- 已召回桶继续落 `injected_buckets`；本窗口新建桶落 `session_created_buckets`，二者并集为该 session 的排除集合。召回冷却读取 `injected_at` 时把旧无时区值与新 UTC-aware 值统一按 UTC 计算，避免混合时间格式导致 hook recall 500。
+- 兼容冷却的已召回桶继续落 `injected_buckets`，本窗口写入桶继续落 `session_created_buckets`；新的 `conversation_bucket_exclusions` 在同事务记录 `created/recalled/breath`、round、context revision 和观测时间，作为滚动 Context 隔离原因的事实源。`gateway_schema_migrations` 保证升级时只扫描一次历史 `raw_json.tools`，回填旧 `hold/breath` 结果中可识别的 bucket ID。召回冷却读取 `injected_at` 时把旧无时区值与新 UTC-aware 值统一按 UTC 计算，避免混合时间格式导致 hook recall 500。
 - 永久删除会先删除该窗口附件文件，再清理带 `profile_id` 的窗口数据，不删除长期记忆桶；旧的无 profile 诊断/冷却表暂不清理。
 
 ---

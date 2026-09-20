@@ -2784,6 +2784,7 @@ class GatewayService:
                     attachment_ids=string_list(body.get("attachment_ids")),
                     recalled_bucket_ids=string_list(body.get("recalled_bucket_ids")),
                     created_bucket_ids=string_list(body.get("created_bucket_ids")),
+                    breath_bucket_ids=string_list(body.get("breath_bucket_ids")),
                     lane_id=str(body.get("lane_id") or ""),
                     agent_wake_update=(
                         body.get("agent_wake_update")
@@ -3515,6 +3516,7 @@ class GatewayService:
             if self._truthy_header(request.query_params.get("include_bucket_exclusions")):
                 rolling = state.get("rolling_context") if isinstance(state.get("rolling_context"), dict) else {}
                 visible_chat_days: set[str] | None = None
+                latest_raw_chat_day = ""
                 if rolling.get("strategy") == "daily_rolling":
                     modes = rolling.get("day_modes") if isinstance(rolling.get("day_modes"), dict) else {}
                     context_days = self.state_store.list_conversation_context_days(
@@ -3528,11 +3530,14 @@ class GatewayService:
                         if int(item.get("turn_count") or 0) > 0
                         and str(modes.get(str(item.get("day") or "")) or "raw") == "raw"
                     }
+                    latest_raw_chat_day = max(visible_chat_days, default="")
                 payload["bucket_exclusion_ids"] = sorted(
                     self.state_store.get_session_bucket_exclusion_ids(
                         profile_id=profile_id,
                         session_id=session_id,
                         visible_chat_days=visible_chat_days,
+                        current_context_revision=int(state.get("context_revision") or 0),
+                        latest_raw_chat_day=latest_raw_chat_day,
                         timezone_name=str(rolling.get("timezone") or "Asia/Shanghai"),
                         day_start_hour=int(rolling.get("day_start_hour") or 4),
                     )
@@ -20735,6 +20740,7 @@ class GatewayService:
                 ) or {}
                 rolling = state.get("rolling_context") if isinstance(state.get("rolling_context"), dict) else {}
                 visible_chat_days: set[str] | None = None
+                latest_raw_chat_day = ""
                 if rolling.get("strategy") == "daily_rolling":
                     modes = rolling.get("day_modes") if isinstance(rolling.get("day_modes"), dict) else {}
                     context_days = self.state_store.list_conversation_context_days(
@@ -20748,11 +20754,14 @@ class GatewayService:
                         if int(item.get("turn_count") or 0) > 0
                         and str(modes.get(str(item.get("day") or "")) or "raw") == "raw"
                     }
+                    latest_raw_chat_day = max(visible_chat_days, default="")
                 exclusion_history = self.state_store.get_session_bucket_exclusion_history(
                     profile_id=self._conversation_profile_id,
                     session_id=session_id,
                     bucket_ids=exclude_ids,
                     visible_chat_days=visible_chat_days,
+                    current_context_revision=int(state.get("context_revision") or 0),
+                    latest_raw_chat_day=latest_raw_chat_day,
                     timezone_name=str(rolling.get("timezone") or "Asia/Shanghai"),
                     day_start_hour=int(rolling.get("day_start_hour") or 4),
                 )

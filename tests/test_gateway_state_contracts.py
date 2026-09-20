@@ -158,6 +158,7 @@ class GatewayStateContractsTest(unittest.TestCase):
         assistant_text: str = "reply",
         recalled_bucket_ids: list[str] | None = None,
         created_bucket_ids: list[str] | None = None,
+        breath_bucket_ids: list[str] | None = None,
         attachment_ids: list[str] | None = None,
         raw_json: str = "",
     ):
@@ -176,6 +177,7 @@ class GatewayStateContractsTest(unittest.TestCase):
             raw_json=raw_json,
             recalled_bucket_ids=recalled_bucket_ids,
             created_bucket_ids=created_bucket_ids,
+            breath_bucket_ids=breath_bucket_ids,
             attachment_ids=attachment_ids,
         )
 
@@ -563,6 +565,7 @@ class GatewayStateContractsTest(unittest.TestCase):
             expected=None,
             recalled_bucket_ids=["bucket-recalled"],
             created_bucket_ids=["bucket-created"],
+            breath_bucket_ids=["bucket-breath"],
         )
         replay = self.commit(
             store,
@@ -570,6 +573,7 @@ class GatewayStateContractsTest(unittest.TestCase):
             expected=None,
             recalled_bucket_ids=["bucket-recalled"],
             created_bucket_ids=["bucket-created"],
+            breath_bucket_ids=["bucket-breath"],
         )
         self.assertFalse(first["idempotent_replay"])
         self.assertTrue(replay["idempotent_replay"])
@@ -582,7 +586,7 @@ class GatewayStateContractsTest(unittest.TestCase):
             store.get_session_bucket_exclusion_ids(
                 profile_id="default", session_id="session-1"
             ),
-            {"bucket-recalled", "bucket-created"},
+            {"bucket-recalled", "bucket-created", "bucket-breath"},
         )
         with self.assertRaises(ConversationConflictError):
             self.commit(store, request_id="request-2", expected=0)
@@ -645,6 +649,104 @@ class GatewayStateContractsTest(unittest.TestCase):
                 "visible-created": [{"kind": "created", "chat_day": "2026-09-12"}],
             },
         )
+
+    def test_rolling_bucket_exclusions_follow_revision_and_reason_lifecycle(self):
+        store = self.make_store()
+        self.commit(store, request_id="seed", expected=0)
+        conn = sqlite3.connect(self.root / "gateway_state.db")
+        conn.executemany(
+            """
+            INSERT INTO conversation_bucket_exclusions
+            (profile_id, session_id, round_id, bucket_id, source_kind,
+             context_revision, observed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("default", "session-1", 2, "old-recall", "recalled", 1, "2026-09-20T02:00:00+00:00"),
+                ("default", "session-1", 3, "latest-day-recall", "recalled", 1, "2026-09-21T02:00:00+00:00"),
+                ("default", "session-1", 4, "new-revision-recall", "recalled", 2, "2026-09-22T02:00:00+00:00"),
+                ("default", "session-1", 5, "raw-created", "created", 1, "2026-09-20T03:00:00+00:00"),
+                ("default", "session-1", 6, "raw-breath", "breath", 1, "2026-09-20T03:10:00+00:00"),
+                ("default", "session-1", 7, "ended-breath", "breath", 1, "2026-09-18T03:10:00+00:00"),
+            ],
+        )
+        conn.execute(
+            """
+            INSERT INTO conversation_context_versions
+            (profile_id, session_id, revision, config_json, turn_watermark, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("default", "session-1", 2, "{}", 1, "2026-09-21T04:00:00+00:00"),
+        )
+        conn.commit()
+        conn.close()
+
+        # 旧库升级/重启会重复执行建表，不得丢失已有隔离事件。
+        store = GatewayStateStore(str(self.root / "gateway_state.db"))
+
+        excluded = store.get_session_bucket_exclusion_ids(
+            profile_id="default",
+            session_id="session-1",
+            visible_chat_days={"2026-09-20", "2026-09-21"},
+            current_context_revision=2,
+            latest_raw_chat_day="2026-09-21",
+        )
+
+        self.assertNotIn("old-recall", excluded)
+        self.assertIn("latest-day-recall", excluded)
+        self.assertIn("new-revision-recall", excluded)
+        self.assertIn("raw-created", excluded)
+        self.assertIn("raw-breath", excluded)
+        self.assertNotIn("ended-breath", excluded)
+        history = store.get_session_bucket_exclusion_history(
+            profile_id="default",
+            session_id="session-1",
+            bucket_ids=excluded,
+            visible_chat_days={"2026-09-20", "2026-09-21"},
+            current_context_revision=2,
+            latest_raw_chat_day="2026-09-21",
+        )
+        self.assertEqual(history["raw-created"], [{"kind": "created", "chat_day": "2026-09-20"}])
+        self.assertEqual(history["raw-breath"], [{"kind": "breath", "chat_day": "2026-09-20"}])
+
+    def test_exclusion_migration_backfills_saved_hold_and_breath_results_once(self):
+        store = self.make_store()
+        raw = json.dumps({
+            "rolling_context_revision": 3,
+            "tools": [
+                {
+                    "name": "mcp__ombre__hold", "status": "completed",
+                    "result": '{"status":"success","action":"created","bucket_id":"abc123def456"}',
+                },
+                {
+                    "name": "mcp__ombre__breath", "status": "completed",
+                    "result": "[bucket_id:fff111aaa222] 旧事",
+                },
+            ],
+        }, ensure_ascii=False)
+        self.commit(store, request_id="legacy-tools", expected=0, raw_json=raw)
+        conn = sqlite3.connect(self.root / "gateway_state.db")
+        conn.execute(
+            "DELETE FROM conversation_bucket_exclusions WHERE session_id = ?",
+            ("session-1",),
+        )
+        conn.execute(
+            "DELETE FROM gateway_schema_migrations WHERE name = ?",
+            ("conversation_bucket_exclusions_v1",),
+        )
+        conn.commit()
+        conn.close()
+
+        store = GatewayStateStore(str(self.root / "gateway_state.db"))
+        first = store.get_session_bucket_exclusion_ids(
+            profile_id="default", session_id="session-1"
+        )
+        self.assertEqual(first, {"abc123def456", "fff111aaa222"})
+        store = GatewayStateStore(str(self.root / "gateway_state.db"))
+        second = store.get_session_bucket_exclusion_ids(
+            profile_id="default", session_id="session-1"
+        )
+        self.assertEqual(second, first)
 
     def test_cc_lanes_keep_independent_resume_points_and_cursors(self):
         store = self.make_store()

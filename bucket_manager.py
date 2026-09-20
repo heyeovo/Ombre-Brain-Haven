@@ -924,7 +924,12 @@ class BucketManager:
             self._move_bucket(file_path, self.permanent_dir, domain)
         elif unpinning and not is_protected:
             restored_type = str(post.get("type") or "dynamic")
-            if restored_type == "feel":
+            domain_set = {str(d).strip().lower() for d in (post.get("domain") or [])}
+            if restored_type == "feel" or "沉淀物" in domain_set:
+                if restored_type != "feel":
+                    post["type"] = "feel"
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        f.write(frontmatter.dumps(post))
                 target_dir = self.feel_dir
             elif restored_type == "journal":
                 target_dir = self.journal_dir

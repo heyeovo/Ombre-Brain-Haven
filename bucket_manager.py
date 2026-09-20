@@ -398,14 +398,14 @@ class BucketManager:
 
         # --- Choose directory by type + primary domain ---
         # --- 按类型 + 主题域选择存储目录 ---
-        if bucket_type == "permanent" or pinned:
-            type_dir = self.permanent_dir
-            if pinned and bucket_type != "permanent":
-                metadata["type"] = "permanent"
-        elif bucket_type == "feel":
+        if bucket_type == "feel":
             type_dir = self.feel_dir
         elif bucket_type == "journal":
             type_dir = self.journal_dir
+        elif bucket_type == "permanent" or pinned:
+            type_dir = self.permanent_dir
+            if pinned and bucket_type != "permanent":
+                metadata["type"] = "permanent"
         else:
             type_dir = self.dynamic_dir
         if bucket_type == "feel":
@@ -917,14 +917,21 @@ class BucketManager:
         # 注意：resolved 桶不在此自动归档，留在 dynamic/ 随衰减引擎自然归档。
 
         domain = post.get("domain", ["未分类"])
-        if kwargs.get("pinned") and post.get("type") != "permanent":
+        if kwargs.get("pinned") and post.get("type") not in ("permanent", "feel", "journal"):
             post["type"] = "permanent"
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(frontmatter.dumps(post))
             self._move_bucket(file_path, self.permanent_dir, domain)
         elif unpinning and not is_protected:
             restored_type = str(post.get("type") or "dynamic")
-            target_dir = self.permanent_dir if restored_type == "permanent" else self.dynamic_dir
+            if restored_type == "feel":
+                target_dir = self.feel_dir
+            elif restored_type == "journal":
+                target_dir = self.journal_dir
+            elif restored_type == "permanent":
+                target_dir = self.permanent_dir
+            else:
+                target_dir = self.dynamic_dir
             self._move_bucket(file_path, target_dir, domain)
         elif "domain" in kwargs and post.get("type") != "feel":
             bucket_type = str(post.get("type") or "dynamic")

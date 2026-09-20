@@ -7815,54 +7815,10 @@ async def breath(
     if domain.strip().lower() == "journey":
         return await _read_journey_directory(max_results=max_results, max_tokens=max_tokens)
 
-    if date_key:
-        domain_filter = [d.strip() for d in domain.split(",") if d.strip()] or None
-        return await _read_breath_date(
-            date_key=date_key,
-            label=date_label,
-            query=query,
-            max_tokens=max_tokens,
-            max_results=max_results,
-            domain_filter=domain_filter,
-        )
-
-    # --- importance_min mode: bulk fetch by importance threshold ---
-    # --- 重要度批量拉取模式：跳过语义搜索，按 importance 降序返回 ---
-    if importance_min >= 1:
-        try:
-            all_buckets = await bucket_mgr.list_all(include_archive=False)
-        except Exception as e:
-            return f"记忆系统暂时无法访问: {e}"
-        filtered = [
-            b for b in all_buckets
-            if int(b["metadata"].get("importance", 0)) >= importance_min
-            and b["metadata"].get("type") not in ("feel",)
-            and "journey" not in (b["metadata"].get("domain") or [])
-        ]
-        filtered.sort(key=lambda b: int(b["metadata"].get("importance", 0)), reverse=True)
-        filtered = filtered[:20]
-        if not filtered:
-            return f"没有重要度 >= {importance_min} 的记忆。"
-        results = []
-        token_used = 0
-        for b in filtered:
-            if token_used >= max_tokens:
-                break
-            try:
-                clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
-                summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
-                t = count_tokens_approx(summary)
-                if token_used + t > max_tokens:
-                    break
-                imp = b["metadata"].get("importance", 0)
-                results.append(f"[importance:{imp}] [bucket_id:{b['id']}] {summary}")
-                token_used += t
-            except Exception as e:
-                logger.warning(f"importance_min dehydrate failed: {e}")
-        return "\n---\n".join(results) if results else "没有可以展示的记忆。"
-
     # --- Journal retrieval: domain="journal" is a fully independent channel ---
     # --- 日记检索：domain="journal" 完全独立通道，不与普通breath/search混 ---
+    # Must be checked before date_key branch, because journal lives outside
+    # list_all() and has its own date filtering.
     if domain.strip().lower() == "journal":
         try:
             journal_entries = await bucket_mgr.list_journal()
@@ -7922,6 +7878,52 @@ async def breath(
         except Exception as e:
             logger.error(f"Journal retrieval failed: {e}")
             return "读取日记失败。"
+
+    if date_key:
+        domain_filter = [d.strip() for d in domain.split(",") if d.strip()] or None
+        return await _read_breath_date(
+            date_key=date_key,
+            label=date_label,
+            query=query,
+            max_tokens=max_tokens,
+            max_results=max_results,
+            domain_filter=domain_filter,
+        )
+
+    # --- importance_min mode: bulk fetch by importance threshold ---
+    # --- 重要度批量拉取模式：跳过语义搜索，按 importance 降序返回 ---
+    if importance_min >= 1:
+        try:
+            all_buckets = await bucket_mgr.list_all(include_archive=False)
+        except Exception as e:
+            return f"记忆系统暂时无法访问: {e}"
+        filtered = [
+            b for b in all_buckets
+            if int(b["metadata"].get("importance", 0)) >= importance_min
+            and b["metadata"].get("type") not in ("feel",)
+            and "journey" not in (b["metadata"].get("domain") or [])
+        ]
+        filtered.sort(key=lambda b: int(b["metadata"].get("importance", 0)), reverse=True)
+        filtered = filtered[:20]
+        if not filtered:
+            return f"没有重要度 >= {importance_min} 的记忆。"
+        results = []
+        token_used = 0
+        for b in filtered:
+            if token_used >= max_tokens:
+                break
+            try:
+                clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
+                summary = await dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
+                t = count_tokens_approx(summary)
+                if token_used + t > max_tokens:
+                    break
+                imp = b["metadata"].get("importance", 0)
+                results.append(f"[importance:{imp}] [bucket_id:{b['id']}] {summary}")
+                token_used += t
+            except Exception as e:
+                logger.warning(f"importance_min dehydrate failed: {e}")
+        return "\n---\n".join(results) if results else "没有可以展示的记忆。"
 
     # --- No args or empty query: surfacing mode (weight pool active push) ---
     # --- 无参数或空query：浮现模式（权重池主动推送）---

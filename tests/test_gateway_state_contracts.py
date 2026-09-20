@@ -62,10 +62,89 @@ class GatewayStateContractsTest(unittest.TestCase):
         self.assertGreater(estimate["attachments"], 0)
         self.assertEqual(estimate["recall"], 42)
         self.assertGreater(estimate["thinking"], 0)
+        self.assertGreater(estimate["timestamps"], 0)
+        self.assertEqual(estimate["message_overhead"], 19)
+        self.assertEqual(estimate["agent_wake"], 0)
         self.assertEqual(
             estimate["total"],
-            sum(estimate[key] for key in ("conversation", "tools", "attachments", "recall", "thinking")),
+            sum(estimate[key] for key in (
+                "conversation", "tools", "attachments", "recall", "thinking",
+                "timestamps", "message_overhead", "agent_wake",
+            )),
         )
+
+    def test_context_days_use_visual_tokens_for_image_attachments(self):
+        store = self.make_store()
+        png = (
+            b"\x89PNG\r\n\x1a\n"
+            + (13).to_bytes(4, "big") + b"IHDR"
+            + (1000).to_bytes(4, "big") + (1000).to_bytes(4, "big")
+            + b"\x08\x06\x00\x00\x00"
+        )
+        attachment = store.create_conversation_attachment(
+            profile_id="default", session_id="session-token-image",
+            filename="photo.png", data=png,
+        )
+        stored = store.commit_conversation_turn(
+            profile_id="default", session_id="session-token-image", persona_id="ombre",
+            request_id="image-token-turn", expected_last_round_id=0,
+            user_text="看图", assistant_text="看到了", source="cc",
+            attachment_ids=[attachment["id"]],
+            created_at=datetime(2026, 9, 20, 8, 0, tzinfo=timezone.utc),
+        )
+        self.assertGreater(stored["turn"]["id"], 0)
+
+        days = store.list_conversation_context_days(
+            profile_id="default", session_id="session-token-image", persona_id="ombre",
+        )
+
+        self.assertEqual(attachment["image_width"], 1000)
+        self.assertEqual(attachment["image_height"], 1000)
+        self.assertEqual(attachment["estimated_tokens"], 1334)
+        self.assertEqual(days[0]["token_estimate"]["attachments"], 1334)
+        self.assertEqual(days[0]["attachment_unknown_count"], 0)
+
+        # Attachments uploaded before the dimension migration are calculated from
+        # their still-present source file when the context-day report is requested.
+        conn = sqlite3.connect(self.root / "gateway_state.db")
+        conn.execute(
+            "UPDATE conversation_attachments SET image_width = 0, image_height = 0, estimated_tokens = 0"
+        )
+        conn.commit()
+        conn.close()
+        legacy_days = store.list_conversation_context_days(
+            profile_id="default", session_id="session-token-image", persona_id="ombre",
+        )
+        self.assertEqual(legacy_days[0]["token_estimate"]["attachments"], 1334)
+        self.assertEqual(legacy_days[0]["attachment_unknown_count"], 0)
+
+    def test_context_days_include_hidden_agent_wake_runtime_cost(self):
+        store = self.make_store()
+        occurred_at = datetime(2026, 9, 20, 8, 0, tzinfo=timezone.utc)
+        store.commit_conversation_turn(
+            profile_id="default", session_id="session-token-wake", persona_id="ombre",
+            request_id="wake-token-turn", expected_last_round_id=0,
+            user_text="", assistant_text="", source="cc", turn_kind="agent_wake",
+            lane_id="subscription",
+            agent_wake_update={
+                "model_activity_at": occurred_at.isoformat(),
+                "wake_cause": "cache_keepalive",
+                "agent_wake": {
+                    "wake_id": "wake-token-turn", "cause": "cache_keepalive",
+                    "at": occurred_at.isoformat(), "status": "她在上班，不打扰。",
+                },
+            },
+            created_at=occurred_at,
+        )
+
+        days = store.list_conversation_context_days(
+            profile_id="default", session_id="session-token-wake", persona_id="ombre",
+        )
+        estimate = days[0]["token_estimate"]
+        self.assertEqual(estimate["conversation"], 0)
+        self.assertGreater(estimate["timestamps"], 0)
+        self.assertEqual(estimate["message_overhead"], 19)
+        self.assertGreater(estimate["agent_wake"], 0)
 
     def commit(
         self,
@@ -211,7 +290,10 @@ class GatewayStateContractsTest(unittest.TestCase):
         conn = sqlite3.connect(db_path)
         columns = {row[1] for row in conn.execute("PRAGMA table_info(conversation_attachments)")}
         conn.close()
-        self.assertTrue({"kind", "text_content", "text_truncated"}.issubset(columns))
+        self.assertTrue({
+            "kind", "text_content", "text_truncated",
+            "image_width", "image_height", "estimated_tokens",
+        }.issubset(columns))
 
     def test_permanent_delete_removes_attachment_records_and_files(self):
         store = self.make_store()

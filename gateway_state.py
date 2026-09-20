@@ -58,6 +58,80 @@ def _conversation_chat_day(
     return local.date().isoformat()
 
 
+def _estimate_context_tokens(value: Any) -> int:
+    """Conservative cross-model estimate shared with the Dashboard UI."""
+    text = str(value or "")
+    if not text:
+        return 0
+    wide = sum(
+        1
+        for char in text
+        if (
+            0x2E80 <= ord(char) <= 0x9FFF
+            or 0xF900 <= ord(char) <= 0xFAFF
+            or 0x3040 <= ord(char) <= 0x30FF
+            or 0xAC00 <= ord(char) <= 0xD7AF
+        )
+    )
+    return int(wide * 1.3 + (len(text) - wide) / 4 + 0.999999)
+
+
+def _safe_nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _conversation_turn_token_breakdown(
+    user_text: str,
+    assistant_text: str,
+    raw_json: str,
+) -> dict[str, int]:
+    conversation = _estimate_context_tokens(
+        "\n\n".join(part for part in (str(user_text or ""), str(assistant_text or "")) if part)
+    )
+    try:
+        raw = json.loads(raw_json or "{}")
+    except (TypeError, ValueError):
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+
+    tools = raw.get("tools") if isinstance(raw.get("tools"), list) else []
+    tool_tokens = _estimate_context_tokens(json.dumps(tools, ensure_ascii=False)) if tools else 0
+
+    attachments = raw.get("attachments") if isinstance(raw.get("attachments"), list) else []
+    attachment_tokens = 0
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            continue
+        attachment_tokens += _estimate_context_tokens(json.dumps(attachment, ensure_ascii=False))
+        # Haven keeps the extracted-text length even after the source file is cleared.
+        attachment_tokens += int(_safe_nonnegative_int(attachment.get("text_chars")) * 1.3 + 0.999999)
+
+    recall = raw.get("recall") if isinstance(raw.get("recall"), dict) else {}
+    recall_tokens = _safe_nonnegative_int(recall.get("estimated_tokens"))
+    if recall_tokens == 0:
+        recall_text = str(recall.get("additional_context") or "")
+        if not recall_text and isinstance(recall.get("modules"), list):
+            recall_text = "\n\n".join(
+                str(item.get("text") or "")
+                for item in recall["modules"]
+                if isinstance(item, dict)
+            )
+        recall_tokens = _estimate_context_tokens(recall_text)
+
+    thinking_tokens = _estimate_context_tokens(raw.get("thinking") or "")
+    return {
+        "conversation": conversation,
+        "tools": tool_tokens,
+        "attachments": attachment_tokens,
+        "recall": recall_tokens,
+        "thinking": thinking_tokens,
+    }
+
+
 class ConversationConflictError(Exception):
     def __init__(self, expected_round_id: int, actual_round_id: int):
         super().__init__("conversation head changed")
@@ -4043,12 +4117,10 @@ class GatewayStateStore:
         conn = self._connect()
         turn_rows = conn.execute(
             """
-            SELECT chat_day, COUNT(*) AS turn_count,
-                   SUM(LENGTH(user_text) + LENGTH(assistant_text)) AS raw_chars,
-                   MIN(id) AS first_turn_id, MAX(id) AS last_turn_id
+            SELECT id, chat_day, user_text, assistant_text, raw_json
             FROM conversation_turns
             WHERE profile_id = ? AND session_id = ? AND chat_day != ''
-            GROUP BY chat_day
+            ORDER BY id ASC
             """,
             (safe_profile_id, safe_session_id),
         ).fetchall()
@@ -4064,24 +4136,46 @@ class GatewayStateStore:
         days: dict[str, dict[str, Any]] = {}
         for row in turn_rows:
             day = str(row["chat_day"] or "")
-            days[day] = {
+            item = days.setdefault(day, {
                 "day": day,
-                "turn_count": int(row["turn_count"] or 0),
-                "raw_chars": int(row["raw_chars"] or 0),
-                "first_turn_id": int(row["first_turn_id"] or 0),
-                "last_turn_id": int(row["last_turn_id"] or 0),
+                "turn_count": 0,
+                "raw_chars": 0,
+                "first_turn_id": int(row["id"] or 0),
+                "last_turn_id": int(row["id"] or 0),
+                "token_estimate": {
+                    "conversation": 0,
+                    "tools": 0,
+                    "attachments": 0,
+                    "recall": 0,
+                    "thinking": 0,
+                    "total": 0,
+                },
                 "review": None,
-            }
+            })
+            item["turn_count"] += 1
+            item["raw_chars"] += len(str(row["user_text"] or "")) + len(str(row["assistant_text"] or ""))
+            item["last_turn_id"] = int(row["id"] or 0)
+            breakdown = _conversation_turn_token_breakdown(
+                row["user_text"], row["assistant_text"], row["raw_json"]
+            )
+            for key, tokens in breakdown.items():
+                item["token_estimate"][key] += tokens
+                item["token_estimate"]["total"] += tokens
         for row in review_rows:
             day = str(row["review_date"] or "")
             item = days.setdefault(day, {
                 "day": day, "turn_count": 0, "raw_chars": 0,
                 "first_turn_id": 0, "last_turn_id": 0, "review": None,
+                "token_estimate": {
+                    "conversation": 0, "tools": 0, "attachments": 0,
+                    "recall": 0, "thinking": 0, "total": 0,
+                },
             })
             content = str(row["content"] or "")
             item["review"] = {
                 "content": content,
                 "chars": len(content),
+                "estimated_tokens": _estimate_context_tokens(content),
                 "updated_at": str(row["updated_at"] or ""),
             }
         return [days[key] for key in sorted(days, reverse=True)]

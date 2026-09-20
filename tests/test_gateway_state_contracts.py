@@ -37,6 +37,36 @@ class GatewayStateContractsTest(unittest.TestCase):
     def make_store(self) -> GatewayStateStore:
         return GatewayStateStore(str(self.root / "gateway_state.db"))
 
+    def test_context_days_include_component_token_estimates(self):
+        store = self.make_store()
+        raw = json.dumps({
+            "thinking": "先认真想一想",
+            "tools": [{"name": "search", "input": {"q": "测试"}, "result": "找到结果"}],
+            "attachments": [{"filename": "资料.txt", "kind": "file", "text_chars": 20}],
+            "recall": {"estimated_tokens": 42, "modules": [{"text": "召回内容"}]},
+        }, ensure_ascii=False)
+        store.record_conversation_turn(
+            profile_id="default", session_id="session-token-days", round_id=1,
+            user_text="你好", assistant_text="你好呀", raw_json=raw,
+            created_at=datetime(2026, 9, 20, 8, 0, tzinfo=timezone.utc),
+        )
+
+        days = store.list_conversation_context_days(
+            profile_id="default", session_id="session-token-days", persona_id="ombre",
+        )
+
+        self.assertEqual(len(days), 1)
+        estimate = days[0]["token_estimate"]
+        self.assertGreater(estimate["conversation"], 0)
+        self.assertGreater(estimate["tools"], 0)
+        self.assertGreater(estimate["attachments"], 0)
+        self.assertEqual(estimate["recall"], 42)
+        self.assertGreater(estimate["thinking"], 0)
+        self.assertEqual(
+            estimate["total"],
+            sum(estimate[key] for key in ("conversation", "tools", "attachments", "recall", "thinking")),
+        )
+
     def commit(
         self,
         store: GatewayStateStore,

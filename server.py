@@ -7770,7 +7770,14 @@ async def breath(
                 feels = [b for b in feels if not is_whisper_bucket(b)]
             if date_key:
                 feels = [b for b in feels if _bucket_matches_breath_date(b, date_key)]
-            feels.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+            feels.sort(
+                key=lambda b: (
+                    b["metadata"].get("event_time")
+                    or b["metadata"].get("date")
+                    or b["metadata"].get("created", "")
+                ),
+                reverse=True,
+            )
             feels = feels[:max_results]
             if not feels:
                 if date_key:
@@ -7788,8 +7795,8 @@ async def breath(
             has_entry = False
             for f in feels:
                 meta = f["metadata"]
-                created = meta.get("date") or meta.get("created", "")
-                entry = f"[{created}] [bucket_id:{f['id']}]\n{strip_wikilinks(f['content'])}"
+                event_time = meta.get("event_time") or meta.get("date") or meta.get("created", "")
+                entry = f"[{event_time}] [bucket_id:{f['id']}]\n{strip_wikilinks(f['content'])}"
                 separator = "\n---\n" if has_entry else "\n"
                 candidate = response_text + separator + entry
                 if count_tokens_approx(candidate) > max_tokens:

@@ -77,7 +77,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 
 ### feel / whisper 写入与读取
 
-无源第一人称感受用 `hold(feel=True)` 创建不带 `whisper` 标签的独立 `type=feel` 桶；已有记忆的新感受用 `comment_bucket(kind="feel")` 写成年轮，`hold(feel=True, source_bucket=...)` 会拒绝并提示改用年轮。`whisper=True` 仅保留旧客户端兼容。`breath(domain="feel")` 排除日印象和 whisper，按创建时间倒序返回，并同时受 `max_results`（默认 20）与 `max_tokens`（默认 10000）限制；历史 whisper 只能经 `domain="whisper"` 显式读取。
+无源第一人称感受用 `hold(feel=True)` 创建不带 `whisper` 标签的独立 `type=feel` 桶；已有记忆的新感受用 `comment_bucket(kind="feel")` 写成年轮，`hold(feel=True, source_bucket=...)` 会拒绝并提示改用年轮。`whisper=True` 仅保留旧客户端兼容。`breath(domain="feel")` 排除日印象和 whisper，按 `event_time` 倒序返回（缺失时兼容回退 `date`、`created`），并同时受 `max_results`（默认 20）与 `max_tokens`（默认 10000）限制；历史 whisper 只能经 `domain="whisper"` 显式读取。
 
 `breath(domain="pinned")` 是钉选桶专用读取入口，不受普通 `max_results` 条数限制；一次调用按 `max_tokens` 预算公平分配正文，并列出全部能够放入预算的钉选桶 ID、标题和内容。它不混入 protected、自我锚点或 journey。
 

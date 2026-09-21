@@ -180,6 +180,38 @@ class FeelWhisperContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("legacy-whisper", result)
         self.assertNotIn("daily-feel", result)
 
+    async def test_breath_feel_sorts_and_renders_by_event_time(self):
+        buckets = [
+            {
+                "id": "created-later",
+                "content": "后来创建，事件较早",
+                "metadata": {
+                    "type": "feel",
+                    "tags": [],
+                    "created": "2026-09-20T12:00:00+08:00",
+                    "event_time": "2026-09-01T09:00:00+08:00",
+                },
+            },
+            {
+                "id": "event-later",
+                "content": "较早创建，事件较晚",
+                "metadata": {
+                    "type": "feel",
+                    "tags": [],
+                    "created": "2026-09-10T12:00:00+08:00",
+                    "event_time": "2026-09-15T09:00:00+08:00",
+                },
+            },
+        ]
+        bucket_mgr = FakeBucketManager(buckets)
+        breath = load_server_function("breath", self.breath_namespace(bucket_mgr))
+
+        result = await breath(domain="feel", max_results=20, max_tokens=1000)
+
+        self.assertLess(result.index("event-later"), result.index("created-later"))
+        self.assertIn("[2026-09-15T09:00:00+08:00] [bucket_id:event-later]", result)
+        self.assertIn("[2026-09-01T09:00:00+08:00] [bucket_id:created-later]", result)
+
     async def test_breath_feel_obeys_token_budget_and_whisper_channel(self):
         buckets = [
             {

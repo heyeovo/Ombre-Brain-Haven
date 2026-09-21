@@ -93,7 +93,7 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 ### 5. 年轮、独立 feel 与关系天气
 
 - **年轮 comment**：再次阅读某条记忆后的感受，挂在源 bucket 上；只能陪伴可靠命中，不能单独诱发召回。
-- **独立 feel**：没有源 bucket 的第一人称感受，保存为不带 `whisper` 标签的 `type=feel`；通过 `breath(domain="feel")` 独立读取，不参与普通召回。已有源 bucket 的新感受统一用 `comment_bucket(kind="feel")` 写成年轮。
+- **独立 feel**：没有源 bucket 的第一人称感受，保存为不带 `whisper` 标签的 `type=feel`；通过 `breath(domain="feel")` 独立读取，并按 `event_time` 倒序返回（缺失时兼容回退 `date`、`created`），不参与普通召回。已有源 bucket 的新感受统一用 `comment_bucket(kind="feel")` 写成年轮。
 - **whisper**：只保留旧数据和旧客户端兼容；仍保存为带 `whisper` 标签的 `type=feel`，但不再作为当前写入方式。
 - **日印象 / 关系天气**：描述某天的关系温度，不等同于当天事实清单，默认不作为直接 seed。
 

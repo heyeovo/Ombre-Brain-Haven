@@ -972,6 +972,45 @@ class BucketManager:
         logger.info(f"Updated bucket / 更新记忆桶: {bucket_id}")
         return True
 
+    async def restore_as_feel(self, bucket_id: str, *, pinned: bool = False) -> Optional[dict]:
+        """Explicitly restore one confirmed bucket to canonical standalone-feel storage."""
+        file_path = self._find_bucket_file(bucket_id)
+        if not file_path:
+            return None
+
+        try:
+            post = frontmatter.load(file_path)
+        except Exception as e:
+            logger.warning(f"Failed to load bucket for feel restore / 加载 feel 恢复目标失败: {file_path}: {e}")
+            return None
+
+        current_importance = int(post.get("importance", 5))
+        if "importance_before_pin" in post:
+            restored_importance = int(post.get("importance_before_pin", 5))
+        elif current_importance == 10:
+            restored_importance = 5
+        else:
+            restored_importance = current_importance
+
+        post["type"] = "feel"
+        post["pinned"] = bool(pinned)
+        post["importance"] = max(1, min(10, restored_importance))
+        if "importance_before_pin" in post:
+            del post["importance_before_pin"]
+        if "type_before_pin" in post:
+            del post["type_before_pin"]
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(frontmatter.dumps(post))
+            self._move_bucket(file_path, self.feel_dir, ["沉淀物"])
+        except OSError as e:
+            logger.error(f"Failed to restore bucket as feel / 恢复 feel 桶失败: {file_path}: {e}")
+            return None
+
+        logger.info(f"Restored bucket as feel / 已恢复为 feel 桶: {bucket_id} pinned={bool(pinned)}")
+        return await self.get(bucket_id)
+
     async def add_comment(
         self,
         bucket_id: str,

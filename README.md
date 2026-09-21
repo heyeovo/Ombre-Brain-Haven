@@ -103,6 +103,8 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 
 `grow` 用于保存值得长期保留的记忆。`hold` 适合短暂抓住当前片段，`comment_bucket` 用于给已有记忆增加年轮。`hold` 成功时统一返回 `{status, action, bucket_id, bucket_name}`：`action` 为 `created` 或 `merged`。会话客户端会把成功 `hold` 返回的 bucket 记为当前原文期已写入，无论新建还是合并，都避免同一份内容紧接着被自动召回。年轮由 `comment_bucket` 单独写入。普通桶钉选会保存钉选前的 importance/type；取消钉选时恢复，旧无备份钉选桶回退为 importance 5 的普通 dynamic 桶，不再残留 999 权重。独立 feel 的钉选只表示在 Dashboard 的换窗快照和上下文拼接中默认纳入 feel 部分，不改变其 `type=feel`、importance、存储目录、衰减或读取行为，也不进入普通钉选桶分组。
 
+历史版本已经丢失全部 feel 标记的桶不能安全自动猜测；仅可用 `scripts/restore_feel_buckets.py` 按人工确认的 bucket ID 恢复。脚本默认 dry-run，只有显式传入 `--apply` 才会把目标修正为 `type=feel` 并移回 `feel/沉淀物/`。
+
 衰减引擎只计算用于排序的活跃得分。它不再自动把低重要度旧桶标为 `resolved`，也不再将低于阈值的桶归档；`resolved`、`digested` 和归档都只能由用户或 LLM 主动操作。
 
 Journal 是独立目录，不进入普通搜索、浮现或注入。`hold(journal=True)` 会实际保存模型提供的标题与 `event_time`；Dashboard 的 journal 专属接口支持读取和修改标题、正文、作者、事件时间与锁定状态，`created` 始终保留为写入时间。

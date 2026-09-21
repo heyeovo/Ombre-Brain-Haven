@@ -118,6 +118,27 @@ class PinTransitionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(Path(restored["path"]).parent.name, "沉淀物")
         self.assertEqual(Path(restored["path"]).parent.parent.name, "feel")
 
+    async def test_explicit_restore_repairs_markerless_dynamic_feel(self):
+        bucket_id = await self.manager.create(
+            content="身份标记已经丢失的旧感受",
+            name="无标记旧感受",
+            importance=5,
+            bucket_type="dynamic",
+            pinned=False,
+            tags=[],
+            domain=[],
+        )
+
+        restored = await self.manager.restore_as_feel(bucket_id, pinned=True)
+        self.assertIsNotNone(restored)
+        self.assertTrue(restored["metadata"]["pinned"])
+        self.assertEqual(restored["metadata"]["type"], "feel")
+        self.assertEqual(restored["metadata"]["importance"], 5)
+        self.assertEqual(restored["metadata"]["tags"], [])
+        self.assertEqual(restored["metadata"]["domain"], ["未分类"])
+        self.assertEqual(Path(restored["path"]).parent.name, "沉淀物")
+        self.assertEqual(Path(restored["path"]).parent.parent.name, "feel")
+
 
 if __name__ == "__main__":
     unittest.main()

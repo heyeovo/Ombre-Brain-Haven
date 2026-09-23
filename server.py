@@ -4913,6 +4913,9 @@ def _format_direct_bucket_window(
         f"matched_moment: {_moment_text(moment, 320)}",
     ]
     window = _original_window_around_moment(original, moment)
+    rings = _rendered_bucket_comments(bucket)
+    if rings and rings not in window:
+        parts.append("年轮:\n" + rings)
     if window:
         parts.append("original_window:\n" + window)
     context_lines = [
@@ -4929,8 +4932,10 @@ def _format_direct_bucket_window(
         f"{header} bucket_window",
         f"matched_moment: {_moment_text(moment, 120)}",
     ]
+    if rings and rings not in window:
+        compact_parts.append("年轮:\n" + _clip_text(rings, 220))
     if window:
-        compact_parts.append("original_window:\n" + _clip_text(window, 220))
+        compact_parts.append("original_window:\n" + _clip_text(window, 160))
     compact = "\n".join(compact_parts)
     if count_tokens_approx(compact) <= token_budget:
         return compact
@@ -5381,11 +5386,35 @@ def _direct_bucket_header(bucket: dict, moment: dict) -> str:
     ).strip()
 
 
+def _rendered_bucket_comments(bucket: dict) -> str:
+    comments = (bucket.get("metadata", {}) or {}).get("comments") or []
+    rings = []
+    if isinstance(comments, list):
+        for index, comment in enumerate(comments):
+            if not isinstance(comment, dict):
+                continue
+            content = strip_wikilinks(str(comment.get("content") or "")).strip()
+            if not content:
+                continue
+            comment_id = str(comment.get("id") or f"#{index + 1}")
+            created = str(comment.get("created") or "")[:10]
+            author = str(comment.get("author") or "")
+            labels = [f"[年轮#{index + 1}]", f"[{comment_id}]"]
+            if created:
+                labels.append(f"[日期:{created}]")
+            if author:
+                labels.append(f"[作者:{author}]")
+            rings.append(" ".join(labels) + "\n" + content)
+    return "\n\n".join(rings).strip()
+
+
 def _rendered_bucket_content(bucket: dict) -> str:
     text = strip_wikilinks(str(bucket.get("content") or ""))
     text = strip_display_temperature_sections(text)
     text = strip_followup_sections(text)
-    return strip_temperature_meaning_lines(text).strip()
+    body = strip_temperature_meaning_lines(text).strip()
+    rings = _rendered_bucket_comments(bucket)
+    return "\n\n".join(part for part in (body, rings) if part).strip()
 
 
 def _original_window_around_moment(original: str, moment: dict, max_chars: int = 760) -> str:
@@ -9187,9 +9216,9 @@ async def api_bucket_comment(request):
     })
 
 
-@mcp.custom_route("/api/bucket/{bucket_id}/comments/{comment_id}", methods=["DELETE"])
-async def api_bucket_comment_delete(request):
-    """Delete a dashboard-authenticated user comment from a bucket."""
+@mcp.custom_route("/api/bucket/{bucket_id}/comments/{comment_id}", methods=["PATCH", "DELETE"])
+async def api_bucket_comment_mutation(request):
+    """Update or delete one comment through the authenticated dashboard."""
     from starlette.responses import JSONResponse
 
     err = _require_dashboard_auth(request)
@@ -9205,26 +9234,35 @@ async def api_bucket_comment_delete(request):
     if not await bucket_mgr.get(bucket_id):
         return JSONResponse({"error": "not found", "id": bucket_id}, status_code=404)
 
-    result = await bucket_mgr.delete_comment(
-        bucket_id,
-        comment_id,
-        allowed_author=_dashboard_author_name(),
-        allowed_source="dashboard",
-    )
+    if request.method == "PATCH":
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid json body"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "json body must be an object"}, status_code=400)
+        content = str(body.get("content") or "").strip()
+        if not content:
+            return JSONResponse({"error": "empty content"}, status_code=400)
+        result = await bucket_mgr.update_comment(bucket_id, comment_id, content)
+        expected_status = "updated"
+    else:
+        result = await bucket_mgr.delete_comment(bucket_id, comment_id)
+        expected_status = "deleted"
+
     if result.get("status") == "not_found":
         return JSONResponse({"error": "comment not found"}, status_code=404)
-    if result.get("status") == "forbidden":
-        return JSONResponse({"error": "only dashboard user comments can be deleted"}, status_code=403)
-    if result.get("status") != "deleted":
-        return JSONResponse({"error": "delete failed"}, status_code=500)
+    if result.get("status") != expected_status:
+        return JSONResponse({"error": f"{expected_status.removesuffix('d')} failed"}, status_code=500)
 
     embedding_queued = _queue_embedding_refresh(bucket_id)
 
     bucket = await bucket_mgr.get(bucket_id)
     return JSONResponse({
-        "status": "deleted",
+        "status": expected_status,
         "id": bucket_id,
         "comment_id": comment_id,
+        "comment": result.get("comment"),
         "embedding_refreshed": False,
         "embedding_queued": embedding_queued,
         "metadata": _bucket_read_payload(bucket)["metadata"] if bucket else {},

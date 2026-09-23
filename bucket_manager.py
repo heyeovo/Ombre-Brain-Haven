@@ -1136,6 +1136,52 @@ class BucketManager:
         logger.info(f"Deleted bucket comment / 已删除年轮: {bucket_id}#{comment_id}")
         return {"status": "deleted", "comment": target}
 
+    async def update_comment(
+        self,
+        bucket_id: str,
+        comment_id: str,
+        content: str,
+    ) -> dict:
+        """Update one ring's text while preserving its identity and provenance."""
+        file_path = self._find_bucket_file(bucket_id)
+        clean_content = str(content or "").strip()
+        if not file_path or not comment_id:
+            return {"status": "not_found"}
+        if not clean_content:
+            return {"status": "invalid", "reason": "empty_content"}
+
+        try:
+            post = frontmatter.load(file_path)
+        except Exception as e:
+            logger.warning(f"Failed to load bucket for comment update / 加载评论修改目标失败: {file_path}: {e}")
+            return {"status": "not_found"}
+
+        comments = post.get("comments", [])
+        if not isinstance(comments, list):
+            return {"status": "not_found"}
+
+        target = None
+        for comment in comments:
+            if isinstance(comment, dict) and str(comment.get("id") or "") == str(comment_id):
+                comment["content"] = clean_content
+                target = comment
+                break
+        if target is None:
+            return {"status": "not_found"}
+
+        post["comments"] = comments
+        post["comment_count"] = len(comments)
+        post["updated_at"] = now_iso()
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(frontmatter.dumps(post))
+        except OSError as e:
+            logger.error(f"Failed to update bucket comment / 修改桶评论失败: {file_path}: {e}")
+            return {"status": "failed", "comment": target}
+
+        logger.info(f"Updated bucket comment / 已修改年轮: {bucket_id}#{comment_id}")
+        return {"status": "updated", "comment": target}
+
     # ---------------------------------------------------------
     # Wikilink injection — DISABLED
     # 自动添加 Obsidian 双链 — 已禁用

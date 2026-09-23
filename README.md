@@ -92,7 +92,7 @@ Word Map 是从记忆派生的词与共现关系，适合诊断和提供弱提�
 
 ### 5. 年轮、独立 feel 与关系天气
 
-- **年轮 comment**：再次阅读某条记忆后的感受，挂在源 bucket 上；只能陪伴可靠命中，不能单独诱发召回。
+- **年轮 comment**：再次阅读某条记忆后的感受，挂在源 bucket 上；只能陪伴可靠命中，不能单独诱发召回。源 bucket 被可靠召回时，年轮会按 `read_bucket` 的标签格式随正文返回；Dashboard 可逐条编辑或删除。
 - **独立 feel**：没有源 bucket 的第一人称感受，保存为不带 `whisper` 标签的 `type=feel`；通过 `breath(domain="feel")` 独立读取，并按 `event_time` 倒序返回（缺失时兼容回退 `date`、`created`），不参与普通召回。已有源 bucket 的新感受统一用 `comment_bucket(kind="feel")` 写成年轮。
 - **whisper**：只保留旧数据和旧客户端兼容；仍保存为带 `whisper` 标签的 `type=feel`，但不再作为当前写入方式。
 - **日印象 / 关系天气**：描述某天的关系温度，不等同于当天事实清单，默认不作为直接 seed。
@@ -550,7 +550,7 @@ Codex 接线时注意：
 | `breath` | 浮现记忆、按 query/date 查询、执行新窗口 handoff；`domain="pinned"` 一次读取钉选桶全集（受 `max_tokens` 总预算约束） |
 | `grow` | 写入或合并长期记忆 |
 | `hold` | 暂存当前值得抓住的片段；成功返回 `{status, action, bucket_id, bucket_name}` |
-| `read_bucket` | 读取指定 bucket 原文；journey 额外列出证据桶名称与 ID |
+| `read_bucket` | 读取指定 bucket 原文与全部年轮；journey 额外列出证据桶名称与 ID |
 | `read_daily_reviews` | 按日期范围或最近若干已结束日历日只读当前独立日回顾；返回缺失日期，不暴露来源窗口 |
 | `comment_bucket` / `delete_bucket_comment` | 添加或删除年轮 |
 | `profile_fact` | 管理带证据的画像事实 |

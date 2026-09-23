@@ -156,7 +156,8 @@ POST   /api/touch/{bucket_id}?ripple=true/false     # 轻触/激活
 POST   /api/archive/{bucket_id}              # 归档
 POST   /api/unarchive/{bucket_id}            # 恢复归档
 POST   /api/bucket/{bucket_id}/comments      # 评论
-DELETE /api/bucket/{bucket_id}/comments/{comment_id}
+PATCH  /api/bucket/{bucket_id}/comments/{comment_id}  # 修改单条年轮正文
+DELETE /api/bucket/{bucket_id}/comments/{comment_id}  # 删除单条年轮
 ```
 
 ### 回收站
@@ -297,6 +298,8 @@ GET /api/debug/injections             # 注入调试；含检索前排除桶及 
 ### 重构召回正式决策
 
 `recall_policy.py` 的 `RecallNecessityPlan` 在候选相关性之前判断 `none / explicit / contextual`，并用 `targetable` 防止无目标明确请求扩大检索。`gateway.py` 先组合关键词、语义、精确锚点、关系轴与 planner 补充结果形成有界中性候选池，再由统一 relevance 和代码版 `promote / neutral / reject` utility 产生正式桶结果，最多一张卡；旧 admission、旧选卡与 legacy 切换已退出运行路径。排序使用 `score_without_freshness`，保留重要度、相关性和 session 防重复但不使用长期记忆 freshness。普通 keyword-only 或纯标题命中不能靠分数下限证明相关。语义查询默认超时为 5 秒；在 `query_timeout/query_failed/query_embedding_unavailable/query_embedding_failed` 时，`explicit` 要求可信主题同时命中标题与正文且 keyword >= 0.65，`contextual` 要求可信主题命中正文且 keyword >= 0.83；`disabled_for_request` 不属于故障降级。`recall_shadow_debug` 是兼容保留的字段名，记录统一审核的 `candidate_origin / retrieval_score / rebuilt_score / rebuilt_freshness_ignored`、`effective_bucket_ids`、`eligible_unselected_candidates` 与拒绝候选，不再比较 legacy/rebuilt。旧 source-record 后置追加不得绕过 Utility 或单卡上限。Dashboard session 的 `injected_buckets ∪ session_created_buckets` 排除集合会先从 Hook 候选池移除，并在输出前再次硬过滤；排除桶不能返回，也不能抢占单卡位。Hook 卡片正文后只可附一行最多两个显式关系边的桶名与 ID，不附关联正文。
+
+普通召回一旦可靠命中桶，输出正文后会按 `read_bucket` 的标签格式附带该桶年轮；年轮仍不能独立成为召回 seed。大桶进入局部窗口模式时优先保留受 token 预算约束的年轮文本，再压缩正文窗口。
 
 ### 噪声系统
 噪声 = `resolved=true AND importance=1`。标记时写入 `importance_before_noise` 备份；撤销时自动恢复。`search()` 默认排除，`include_noise=true` 可包含。各 API 响应含 `"noise": bool` 字段。

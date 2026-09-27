@@ -1,11 +1,25 @@
 # Ombre-Brain-Haven 项目规则
 
-本文件只记录 Haven 特有的代理工作约束。通用的调查纪律、修改确认、git 和换窗归档规则继承用户全局 `AGENTS.md`。
+Ombre Brain 记忆系统后端（Python FastMCP + Starlette，Brain `server.py` + Gateway `gateway.py` 双进程），和前端 ob-dashboard2 一起部署在 VPS，由 Coolify 管理。
+
+本文件是本仓库唯一的入口：Codex 自动读取，Claude Code 通过 `CLAUDE.md` 的 `@AGENTS.md` 读取。只放每次都要知道的东西，查表资料放 `docs/reference.md`。通用协作规范（先讨论后动手、不扩散范围、git）以 dashboard `AGENTS.md`「协作规范」为准；Codex 另有用户全局 `AGENTS.md` 时一并遵守。
+
+## 开工必读
+
+| 什么时候 | 读什么 |
+|---|---|
+| 每个工作窗口 | 本文件 + dashboard 仓库 `MAINTENANCE_CONTRACT.md` |
+| 涉及 Dashboard、VPS、Coolify、发布、回滚 | dashboard 仓库 `AGENTS.md` |
+| 动召回 / 排查召回问题 | `docs/recall-pipeline.md`，再进代码 |
+| 动记忆系统整体方向 | `docs/memory-system-roadmap.md` |
+| 找模块、REST 路由、实现细节、调试命令 | `docs/reference.md`，先 Grep 再定点读 |
 
 ## 文档职责
 
-- `CLAUDE.md` 记录当前已经成立的模块、路由和实现契约，不记录阶段进度或后续窗口任务。
+- `AGENTS.md`：入口、必读清单、硬规矩。
+- `docs/reference.md`：当前已经成立的模块、路由和实现契约，不记录阶段进度或后续窗口任务。
 - 系统级总览、部署和客户端接入以 `README.md` 为准；环境变量以 `ENV_VARS.md` 为准。
+- 给外部模型的行为指引：`CLAUDE_PROMPT.md`、`docs/Tool Guide.md`。
 - 跨仓库改动完成后，按相邻 dashboard 仓库的 `MAINTENANCE_CONTRACT.md` 判断需要同步的文档。
 - 待办分流见 dashboard 仓库 `MAINTENANCE_CONTRACT.md` 铁律 4：想做的活 → OB Todo，代码债和技术卡 → dashboard `TECH_DEBT.md`，handoff 是历史档案（状态看 dashboard `docs/handoff/README.md`）。
 
@@ -15,10 +29,6 @@
 - 数据库表结构变更必须兼容已有数据库，初始化迁移必须可重复执行；同时补旧库升级和重复初始化测试。
 - 会话数据的新增、读取和删除必须保留 `profile_id` 隔离。旧表做不到安全隔离时，宁可暂不删除并记录技术债务，不得扩大删除范围。
 - 含密钥配置不能返回浏览器；浏览器只接收掩码后的值。
-
-## 架构文档
-
-- 动态召回 pipeline 架构见 `docs/recall-pipeline.md`，排查召回问题时先读这个文件再进代码。
 
 ## 验证与 Coolify 发布
 

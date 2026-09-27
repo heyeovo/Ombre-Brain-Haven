@@ -4035,6 +4035,72 @@ class GatewayService:
         return JSONResponse({"ok": True, "snapshot": snapshot})
 
     # ------------------------------------------------------------------
+    # cc 跨设备外观配置。图片与 JSON 同在 gateway_state.db 中，部署后仍可读取。
+    # ------------------------------------------------------------------
+
+    async def handle_cc_appearance_get(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        return JSONResponse({"ok": True, "appearance": self.state_store.load_cc_appearance()})
+
+    async def handle_cc_appearance_save(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid appearance payload"}, status_code=400)
+        value = body.get("appearance") if isinstance(body.get("appearance"), dict) else body
+        return JSONResponse({"ok": True, "appearance": self.state_store.save_cc_appearance(value)})
+
+    async def handle_cc_appearance_background(self, request: Request) -> Response:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        if request.method == "GET":
+            asset = self.state_store.load_cc_appearance_background()
+            if not asset or (
+                request.query_params.get("assetId")
+                and request.query_params["assetId"] != asset["asset_id"]
+            ):
+                return JSONResponse({"error": "background not found"}, status_code=404)
+            return Response(
+                asset["image_data"],
+                media_type=asset["mime_type"],
+                headers={"Cache-Control": "private, no-store"},
+            )
+        if request.method == "DELETE":
+            self.state_store.delete_cc_appearance_background()
+            return JSONResponse({"ok": True, "appearance": self.state_store.load_cc_appearance()})
+
+        from appearance_config import MAX_UPLOAD_BYTES, compress_background
+
+        try:
+            length = int(request.headers.get("content-length") or 0)
+        except ValueError:
+            length = 0
+        if length > MAX_UPLOAD_BYTES + 100_000:
+            return JSONResponse({"error": "background image is too large"}, status_code=413)
+        try:
+            form = await request.form()
+            upload = form.get("file")
+            if upload is None or not hasattr(upload, "read"):
+                raise ValueError("file is required")
+            declared_mime = str(getattr(upload, "content_type", "") or "").lower()
+            data = await upload.read(MAX_UPLOAD_BYTES + 1)
+            asset_id, mime_type, compressed = compress_background(data, declared_mime)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except Exception:
+            return JSONResponse({"error": "invalid background upload"}, status_code=400)
+        self.state_store.save_cc_appearance_background(asset_id, mime_type, compressed)
+        return JSONResponse({"ok": True, "assetId": asset_id})
+
+    # ------------------------------------------------------------------
     # cc 前端永久工具权限
     # 只保存经过 dashboard 校验的细粒度 allow 规则；会话级权限不进 Haven。
     # ------------------------------------------------------------------
@@ -22744,6 +22810,15 @@ def create_gateway_app(
             return await service.handle_cc_permissions_save(request)
         return await service.handle_cc_permissions_get(request)
 
+    async def cc_appearance(request: Request) -> Response:
+        service = request.app.state.gateway_service
+        if request.method == "POST":
+            return await service.handle_cc_appearance_save(request)
+        return await service.handle_cc_appearance_get(request)
+
+    async def cc_appearance_background(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_cc_appearance_background(request)
+
     async def cc_mcp(request: Request) -> Response:
         service = request.app.state.gateway_service
         if request.method == "POST":
@@ -22772,6 +22847,8 @@ def create_gateway_app(
             Route("/api/daily-reviews", daily_reviews, methods=["GET", "PATCH"]),
             Route("/api/persona/exchange", persona_exchange, methods=["POST"]),
             Route("/api/cc/personas", cc_personas, methods=["GET", "POST", "DELETE"]),
+            Route("/api/cc/appearance", cc_appearance, methods=["GET", "POST"]),
+            Route("/api/cc/appearance/background", cc_appearance_background, methods=["GET", "POST", "DELETE"]),
             Route("/api/cc/upstream", cc_upstream, methods=["GET", "POST"]),
             Route("/api/cc/pro-usage-snapshot", cc_pro_usage_snapshot, methods=["GET", "POST"]),
             Route("/api/cc/permissions", cc_permissions, methods=["GET", "POST"]),

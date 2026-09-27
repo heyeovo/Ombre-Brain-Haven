@@ -17146,6 +17146,12 @@ if __name__ == "__main__":
                 if request.method == "DELETE":
                     return await _gw_service.handle_cc_personas_delete(request)
                 return await _gw_service.handle_cc_personas_list(request)
+            async def _gw_cc_appearance(request):
+                if request.method == "POST":
+                    return await _gw_service.handle_cc_appearance_save(request)
+                return await _gw_service.handle_cc_appearance_get(request)
+            async def _gw_cc_appearance_background(request):
+                return await _gw_service.handle_cc_appearance_background(request)
             async def _gw_cc_upstream(request):
                 if request.method == "POST":
                     return await _gw_service.handle_cc_upstream_save(request)
@@ -17184,6 +17190,8 @@ if __name__ == "__main__":
                 _GwRoute("/gateway/api/daily-reviews", _gw_daily_reviews, methods=["GET", "PATCH"]),
                 _GwRoute("/gateway/api/persona/exchange", _gw_persona_exchange, methods=["POST"]),
                 _GwRoute("/gateway/api/cc/personas", _gw_cc_personas, methods=["GET", "POST", "DELETE"]),
+                _GwRoute("/gateway/api/cc/appearance", _gw_cc_appearance, methods=["GET", "POST"]),
+                _GwRoute("/gateway/api/cc/appearance/background", _gw_cc_appearance_background, methods=["GET", "POST", "DELETE"]),
                 _GwRoute("/gateway/api/cc/upstream", _gw_cc_upstream, methods=["GET", "POST"]),
                 _GwRoute("/gateway/api/cc/pro-usage-snapshot", _gw_cc_pro_usage_snapshot, methods=["GET", "POST"]),
                 _GwRoute("/gateway/api/cc/permissions", _gw_cc_permissions, methods=["GET", "POST"]),

@@ -37,6 +37,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `server.py` | **Brain** 入口（~640KB）。MCP 工具注册（`@mcp.custom_route`）+ REST API + 记忆核心 |
 | `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线（透镜调试区分检索前排除与相关性拒绝）+ cc 持久化路由（`Route()` 注册） |
 | `gateway_state.py` | Gateway/cc SQLite 状态：带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式、固定 handoff、版本化按天滚动配置及 turn watermark、每协作者唯一主窗标记、软删除防复活、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision 成对指针及上一检查点、显式 Haven 正文恢复的原子 lane 切换记录、Context GC 配置/历史、带 `created/recalled/breath` 原因与 context revision 生命周期的召回隔离账本；日期清单按日汇总正文、工具、附件视觉/文件正文、召回、thinking、运行时时间戳、消息框架和 agent wake 的 token 预估；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox，正式主动消息还会在该事务内解除缓存保活的临时暂停，no-op 不解除 |
+| `appearance_config.py` | Dashboard 外观配置的服务端白名单 normalize，背景图 MIME/体积/尺寸校验、EXIF 方向修正与压缩；不接受客户端直接指定任意图片路径 |
 | `conversation_slice_store.py` | CC 自动聊天切片的独立 SQLite 契约：在 `gateway_state.db` 中维护版本化批次、切片、任务状态、CAS 重切 revision 与独立 embedding 元数据；负责永久消息规范化 hash、source/coverage 校验、幂等创建、原子激活、source 变化失效及窗口永久删除级联。本模块不调用模型、不做召回或 Context 注入 |
 | `conversation_slice_engine.py` | CC 自动聊天切片离线生成的未完成工作流：保留版本化硬约束、按 session 隔离的切片、slice-only、raw 退出入队、人工重切、最多 14 个真实聊天日的首批回填估算与显式任务执行；正式日回顾不调用本模块，后台暂不自动消费恢复队列，也不做召回或 Context 注入 |
 | `agent_wake_store.py` | CC 主动唤醒的 Haven 持久控制面：在 `gateway_state.db` 中维护 profile/session/lane 级 schedule、双开关、cache/agent/silence 时钟、版本 CAS、到期 claim、可恢复 lease 与幂等 wake run；只负责持久契约，不执行模型 turn |
@@ -188,6 +189,10 @@ POST /api/bucket/{bucket_id}/merge-commit?into={id}      # 确认合并（更新
 
 ### Gateway / cc 会话持久化
 ```
+GET|POST /gateway/api/cc/appearance
+       # 跨设备外观配置；未知字段和越界值由 Haven normalize
+GET|POST|DELETE /gateway/api/cc/appearance/background
+       # Bearer 私有图片读取、上传压缩后替换当前唯一图片、删除图片
 POST   /gateway/api/conversation/turn
        # 兼容旧写入；携带 request_id + expected_last_round_id + persona_id 时
        # 使用原子 compare-and-append，并可同轮绑定附件、wake/silence schedule、usage/cache 与活动时间
@@ -340,13 +345,17 @@ GET /api/debug/injections             # 注入调试；含检索前排除桶及 
 cc 配置/用户数据由 **Gateway** 持久化到 Haven 数据库，路由注册在 `gateway.py`（~21441 行 `Route()` 列表）：
 ```
 /api/cc/personas      # 协作者（含 dirs/write_dirs 与 selfhost_defaults；密钥硬拦）
+/api/cc/appearance    # 跨设备外观 JSON（cc_appearance_config 表）
+/api/cc/appearance/background  # 当前单张背景图（cc_appearance_background 表）
 /api/cc/upstream      # 上游模型配置（cc_upstream_config 表）
 /api/cc/permissions   # 写权限批准
 /api/cc/mcp           # MCP 工具配置
 /api/cc/pro-usage-snapshot  # 当前 profile 最近一次 Pro 额度快照；GET / POST 单条覆盖
 /api/notifications/bark     # Bark 掩码配置、最近状态与测试推送；GET / PATCH / POST
 ```
-dashboards 的 `/api/gateway/[...path]` 代理到这些路由，Bearer 网关鉴权。
+Dashboard 的 cc 代理通过服务端 Bearer 访问这些路由；外观使用专用 `/api/appearance` 代理，其他通用 Gateway 请求可走 `/api/gateway/[...path]`。
+
+外观配置与当前单张背景图存 `gateway_state.db`，不是 Dashboard 本地文件。配置仅接受 `linen` 主题、gradient/upload/none 背景、玻璃参数、标题字体与字号、雨痕模式与强度；upload 只能引用库中当前 asset ID。上传限 JPEG/PNG/WebP、5 MB 与 3000 万像素，服务端修正 EXIF 方向并压到最长边 1920px 的 JPEG。删除图片时上传背景配置回到 gradient；旧库建表迁移可重复执行。
 
 会话轮次存 `conversation_turns`，每轮同时分配稳定的 `user_message_id` / `assistant_message_id`，并按窗口时区与日界线保存 `chat_day`；旧行启动迁移时确定性回填。窗口状态存 `conversation_sessions`，其中 `pinned_at` 为每个 persona 至多一个的手动主窗标记；软删除会清除此标记和同 profile/session 的 wake 记录，严格写入拒绝向已删除窗口追加 turn，防止后台任务使窗口复活。滚动配置版本存 `conversation_context_versions`，只保存配置与保存时的 turn watermark，不为每次请求复制整份上下文。图片/文件元数据与文件解析正文存 `conversation_attachments`；图片同时保存宽高与 Anthropic 视觉 token 估算，旧图片只要私有源文件尚未清除，日期统计即可从文件头补算；私有文件位于 `buckets_dir/cc-attachments`。`conversation_turns.turn_kind` 兼容区分 `user` / `agent_wake`，旧行默认 `user`；wake 可保存空 assistant 正文，并在 `raw_json` 记录 wake event、next wake、usage 与版本化 `display_segments`。主动唤醒控制面与会话表共用 `gateway_state.db`：`agent_wake_schedules` 按 `profile_id + session_id + lane_id` 隔离 cache/agent/silence 三类时钟、窗口 Bark 开关、CAS 版本和 lease，`agent_wake_runs` 以 `wake_id` 保存幂等运行状态；窗口软删除或永久删除时清理同 profile/session 的 wake 记录。`bark_profile_configs` 按 profile 保存 server URL、device key、加密 key 和分段策略，读取只返回掩码；`notification_outbox` 在可见 agent wake turn 的同一事务内按 `profile_id + turn_id + segment_index + splitter_version` 幂等创建，独立 worker 顺序发送、失败重试并在重启后恢复。
 

@@ -1109,6 +1109,26 @@ class GatewayStateStore:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cc_appearance_config (
+                id TEXT PRIMARY KEY,
+                payload TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cc_appearance_background (
+                id TEXT PRIMARY KEY,
+                asset_id TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                image_data BLOB NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
         initialize_agent_wake_schema(conn)
         initialize_bark_notification_schema(conn)
         try:
@@ -1581,6 +1601,94 @@ class GatewayStateStore:
         conn.commit()
         conn.close()
         return self.load_cc_pro_usage_snapshot(profile_id=safe_profile_id)
+
+    # ------------------------------------------------------------------
+    # cc 外观配置与当前背景图
+    # ------------------------------------------------------------------
+
+    def load_cc_appearance_background(self) -> dict[str, Any] | None:
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT asset_id, mime_type, image_data FROM cc_appearance_background WHERE id = 'default'"
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def save_cc_appearance_background(self, asset_id: str, mime_type: str, image_data: bytes) -> None:
+        from utils import now_iso
+
+        conn = self._connect()
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO cc_appearance_background
+            (id, asset_id, mime_type, image_data, updated_at) VALUES ('default', ?, ?, ?, ?)
+            """,
+            (asset_id, mime_type, image_data, now_iso()),
+        )
+        conn.commit()
+        conn.close()
+
+    def delete_cc_appearance_background(self) -> None:
+        from appearance_config import normalize_appearance
+        from utils import now_iso
+
+        conn = self._connect()
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT payload FROM cc_appearance_config WHERE id = 'default'"
+        ).fetchone()
+        try:
+            payload = json.loads(row["payload"]) if row else {}
+        except (TypeError, ValueError):
+            payload = {}
+        conn.execute("DELETE FROM cc_appearance_background WHERE id = 'default'")
+        safe = normalize_appearance(payload, "")
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO cc_appearance_config (id, payload, updated_at)
+            VALUES ('default', ?, ?)
+            """,
+            (json.dumps(safe, ensure_ascii=False), now_iso()),
+        )
+        conn.commit()
+        conn.close()
+
+    def load_cc_appearance(self) -> dict[str, Any]:
+        from appearance_config import normalize_appearance
+
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT payload FROM cc_appearance_config WHERE id = 'default'"
+        ).fetchone()
+        asset = conn.execute(
+            "SELECT asset_id FROM cc_appearance_background WHERE id = 'default'"
+        ).fetchone()
+        conn.close()
+        try:
+            payload = json.loads(row["payload"]) if row else {}
+        except (TypeError, ValueError):
+            payload = {}
+        return normalize_appearance(payload, str(asset["asset_id"]) if asset else "")
+
+    def save_cc_appearance(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from appearance_config import normalize_appearance
+        from utils import now_iso
+
+        conn = self._connect()
+        asset = conn.execute(
+            "SELECT asset_id FROM cc_appearance_background WHERE id = 'default'"
+        ).fetchone()
+        safe = normalize_appearance(payload, str(asset["asset_id"]) if asset else "")
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO cc_appearance_config (id, payload, updated_at)
+            VALUES ('default', ?, ?)
+            """,
+            (json.dumps(safe, ensure_ascii=False), now_iso()),
+        )
+        conn.commit()
+        conn.close()
+        return safe
 
     # ------------------------------------------------------------------
     # cc 前端永久工具权限

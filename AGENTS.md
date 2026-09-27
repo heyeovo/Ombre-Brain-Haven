@@ -7,7 +7,7 @@
 - `CLAUDE.md` 记录当前已经成立的模块、路由和实现契约，不记录阶段进度或后续窗口任务。
 - 系统级总览、部署和客户端接入以 `README.md` 为准；环境变量以 `ENV_VARS.md` 为准。
 - 跨仓库改动完成后，按相邻 dashboard 仓库的 `MAINTENANCE_CONTRACT.md` 判断需要同步的文档。
-- 已排入后续窗口的工作写入对应 handoff；没有明确排期的长期遗留才写入 dashboard 仓库的 `TECH_DEBT.md`。
+- 待办分流见 dashboard 仓库 `MAINTENANCE_CONTRACT.md` 铁律 4：想做的活 → OB Todo，代码债和技术卡 → dashboard `TECH_DEBT.md`，handoff 是历史档案（状态看 dashboard `docs/handoff/README.md`）。
 
 ## 持久化与迁移
 

@@ -28,3 +28,6 @@ data/
 tests/integration/
 tests/regression/
 tests/unit/
+
+# local git credential store (never commit)
+.git-credentials

@@ -2462,9 +2462,10 @@ async def _auto_generate_write_moment_if_needed(
     domain: list | tuple | set | str | None = None,
 ) -> str:
     _ = tags
-    if _is_self_anchor_write_content(self_anchor, domain):
-        return str(content or "").strip()
-    return await _auto_generate_moment_if_missing(content)
+    # Auto moment generation disabled: section headings made buckets feel
+    # like forms instead of natural writing. The moment index still works
+    # on manually written ### moment sections in legacy buckets.
+    return str(content or "").strip()
 
 
 def _bucket_read_payload(bucket: dict) -> dict:
@@ -7735,6 +7736,7 @@ async def breath(
                 bucket for bucket in all_buckets
                 if bucket.get("metadata", {}).get("pinned")
                 and not is_self_anchor_bucket(bucket)
+                and bucket.get("metadata", {}).get("type") != "feel"
                 and "journey" not in {
                     str(item).strip().lower()
                     for item in bucket.get("metadata", {}).get("domain", []) or []
@@ -7799,15 +7801,15 @@ async def breath(
                 feels = [b for b in feels if not is_whisper_bucket(b)]
             if date_key:
                 feels = [b for b in feels if _bucket_matches_breath_date(b, date_key)]
-            feels.sort(
-                key=lambda b: (
-                    b["metadata"].get("event_time")
-                    or b["metadata"].get("date")
-                    or b["metadata"].get("created", "")
-                ),
-                reverse=True,
-            )
-            feels = feels[:max_results]
+            def _feel_sort_key(b):
+                meta = b["metadata"]
+                return meta.get("event_time") or meta.get("date") or meta.get("created", "")
+            # Pinned feels surface first; each group is ordered by event time.
+            pinned_feels = [b for b in feels if b["metadata"].get("pinned")]
+            unpinned_feels = [b for b in feels if not b["metadata"].get("pinned")]
+            pinned_feels.sort(key=_feel_sort_key, reverse=True)
+            unpinned_feels.sort(key=_feel_sort_key, reverse=True)
+            feels = (pinned_feels + unpinned_feels)[:max_results]
             if not feels:
                 if date_key:
                     return f"{date_key} 没有找到 {domain_key}。"
@@ -9669,7 +9671,7 @@ async def _grow_direct_structured_content(content: str, title: str = "", gate_pr
 
 @mcp.tool()
 async def grow(content: str, auto: bool = False, source: str = "", title: str = "", context: Context | None = None) -> str:
-    """把筛过的长片段拆成少量长期记忆；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。只有多个已筛选长期记忆点才用 grow，别塞整段流水账。保留原文称呼、昵称、互称、自称和原话，不要把临时称呼推成稳定画像事实。title 可选，短内容时传了就用你给的标题。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection。需要之后轻轻提醒/照顾备忘的事项用 reminder_create，不写进长期记忆。feel 年轮只写第一人称感受，不写分段标题。"""
+    """把筛过的长片段拆成少量长期记忆；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。只有多个已筛选长期记忆点才用 grow，别塞整段流水账。保留原文称呼、昵称、互称、自称和原话，不要把临时称呼推成稳定画像事实。title 可选，短内容时传了就用你给的标题。content 用自然语言写，事件、原话、感受融在正文里，不要用 ### moment / ### original / ### reflection 分段。需要之后轻轻提醒/照顾备忘的事项用 reminder_create，不写进长期记忆。feel 年轮只写第一人称感受，不写分段标题。"""
     await decay_engine.ensure_started()
 
     if not content or not content.strip():

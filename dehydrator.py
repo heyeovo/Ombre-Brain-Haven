@@ -144,12 +144,8 @@ DIGEST_PROMPT_TEMPLATE = """你是一个长期记忆摘记专家。用户会发�
    relationship: {ai_name} 应该如何承接、回应、记住约定，或这段关系形成的默契。
    event: 一段带过程的事件、项目状态、承诺进展或背景事实。
    stable_boundary: 长期稳定偏好/边界/身份事实；short_state: 只影响近期的状态；process_event: 带过程的事件/项目状态；relationship_lesson: {ai_name} 以后应该怎么接住这件事。
-13. content 最少要有正文。section 按需写，没必要就省略：
-   - 正文：自然语言总结或直接事件描述。
-   - ### moment：长期有用的事实、事件、偏好、约定，只写短短一句。
-   - ### original：只放必须保留原味的短原话；不要复制长段原文，不要为了“有证据”而写。
-   - ### reflection：{ai_name} 对这件事的理解、以后该怎么回应、哪里需要克制或记住。
-14. ### moment 可以用第三人称客观记录；### reflection 必须保留为 {ai_name} 的第一人称反思，使用“我记得 / 我明白 / 我以后 / 我喜欢 / 我会”等表达，不要改写成“{ai_name} 应记住 / {ai_name} 需要 / 关于 {ai_name} 的说明”。
+13. content 用自然语言写，事件描述、原话引用、感受融在正文里，不要用 ### moment / ### original / ### reflection 分段标题。值得保留原味的短原话直接嵌在正文中（如”她说了一句'……'”），感受和理解也自然地写进正文。
+14. 正文中 {ai_name} 的感受和理解用第一人称（”我记得 / 我明白 / 我以后”），事实描述可以用第三人称。
 
 输出格式（纯 JSON 数组，无其他内容）：
 [
@@ -203,8 +199,8 @@ MERGE_PROMPT_TEMPLATE = """你是一个信息合并专家。请将旧记忆与�
 5. 对出现的人名、地名、专有名词用 [[双链]] 标记（如 [[婷易]]、[[Obsidian]]），普通词汇不要加
 6. 原文里的具体称呼、昵称、互称、自称和亲密称谓必须原样保留，例如“老公”“哥哥”“宝宝”“老婆”等；不要把这些称呼改写成 {user_display_name}、{ai_name}、用户、AI、assistant 或模型。
 7. 称呼本身只是原话或互动语气，不能自动推断成稳定画像事实；只有原文明确表达长期关系定位、稳定偏好或明确约定时，才写入稳定事实或回应规则。
-8. 合并后的 content 最少要有正文。section 按需写，没必要就省略：### moment 只放一条长期有用的短事实；### original 只放必须保留原味的短原话，不要复制长段原文，不要为了“有证据”而写；### reflection 放 {ai_name} 的理解、以后该怎么回应、哪里需要克制或记住。
-9. 保留旧记忆和新内容已有的 section 语义与人称。### moment 可以客观第三人称；### reflection 是 {ai_name} 的第一人称反思，合并时不要把“我”改写成“{ai_name} 应记住 / {ai_name} 需要 / 关于 {ai_name} 的说明”。如果原 reflection 已经是第一人称，必须继续第一人称。
+8. 合并后的 content 用自然语言写，事件、原话、感受融在正文里。如果旧记忆已有 ### moment / ### original / ### reflection 分段，合并时保留它们的内容但不要给新内容新增分段。
+9. {ai_name} 的感受和理解用第一人称（”我记得 / 我明白 / 我以后”），合并时不要把”我”改写成”{ai_name} 应记住 / {ai_name} 需要”。
 
 直接输出合并后的文本，不要加额外说明。"""
 
@@ -212,7 +208,7 @@ MERGE_PROMPT = render_identity_template(MERGE_PROMPT_TEMPLATE, generic_identity_
 
 MERGE_PRODUCT_PROMPT = """把新旧记忆整理成一份自然、紧凑但仍保留情绪温度的记录。
 优先保留具体事实、关键称呼、短原话、承诺与关系变化；删除真正重复的表达。
-正文不要写成报告，reflection 保持当前协作者的第一人称。"""
+正文不要写成报告，感受和理解保持当前协作者的第一人称。"""
 
 
 # --- Auto-tagging prompt: analyze content for domain and emotion coords ---

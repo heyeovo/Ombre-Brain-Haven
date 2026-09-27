@@ -276,14 +276,16 @@ def infer_bucket_layer(bucket: dict[str, Any] | None) -> str:
         return LAYER_DREAM
     if bucket_type == "feel" and tags & RELATIONSHIP_WEATHER_TAGS:
         return LAYER_RELATIONSHIP_WEATHER
+    # Feel buckets stay in AFFECT_CONTEXT even when pinned — pinned flag
+    # means "show first in feel retrieval", not "promote to core recall".
+    if bucket_type == "feel":
+        return LAYER_AFFECT_CONTEXT
     if _truthy(meta.get("pinned")) or _truthy(meta.get("protected")) or bucket_type == "permanent":
         return LAYER_CORE
     if _truthy(meta.get("anchor")) or _truthy(meta.get("bucket_anchor")):
         return LAYER_ANCHOR
     if _has_favorite_tag(tags):
         return LAYER_FAVORITE
-    if bucket_type == "feel":
-        return LAYER_AFFECT_CONTEXT
     writer_layer = runtime_layer_from_write_classification(
         meta.get("memory_layer") or meta.get("bucket_memory_layer"),
         meta.get("memory_subject") or meta.get("bucket_memory_subject"),

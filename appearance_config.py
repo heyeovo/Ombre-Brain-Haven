@@ -14,7 +14,7 @@ DEFAULT_APPEARANCE: dict[str, Any] = {
     "theme": "apricot",
     "background": {"kind": "gradient", "intensity": 0.7, "accentMode": "theme"},
     "glass": {"blur": 12, "opacity": 0.78},
-    "font": {"display": "serif", "scale": 1.0},
+    "font": {"display": "serif", "scale": 1.0, "titleScale": 1.0, "bodyScale": 1.0, "metaScale": 1.0},
     "effects": {"rain": {"mode": "off", "intensity": 0.35}},
 }
 
@@ -68,6 +68,9 @@ def normalize_appearance(raw: Any, available_asset_id: str = "") -> dict[str, An
         "font": {
             "display": font.get("display") if font.get("display") in {"serif", "sans"} else "serif",
             "scale": round(_number(font.get("scale"), 1.0, 0.85, 1.3), 2),
+            "titleScale": round(_number(font.get("titleScale"), 1.0, 0.85, 1.4), 2),
+            "bodyScale": round(_number(font.get("bodyScale"), 1.0, 0.85, 1.4), 2),
+            "metaScale": round(_number(font.get("metaScale"), 1.0, 0.85, 1.4), 2),
         },
         "effects": {
             "rain": {

@@ -16,7 +16,7 @@ class AppearanceConfigTest(unittest.TestCase):
             "theme": "unknown",
             "background": {"kind": "upload", "assetId": "missing"},
             "glass": {"blur": 100, "opacity": -1},
-            "font": {"display": "unknown", "scale": 2},
+            "font": {"display": "unknown", "scale": 2, "titleScale": 2, "bodyScale": 0.5, "metaScale": 1.3},
             "effects": {"rain": {"mode": "weather", "intensity": 9}},
         })
         self.assertEqual(value["theme"], "apricot")
@@ -25,7 +25,9 @@ class AppearanceConfigTest(unittest.TestCase):
         self.assertEqual(normalize_appearance({"theme": "linen"})["theme"], "apricot")
         self.assertEqual(value["background"], {"kind": "gradient", "intensity": 0.7, "accentMode": "theme"})
         self.assertEqual(value["glass"], {"blur": 30, "opacity": 0.4})
-        self.assertEqual(value["font"], {"display": "serif", "scale": 1.3})
+        self.assertEqual(value["font"], {"display": "serif", "scale": 1.3, "titleScale": 1.4, "bodyScale": 0.85, "metaScale": 1.3})
+        self.assertEqual(normalize_appearance({"font": {"scale": 1.1}})["font"],
+                         {"display": "serif", "scale": 1.1, "titleScale": 1.0, "bodyScale": 1.0, "metaScale": 1.0})
         self.assertEqual(value["effects"]["rain"], {"mode": "weather", "intensity": 1})
 
     def test_photo_accent_is_clamped_and_optional(self):

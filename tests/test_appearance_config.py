@@ -19,7 +19,10 @@ class AppearanceConfigTest(unittest.TestCase):
             "font": {"display": "unknown", "scale": 2},
             "effects": {"rain": {"mode": "weather", "intensity": 9}},
         })
-        self.assertEqual(value["theme"], "linen")
+        self.assertEqual(value["theme"], "apricot")
+        for theme in ("apricot", "sakura", "mist", "dusk"):
+            self.assertEqual(normalize_appearance({"theme": theme})["theme"], theme)
+        self.assertEqual(normalize_appearance({"theme": "linen"})["theme"], "apricot")
         self.assertEqual(value["background"], {"kind": "gradient"})
         self.assertEqual(value["glass"], {"blur": 30, "opacity": 0.4})
         self.assertEqual(value["font"], {"display": "serif", "scale": 1.3})
@@ -32,6 +35,17 @@ class AppearanceConfigTest(unittest.TestCase):
             store = GatewayStateStore(str(path))
             self.assertEqual(store.load_cc_appearance()["background"]["kind"], "gradient")
             GatewayStateStore(str(path))  # migration remains idempotent
+
+            conn = sqlite3.connect(path)
+            try:
+                conn.execute(
+                    "INSERT OR REPLACE INTO cc_appearance_config (id, payload, updated_at) VALUES ('default', ?, '2026-09-28')",
+                    ('{"version":1,"theme":"linen"}',),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            self.assertEqual(store.load_cc_appearance()["theme"], "apricot")
 
             image = Image.new("RGB", (2400, 1200), "#aa9988")
             source = io.BytesIO()

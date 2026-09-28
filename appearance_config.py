@@ -11,7 +11,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 DEFAULT_APPEARANCE: dict[str, Any] = {
     "version": 1,
-    "theme": "linen",
+    "theme": "apricot",
     "background": {"kind": "gradient"},
     "glass": {"blur": 12, "opacity": 0.78},
     "font": {"display": "serif", "scale": 1.0},
@@ -50,7 +50,7 @@ def normalize_appearance(raw: Any, available_asset_id: str = "") -> dict[str, An
 
     return {
         "version": 1,
-        "theme": "linen",
+        "theme": source.get("theme") if source.get("theme") in {"apricot", "sakura", "mist", "dusk"} else "apricot",
         "background": safe_background,
         "glass": {
             "blur": round(_number(glass.get("blur"), 12, 0, 30), 1),

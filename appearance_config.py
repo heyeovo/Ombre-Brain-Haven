@@ -12,7 +12,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 DEFAULT_APPEARANCE: dict[str, Any] = {
     "version": 1,
     "theme": "apricot",
-    "background": {"kind": "gradient"},
+    "background": {"kind": "gradient", "intensity": 0.7},
     "glass": {"blur": 12, "opacity": 0.78},
     "font": {"display": "serif", "scale": 1.0},
     "effects": {"rain": {"mode": "off", "intensity": 0.35}},
@@ -44,9 +44,11 @@ def normalize_appearance(raw: Any, available_asset_id: str = "") -> dict[str, An
     asset_id = str(background.get("assetId") or "")
     if kind == "upload" and (not available_asset_id or asset_id != available_asset_id):
         kind = "gradient"
-    safe_background = {"kind": kind}
+    safe_background: dict[str, Any] = {"kind": kind}
     if available_asset_id and asset_id == available_asset_id:
         safe_background["assetId"] = asset_id
+    # 背景浓度：渐变 / 照片上盖一层底色的反比，越低越淡
+    safe_background["intensity"] = round(_number(background.get("intensity"), 0.7, 0.2, 1), 2)
 
     return {
         "version": 1,

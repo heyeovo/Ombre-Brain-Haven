@@ -23,7 +23,7 @@ class AppearanceConfigTest(unittest.TestCase):
         for theme in ("apricot", "sakura", "mist", "dusk"):
             self.assertEqual(normalize_appearance({"theme": theme})["theme"], theme)
         self.assertEqual(normalize_appearance({"theme": "linen"})["theme"], "apricot")
-        self.assertEqual(value["background"], {"kind": "gradient"})
+        self.assertEqual(value["background"], {"kind": "gradient", "intensity": 0.7})
         self.assertEqual(value["glass"], {"blur": 30, "opacity": 0.4})
         self.assertEqual(value["font"], {"display": "serif", "scale": 1.3})
         self.assertEqual(value["effects"]["rain"], {"mode": "weather", "intensity": 1})
@@ -68,7 +68,7 @@ class AppearanceConfigTest(unittest.TestCase):
             store.delete_cc_appearance_background()
             store.delete_cc_appearance_background()
             self.assertIsNone(store.load_cc_appearance_background())
-            self.assertEqual(store.load_cc_appearance()["background"], {"kind": "gradient"})
+            self.assertEqual(store.load_cc_appearance()["background"], {"kind": "gradient", "intensity": 0.7})
 
     def test_image_validation(self):
         with self.assertRaises(ValueError):

@@ -190,7 +190,7 @@ POST /api/bucket/{bucket_id}/merge-commit?into={id}      # 确认合并（更新
 ### Gateway / cc 会话持久化
 ```
 GET|POST /gateway/api/cc/appearance
-       # 跨设备外观配置；未知字段和越界值由 Haven normalize
+       # 跨设备外观配置（theme / background{kind,assetId,intensity} / glass / font / effects）；未知字段和越界值由 Haven normalize
 GET|POST|DELETE /gateway/api/cc/appearance/background
        # Bearer 私有图片读取、上传压缩后替换当前唯一图片、删除图片
 POST   /gateway/api/conversation/turn

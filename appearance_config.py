@@ -12,7 +12,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 DEFAULT_APPEARANCE: dict[str, Any] = {
     "version": 1,
     "theme": "apricot",
-    "background": {"kind": "gradient", "intensity": 0.7},
+    "background": {"kind": "gradient", "intensity": 0.7, "accentMode": "theme"},
     "glass": {"blur": 12, "opacity": 0.78},
     "font": {"display": "serif", "scale": 1.0},
     "effects": {"rain": {"mode": "off", "intensity": 0.35}},
@@ -49,6 +49,13 @@ def normalize_appearance(raw: Any, available_asset_id: str = "") -> dict[str, An
         safe_background["assetId"] = asset_id
     # 背景浓度：渐变 / 照片上盖一层底色的反比，越低越淡
     safe_background["intensity"] = round(_number(background.get("intensity"), 0.7, 0.2, 1), 2)
+    # 照片强调色：浏览器端从照片取出的色相 / 饱和度，Haven 只做范围校验
+    safe_background["accentMode"] = "photo" if background.get("accentMode") == "photo" else "theme"
+    accent = background.get("accent") if isinstance(background.get("accent"), dict) else {}
+    hue = _number(accent.get("h"), -1, -1, 1e9)
+    sat = _number(accent.get("s"), -1, -1, 1e9)
+    if hue >= 0 and sat >= 0:
+        safe_background["accent"] = {"h": int(round(hue)) % 360, "s": int(round(max(25, min(50, sat))))}
 
     return {
         "version": 1,

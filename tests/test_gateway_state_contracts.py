@@ -409,6 +409,10 @@ class GatewayStateContractsTest(unittest.TestCase):
         self.assertEqual(state["persona_id"], "lyra")
         self.assertEqual(state["cc_seen_round_id"], 3)
         self.assertEqual(state["local_engine_preference"], "cc")
+        self.assertEqual(state["recall_mode"], "")
+        self.assertEqual(GatewayStateStore(str(db_path)).get_conversation_session_state(
+            profile_id="default", session_id="legacy-session",
+        )["recall_mode"], "")
         self.assertEqual(state["handoff_snapshot"], {})
         self.assertEqual(state["frozen_persona_append"], "")
         self.assertFalse(state["frozen_persona_append_initialized"])
@@ -1061,6 +1065,44 @@ class GatewayStateContractsTest(unittest.TestCase):
                     "context_revision": rolling["context_revision"],
                 },
             )
+    def test_recall_mode_persists_with_validation_cas_and_profile_isolation(self):
+        store = self.make_store()
+        first = store.patch_conversation_session_state(
+            profile_id="one", session_id="shared", persona_id="ombre",
+            updates={"mode": "work", "recall_mode": "on"},
+        )
+        self.assertEqual(first["recall_mode"], "on")
+        self.assertEqual(store.get_conversation_session_state(
+            profile_id="one", session_id="shared",
+        )["recall_mode"], "on")
+        self.assertEqual(store.patch_conversation_session_state(
+            profile_id="two", session_id="shared", persona_id="ombre", updates={},
+        )["recall_mode"], "")
+        with self.assertRaises(SessionStateConflictError):
+            store.patch_conversation_session_state(
+                profile_id="one", session_id="shared", persona_id="ombre",
+                updates={"recall_mode": "off"}, expected_state_version=0,
+            )
+        for invalid in (None, True, "auto", "ON"):
+            with self.assertRaises(ValueError):
+                store.patch_conversation_session_state(
+                    profile_id="one", session_id="shared", persona_id="ombre",
+                    updates={"recall_mode": invalid},
+                )
+        off = store.patch_conversation_session_state(
+            profile_id="one", session_id="shared", persona_id="ombre",
+            updates={"recall_mode": "off"}, expected_state_version=first["state_version"],
+        )
+        self.assertEqual(off["recall_mode"], "off")
+        self.assertEqual(store.patch_conversation_session_state(
+            profile_id="one", session_id="shared", persona_id="ombre",
+            updates={"mode": "chat"},
+        )["recall_mode"], "off")
+        self.assertEqual(store.patch_conversation_session_state(
+            profile_id="one", session_id="shared", persona_id="ombre",
+            updates={"recall_mode": ""},
+        )["recall_mode"], "")
+
     def test_daily_review_snapshot_is_recent_fixed_and_optional(self):
         store = self.make_store()
         today = datetime.now(timezone(timedelta(hours=8))).date()

@@ -3732,6 +3732,7 @@ class GatewayService:
             "cc_overrides",
             "prompt_module_overrides",
             "mode",
+            "recall_mode",
             "daily_review_enabled",
             "initialize_daily_review_snapshot",
             "handoff_snapshot",

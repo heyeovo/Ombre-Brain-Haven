@@ -369,6 +369,7 @@ Dashboard 从窗口状态恢复最后活跃 CC lane、Persona、冻结 prompt �
 
 - 订阅、API 中转站和 selfhost 共用的协作者基础提示词存 `cc_personas.base_prompt`，默认值为原 cc 闲聊模式提示词；短暂使用过的旧 selfhost 三句默认文案在读取时迁成该统一默认。提示词模块存 `cc_personas.prompt_modules`，每条包含 id、名称、正文和默认启停，组装时以 `【模块名称】` 标明边界。旧 `prompt` 在读取时兼容成一个默认开启模块。当前窗口的差异化启停存 `conversation_sessions.prompt_module_overrides_json`，未覆盖的模块继续跟随协作者默认。
 - 一个 `session_id` 永久绑定一个 `persona_id`；旧窗口从首轮 `client="ob2-chat/<persona>"` 回填，无主历史归 `ombre`。
+- `conversation_sessions.recall_mode` 保存单窗口召回覆盖：`''` 跟随窗口模式（CHAT 开、WORK 关），`on` 强制开，`off` 强制关。旧库补列默认 `''`，状态 PATCH 使用版本冲突检查并按 profile/session 隔离；它不存入会在追加 turn 时重建的 `cc_overrides_json`。
 - `local_engine_preference` 只保存用户的本地首选；Vercel 的 `effective_engine=selfhost` 不得写回。
 - `handoff_snapshot_json` 按 `profile_id + session_id` 保存 Dashboard 已完成统一预算裁剪的换窗正文与统计；只接受首次写入，后续轮次和幂等重试不得覆盖。CC 每条原生线路启动时与无状态 selfhost 每轮读取同一快照，避免切引擎、重启或换设备后丢失钉选桶、最近记忆、feel、journal、日回顾或旧聊天原文。
 - `frozen_persona_append` 按 `profile_id + session_id` 首次写入后冻结，保存 CC 实际系统提示词追加前缀；Dashboard 重部署或换设备后继续读取原值，窗口永久删除时随 `conversation_sessions` 一起删除。`frozen_persona_append_initialized` 区分“尚未写入”和“已冻结为空串”，旧库迁移可重复执行。

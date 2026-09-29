@@ -685,6 +685,7 @@ class GatewayStateStore:
                 context_turn_watermark INTEGER NOT NULL DEFAULT 0,
                 prompt_module_overrides_json TEXT NOT NULL DEFAULT '{}',
                 mode TEXT NOT NULL DEFAULT 'chat',
+                recall_mode TEXT NOT NULL DEFAULT '',
                 daily_review_enabled INTEGER NOT NULL DEFAULT 1,
                 daily_review_snapshot_json TEXT NOT NULL DEFAULT '[]',
                 daily_review_snapshot_initialized INTEGER NOT NULL DEFAULT 0,
@@ -799,6 +800,7 @@ class GatewayStateStore:
                 "context_turn_watermark": "INTEGER NOT NULL DEFAULT 0",
                 "prompt_module_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
                 "mode": "TEXT NOT NULL DEFAULT 'chat'",
+                "recall_mode": "TEXT NOT NULL DEFAULT ''",
                 "daily_review_enabled": "INTEGER NOT NULL DEFAULT 1",
                 "daily_review_snapshot_json": "TEXT NOT NULL DEFAULT '[]'",
                 "daily_review_snapshot_initialized": "INTEGER NOT NULL DEFAULT 0",
@@ -3937,7 +3939,7 @@ class GatewayStateStore:
             ).fetchone()
             meta = conn.execute(
                 """
-                SELECT persona_id, title, pinned_at, deleted_at, mode, local_engine_preference
+                SELECT persona_id, title, pinned_at, deleted_at, mode, recall_mode, local_engine_preference
                 FROM conversation_sessions
                 WHERE profile_id = ? AND session_id = ?
                 """,
@@ -3961,6 +3963,7 @@ class GatewayStateStore:
                     "pinned_at": meta["pinned_at"] if meta else None,
                     "deleted_at": meta["deleted_at"] if meta else None,
                     "mode": (meta["mode"] if meta else "chat") or "chat",
+                    "recall_mode": (meta["recall_mode"] if meta else "") or "",
                     "local_engine_preference": (meta["local_engine_preference"] if meta else "cc") or "cc",
                 }
             )
@@ -4284,7 +4287,7 @@ class GatewayStateStore:
                    cc_lanes_json, context_gc_json, rolling_context_json, context_revision,
                    context_turn_watermark,
                    prompt_module_overrides_json,
-                   mode, daily_review_enabled, daily_review_snapshot_json,
+                   mode, recall_mode, daily_review_enabled, daily_review_snapshot_json,
                    daily_review_snapshot_initialized, handoff_snapshot_json,
                    frozen_persona_append, frozen_persona_append_initialized,
                    cc_seen_round_id, state_version, pinned_at, deleted_at, updated_at
@@ -4327,6 +4330,7 @@ class GatewayStateStore:
                 if str(key).strip() and isinstance(value, bool)
             },
             "mode": mode,
+            "recall_mode": str(row["recall_mode"] or ""),
             "daily_review_enabled": bool(row["daily_review_enabled"]),
             "daily_review_snapshot": [
                 item for item in self._json_array(row["daily_review_snapshot_json"])
@@ -4912,7 +4916,7 @@ class GatewayStateStore:
             raise ValueError("effective_engine is runtime-only and cannot be persisted")
         allowed = {
             "local_engine_preference", "selfhost_overrides", "cc_overrides", "prompt_module_overrides",
-            "mode", "daily_review_enabled", "initialize_daily_review_snapshot", "handoff_snapshot",
+            "mode", "recall_mode", "daily_review_enabled", "initialize_daily_review_snapshot", "handoff_snapshot",
             "frozen_persona_append",
         }
         unknown = sorted(set(updates) - allowed)
@@ -4969,6 +4973,11 @@ class GatewayStateStore:
             mode = str(updates.get("mode") or "").strip()
             if mode not in {"chat", "work"}:
                 raise ValueError("mode must be chat or work")
+        recall_mode: str | None = None
+        if "recall_mode" in updates:
+            recall_mode = updates.get("recall_mode")
+            if not isinstance(recall_mode, str) or recall_mode not in {"", "on", "off"}:
+                raise ValueError("recall_mode must be empty, on or off")
         daily_review_enabled = bool(updates.get("daily_review_enabled")) if "daily_review_enabled" in updates else None
         initialize_daily_review_snapshot = bool(updates.get("initialize_daily_review_snapshot"))
         handoff_snapshot: dict[str, Any] | None = None
@@ -4996,7 +5005,7 @@ class GatewayStateStore:
             row = conn.execute(
                 """
                 SELECT persona_id, local_engine_preference, selfhost_overrides_json, cc_overrides_json,
-                       prompt_module_overrides_json, mode, daily_review_enabled,
+                       prompt_module_overrides_json, mode, recall_mode, daily_review_enabled,
                        daily_review_snapshot_json, daily_review_snapshot_initialized,
                        handoff_snapshot_json, frozen_persona_append,
                        frozen_persona_append_initialized, state_version
@@ -5020,6 +5029,7 @@ class GatewayStateStore:
                 current_cc_overrides = self._json_object(row["cc_overrides_json"])
                 current_prompt_module_overrides = self._json_object(row["prompt_module_overrides_json"])
                 current_mode = str(row["mode"] or "chat")
+                current_recall_mode = str(row["recall_mode"] or "")
                 current_daily_review_enabled = bool(row["daily_review_enabled"])
                 current_daily_review_snapshot = self._json_array(row["daily_review_snapshot_json"])
                 current_daily_review_initialized = bool(row["daily_review_snapshot_initialized"])
@@ -5035,6 +5045,7 @@ class GatewayStateStore:
                 current_cc_overrides = {}
                 current_prompt_module_overrides = {}
                 current_mode = "chat"
+                current_recall_mode = ""
                 current_daily_review_enabled = True
                 current_daily_review_snapshot = []
                 current_daily_review_initialized = False
@@ -5051,6 +5062,7 @@ class GatewayStateStore:
                 else current_prompt_module_overrides
             )
             next_mode = mode or current_mode
+            next_recall_mode = recall_mode if recall_mode is not None else current_recall_mode
             next_daily_review_enabled = daily_review_enabled if daily_review_enabled is not None else current_daily_review_enabled
             next_daily_review_snapshot = current_daily_review_snapshot
             next_daily_review_initialized = current_daily_review_initialized
@@ -5076,18 +5088,19 @@ class GatewayStateStore:
                 """
                 INSERT INTO conversation_sessions
                 (profile_id, session_id, persona_id, title, local_engine_preference,
-                 selfhost_overrides_json, cc_overrides_json, prompt_module_overrides_json, mode,
+                 selfhost_overrides_json, cc_overrides_json, prompt_module_overrides_json, mode, recall_mode,
                  daily_review_enabled, daily_review_snapshot_json, daily_review_snapshot_initialized,
                  handoff_snapshot_json, frozen_persona_append, frozen_persona_append_initialized,
                  cc_seen_round_id, state_version,
                  deleted_at, updated_at)
-                VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?)
+                VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?)
                 ON CONFLICT(profile_id, session_id) DO UPDATE SET
                     local_engine_preference = excluded.local_engine_preference,
                     selfhost_overrides_json = excluded.selfhost_overrides_json,
                     cc_overrides_json = excluded.cc_overrides_json,
                     prompt_module_overrides_json = excluded.prompt_module_overrides_json,
                     mode = excluded.mode,
+                    recall_mode = excluded.recall_mode,
                     daily_review_enabled = excluded.daily_review_enabled,
                     daily_review_snapshot_json = excluded.daily_review_snapshot_json,
                     daily_review_snapshot_initialized = excluded.daily_review_snapshot_initialized,
@@ -5106,6 +5119,7 @@ class GatewayStateStore:
                     json.dumps(next_cc_overrides, ensure_ascii=False),
                     json.dumps(next_prompt_module_overrides, ensure_ascii=False),
                     next_mode,
+                    next_recall_mode,
                     1 if next_daily_review_enabled else 0,
                     json.dumps(next_daily_review_snapshot, ensure_ascii=False),
                     1 if next_daily_review_initialized else 0,

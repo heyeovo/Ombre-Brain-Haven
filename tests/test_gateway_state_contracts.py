@@ -1103,6 +1103,22 @@ class GatewayStateContractsTest(unittest.TestCase):
             updates={"recall_mode": ""},
         )["recall_mode"], "")
 
+    def test_blank_prompt_module_survives_save_and_reload(self):
+        store = self.make_store()
+        saved = store.save_cc_persona({
+            "id": "ombre",
+            "prompt_modules": [{
+                "id": "draft-1", "name": "未命名模块", "content": "",
+                "enabled_by_default": False,
+            }],
+        })
+        self.assertEqual(saved["prompt_modules"], [{
+            "id": "draft-1", "name": "未命名模块", "content": "",
+            "enabled_by_default": False,
+        }])
+        again = GatewayStateStore(str(self.root / "gateway_state.db"))
+        self.assertEqual(again.get_cc_persona("ombre")["prompt_modules"], saved["prompt_modules"])
+
     def test_daily_review_snapshot_is_recent_fixed_and_optional(self):
         store = self.make_store()
         today = datetime.now(timezone(timedelta(hours=8))).date()

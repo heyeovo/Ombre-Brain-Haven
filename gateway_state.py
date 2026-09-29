@@ -1311,8 +1311,6 @@ class GatewayStateStore:
                 if not isinstance(item, dict):
                     continue
                 content = str(item.get("content") or "").strip()
-                if not content:
-                    continue
                 module_id = str(item.get("id") or f"module-{index + 1}").strip()
                 if not module_id:
                     continue
@@ -1325,7 +1323,7 @@ class GatewayStateStore:
                     }
                 )
         legacy = str(legacy_prompt or "").strip()
-        if not modules and legacy:
+        if not modules and not value and legacy:
             modules.append(
                 {
                     "id": "legacy-prompt",

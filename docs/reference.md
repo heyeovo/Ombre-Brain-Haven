@@ -368,6 +368,7 @@ Dashboard 从窗口状态恢复最后活跃 CC lane、Persona、冻结 prompt �
 其余会话持久化契约：
 
 - 订阅、API 中转站和 selfhost 共用的协作者基础提示词存 `cc_personas.base_prompt`，默认值为原 cc 闲聊模式提示词；短暂使用过的旧 selfhost 三句默认文案在读取时迁成该统一默认。提示词模块存 `cc_personas.prompt_modules`，每条包含 id、名称、正文和默认启停，组装时以 `【模块名称】` 标明边界。旧 `prompt` 在读取时兼容成一个默认开启模块。当前窗口的差异化启停存 `conversation_sessions.prompt_module_overrides_json`，未覆盖的模块继续跟随协作者默认。
+- 新建提示词模块可以先保存空正文，再进入独立编辑页；空正文模块保留在 `cc_personas.prompt_modules`，组装系统提示词时跳过，不改变新窗口已有提示词。
 - 一个 `session_id` 永久绑定一个 `persona_id`；旧窗口从首轮 `client="ob2-chat/<persona>"` 回填，无主历史归 `ombre`。
 - `conversation_sessions.recall_mode` 保存单窗口召回覆盖：`''` 跟随窗口模式（CHAT 开、WORK 关），`on` 强制开，`off` 强制关。旧库补列默认 `''`，状态 PATCH 使用版本冲突检查并按 profile/session 隔离；它不存入会在追加 turn 时重建的 `cc_overrides_json`。
 - `local_engine_preference` 只保存用户的本地首选；Vercel 的 `effective_engine=selfhost` 不得写回。

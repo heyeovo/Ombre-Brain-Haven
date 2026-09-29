@@ -73,6 +73,33 @@ class GatewayStateContractsTest(unittest.TestCase):
             )),
         )
 
+    def test_chat_calendar_days_are_lightweight_and_profile_isolated(self):
+        store = self.make_store()
+        for round_id, (profile, day) in enumerate((("one", 20), ("one", 20), ("one", 21), ("two", 20)), 1):
+            store.record_conversation_turn(
+                profile_id=profile, session_id="shared-session", round_id=round_id,
+                user_text="private body", assistant_text="private reply",
+                created_at=datetime(2026, 9, day, 12, 0, tzinfo=timezone.utc),
+            )
+        days = store.list_conversation_chat_days(profile_id="one", session_id="shared-session")
+        self.assertEqual(days, [
+            {"day": "2026-09-20", "turn_count": 2},
+            {"day": "2026-09-21", "turn_count": 1},
+        ])
+        self.assertNotIn("private body", str(days))
+        self.assertEqual(store.list_conversation_chat_days(profile_id="one", session_id="other"), [])
+
+    def test_session_list_exposes_mode_and_engine_preference(self):
+        store = self.make_store()
+        self.commit(store, request_id="request-mode", expected=0, persona_id="ombre")
+        store.patch_conversation_session_state(
+            profile_id="default", session_id="session-1", persona_id="ombre",
+            updates={"mode": "work", "local_engine_preference": "selfhost"},
+        )
+        session = store.list_conversation_sessions(profile_id="default")[0]
+        self.assertEqual(session["mode"], "work")
+        self.assertEqual(session["local_engine_preference"], "selfhost")
+
     def test_context_days_use_visual_tokens_for_image_attachments(self):
         store = self.make_store()
         png = (

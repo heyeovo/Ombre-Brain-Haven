@@ -3937,7 +3937,8 @@ class GatewayStateStore:
             ).fetchone()
             meta = conn.execute(
                 """
-                SELECT persona_id, title, pinned_at, deleted_at FROM conversation_sessions
+                SELECT persona_id, title, pinned_at, deleted_at, mode, local_engine_preference
+                FROM conversation_sessions
                 WHERE profile_id = ? AND session_id = ?
                 """,
                 (safe_profile_id, row["session_id"]),
@@ -3959,6 +3960,8 @@ class GatewayStateStore:
                     "source": (head["source"] if head else "") or "gateway",
                     "pinned_at": meta["pinned_at"] if meta else None,
                     "deleted_at": meta["deleted_at"] if meta else None,
+                    "mode": (meta["mode"] if meta else "chat") or "chat",
+                    "local_engine_preference": (meta["local_engine_preference"] if meta else "cc") or "cc",
                 }
             )
         conn.close()
@@ -4549,6 +4552,28 @@ class GatewayStateStore:
         return self.get_conversation_session_state(
             profile_id=safe_profile_id, session_id=safe_session_id,
         )
+
+    def list_conversation_chat_days(
+        self, *, profile_id: str, session_id: str
+    ) -> list[dict[str, Any]]:
+        """Only day and turn count for the calendar; never load message bodies."""
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "").strip()
+        if not safe_session_id:
+            return []
+        conn = self._connect()
+        rows = conn.execute(
+            """
+            SELECT chat_day, COUNT(*) AS turn_count
+            FROM conversation_turns
+            WHERE profile_id = ? AND session_id = ? AND chat_day != ''
+            GROUP BY chat_day
+            ORDER BY chat_day
+            """,
+            (safe_profile_id, safe_session_id),
+        ).fetchall()
+        conn.close()
+        return [{"day": row["chat_day"], "turn_count": int(row["turn_count"])} for row in rows]
 
     def list_conversation_context_days(
         self,

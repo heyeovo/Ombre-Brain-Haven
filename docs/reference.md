@@ -202,10 +202,10 @@ GET|POST|DELETE /gateway/api/conversation/attachment
        # 上传压缩图片、Bearer 私有读取、清除单张或当前窗口全部图片
 GET    /gateway/api/conversation/turn?request_id=
        # 按 profile + request_id 读回已提交轮次及 raw_json/persona_id，供调用端持久幂等重放
-GET    /gateway/api/conversation/turns?session_id=&after_round_id=&source=&chat_days=
-       # 读取窗口历史；chat_days 按聊天日期读取，after_round_id 供各 CC 线路补齐未见的跨线路文字轮次
+GET    /gateway/api/conversation/turns?session_id=&after_round_id=&source=&chat_days=&days=1
+       # 读取窗口历史；chat_days 按聊天日期读取，after_round_id 供各 CC 线路补齐未见的跨线路文字轮次；days=1 只按 profile/session 返回 [{day,turn_count}]，不读取正文
 GET    /gateway/api/conversation/sessions?source=&persona_id=&deleted=1&limit=&offset=
-       # 默认只列活动窗口；deleted=1 只列软删除窗口；响应返回当前页 count、真实 total、offset 与各窗口 pinned_at
+       # 默认只列活动窗口；deleted=1 只列软删除窗口；响应返回当前页 count、真实 total、offset 与各窗口 pinned_at、mode、local_engine_preference
 GET    /gateway/api/conversation/session?session_id=&include_bucket_exclusions=1&include_context_days=1
        # 窗口状态、滚动配置/revision/watermark、可选日期清单（含正文/工具/附件/召回/thinking/运行时开销的按日 token 预估及未知附件数），以及按原文日和 context revision 计算的 created/recalled/breath 桶排除集合
 PATCH  /gateway/api/conversation/session

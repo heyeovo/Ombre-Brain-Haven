@@ -3472,6 +3472,11 @@ class GatewayService:
         ]
         include_raw = self._truthy_header(request.query_params.get("include_raw"))
         profile_id = self._conversation_profile_id
+        if self._truthy_header(request.query_params.get("days")):
+            days = self.state_store.list_conversation_chat_days(
+                profile_id=profile_id, session_id=session_id
+            )
+            return JSONResponse({"profile_id": profile_id, "session_id": session_id, "days": days})
         turns = self.state_store.list_conversation_turns_by_session(
             profile_id=profile_id,
             session_id=session_id,

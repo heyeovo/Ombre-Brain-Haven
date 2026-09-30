@@ -187,6 +187,15 @@ class TodoStore:
     def set_done(self, todo_id: str, done: bool) -> dict | None:
         return self.update(todo_id, done=done)
 
+    def delete(self, todo_id: str) -> bool:
+        conn = self._connect()
+        try:
+            with conn:
+                cursor = conn.execute("DELETE FROM todos WHERE id = ?", (str(todo_id or ""),))
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict:
         return {

@@ -12398,7 +12398,7 @@ async def api_todos(request):
         return JSONResponse({"error": str(exc)}, status_code=400)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
-    return JSONResponse({"count": len(items), "todos": items})
+    return JSONResponse({"count": len(items), "todos": [] if request.query_params.get("count_only") == "1" else items})
 
 
 @mcp.custom_route("/api/todos", methods=["POST"])
@@ -12484,6 +12484,29 @@ async def api_todo_update(request):
     if not item:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse({"status": "updated", "todo": item})
+
+
+@mcp.custom_route("/api/todos/{todo_id}", methods=["DELETE"])
+async def api_todo_delete(request):
+    """Delete a standalone todo or clear only the todo fields of a bucket."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    todo_id = str(request.path_params.get("todo_id") or "").strip()
+    try:
+        if todo_id.startswith("bucket:"):
+            bucket_id = todo_id.split(":", 1)[1]
+            bucket = await bucket_mgr.get(bucket_id)
+            if not bucket or not _todo_bucket_payload(bucket):
+                return JSONResponse({"error": "not found"}, status_code=404)
+            if not await bucket_mgr.update(bucket_id, clear_todo=True):
+                return JSONResponse({"error": "not found"}, status_code=404)
+        elif not todo_store.delete(todo_id):
+            return JSONResponse({"error": "not found"}, status_code=404)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse({"status": "deleted", "id": todo_id})
 
 
 @mcp.custom_route("/api/todos/{todo_id}/writeback", methods=["POST"])

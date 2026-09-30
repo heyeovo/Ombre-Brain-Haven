@@ -910,6 +910,9 @@ class BucketManager:
             post["todo"] = kwargs["todo"]
         if "todo_done" in kwargs:
             post["todo_done"] = bool(kwargs["todo_done"])
+        if kwargs.get("clear_todo"):
+            for key in ("todo", "todo_done", "todo_domain"):
+                post.metadata.pop(key, None)
         if "author" in kwargs:
             post["author"] = kwargs["author"]
         if "locked" in kwargs:

@@ -274,7 +274,7 @@ GET  /api/prompts                     # 读 prompt
 POST /api/prompts                     # 按 revision 持久保存产品 Prompt，下一次调用立即生效
 POST /api/prompts/reset               # 删除用户覆盖并恢复当前代码默认
 POST /api/prompts/test                # analyze/merge 局部草稿试跑；不改共享实例、不持久化
-GET  /api/todos / POST /api/todos / POST /api/todos/{id}/writeback   # 待办
+GET|POST /api/todos / PATCH|DELETE /api/todos/{id} / POST /api/todos/{id}/writeback   # 待办；GET count_only=1 只返回数量；删除桶 Todo 只清 todo 元数据，保留桶
 GET  /api/reminders / POST /api/reminders / DELETE /api/reminders/{id}  # 照顾备忘
 GET  /api/persona / GET /api/portrait-state*                        # 画像
 GET  /api/moments / GET /api/edges / GET /api/word-map*              # 记忆图；单桶 moments 返回桶内边与带目标桶名称的跨桶边

@@ -41,7 +41,7 @@
 - 长期悬念标签（低概率浮现）：hold(wish=True) 或 trace(bucket_id, wish=1)
 - 给记忆附上待办：hold(todo="内容", todo_done=False)；标记完成用 trace(bucket_id, todo_done=1)
 - 手动关联桶：trace(bucket_id, related="id1,id2")
-- content 分段格式：### moment（事件事实）/ ### original（原话证据）/ ### reflection（你的理解和回应规则）/ ### followup（后续待办）/ ### affect_anchor（只放和弦温度线，不放事实）。旧 ### assistant_reflection 兼容，但新写入用 ### reflection。没有的部分不写。
+- content 用自然语言写，事件、原话、感受融在正文里，不要用 ### moment / ### original / ### reflection 等分段标题；旧桶里已有的分段保留，不必改写，新内容不再新增分段。
 
 暗房：
 - 未想透、不该给用户看、不该进普通记忆的内在反思：darkroom_enter(note=..., visibility="active", lock_for="6h")；默认新开一间房，只有明确要续写当前 active 房间时才传 new_room=false。visibility 可用 active / archived / retracted，lock_for 可用 5m / 6h / 3d / 5分钟 / 6小时 / 3天（分钟/小时/天）。

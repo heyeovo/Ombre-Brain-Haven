@@ -193,7 +193,7 @@ class RoomStore(DarkroomStore):
                 room["note"] = note
             room["updated_at"] = _now_iso()
             self._write_json_unlocked(self.rooms_path, rooms)
-            lock_text = f' · 锁至 {room["lock_until"]}' if room["lock_until"] else " · 锁已清除"
+            lock_text = f' · 锁至 {room["lock_until"]}' if room["lock_until"] else (" · 锁已清除" if lock_until == "none" else "")
             if action == "open":
                 if room["lock_until"] and parse_time(room["lock_until"]) > _now():
                     return f'房间未打开 [{room_id}] · 锁至 {room["lock_until"]}'

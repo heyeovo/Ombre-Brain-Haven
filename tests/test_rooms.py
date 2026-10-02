@@ -89,10 +89,52 @@ def test_snapshot_frozen_per_session_and_key(store):
     room = rid(store.act("enter", title="我的礼物"))
     store.act("leave", note="旧便条")
     first = store.door_snapshot("s", "1:2026-10-02")
+    assert first["content"].startswith("【我的房间 · 今天的门牌】")
     store.act("leave", room, note="新便条")
     assert store.door_snapshot("s", "1:2026-10-02") == first
     assert "新便条" in store.door_snapshot("s", "2:2026-10-02")["content"]
     assert "新便条" in store.door_snapshot("other", "1:2026-10-02")["content"]
+
+
+def test_old_snapshot_title_upgrade_keeps_frozen_content(store):
+    room = rid(store.act("enter"))
+    store.act("leave", room, note="新便条")
+    store.snapshots_path.write_text(json.dumps({"s": {"key": "same", "content": "【我的房间】\n旧便条", "created_at": "old"}}), encoding="utf-8")
+    snapshot = store.door_snapshot("s", "same")
+    assert snapshot == {"key": "same", "content": "【我的房间 · 今天的门牌】\n旧便条", "created_at": "old"}
+
+
+def test_public_visit_kind_and_last_duration_without_process(store):
+    room = rid(store.act("enter"))
+    store.save_visit(visit(room, turn_kind="agent_wake"))
+    public = store.public_visits()[0]
+    assert public["turn_kind"] == "agent_wake" and "process" not in public
+    assert store.public_detail(room)["last_visit_duration_ms"] == 60000
+
+
+@pytest.mark.asyncio
+async def test_handoff_has_quantity_only_room_section(store):
+    import re
+    room = rid(store.act("enter", title="私密标题"))
+    store.act("leave", room, note="私密便条")
+    source = Path(__file__).parents[1] / "server.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    names = {"_build_handoff_breath", "_format_handoff_darkroom_door", "_handoff_portrait_stable_body"}
+    nodes = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names]
+    ns = {"re": re, "darkroom_store": store, "bucket_mgr": SimpleNamespace(list_all=AsyncMock(return_value=[])),
+          "portrait_engine": SimpleNamespace(build_handoff_sections=lambda **kwargs: {}), "SELF_ANCHOR_TAG": "self",
+          "logger": SimpleNamespace(warning=lambda *args: None),
+          "_handoff_recent_continuity_is_natural": lambda value: False,
+          "_merge_handoff_recent_continuity": lambda *args, **kwargs: "",
+          "_remove_handoff_current_focus_overlap": lambda *args: "",
+          "_trim_handoff_text_to_token_budget": lambda text, budget: text,
+          "_format_budgeted_handoff_sections": lambda intro, sections, budget: intro + "\n" + "\n".join(f"=== {title} ===\n{body}" for title, body, *_ in sections)}
+    for name in ("_format_handoff_personal_recent_continuity", "_format_handoff_recent_continuity", "_format_handoff_self_anchor", "_format_handoff_anchors", "_format_handoff_care_memos"):
+        ns[name] = lambda *args, **kwargs: ""
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), ns)
+    text = await ns["_build_handoff_breath"]()
+    assert "=== 言之的房间 ===\n言之有 1 间房间（1 间未打开），用 room list 查看" in text
+    assert "私密标题" not in text and "私密便条" not in text
 
 
 @pytest.mark.asyncio

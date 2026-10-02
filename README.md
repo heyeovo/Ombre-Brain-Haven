@@ -662,4 +662,4 @@ pytest tests/ -v                       # 详细输出
 
 ### 言之的房间
 
-旧暗房已合并为 `room`。房间索引与便条在 `state/darkroom/rooms.json`，原条目 `entries.jsonl` 保留并首次加载迁移，封存来访在 `visits.jsonl`；文件由 dashboard 保存在 `YANZHI_FILES_ROOT/.room/<room_id>/`，打开时只列清单、不移动。cc 聊天只展示进出门牌；浏览器房间列表和时间线不含过程或便条，未打开的详情只含门牌，打开后的详情可读条目和来访过程但始终省略工具便条。handoff 只含房间数量。官端 claude.ai 直连 MCP 没有聊天里的门，工具调用过程会被看到，这是已知限制；自建引擎暂不提供 room。A 提供存储、工具和聊天门牌，房间页与每日注入属于后续 B。
+旧暗房已合并为 `room`。房间索引与便条在 `state/darkroom/rooms.json`，原条目 `entries.jsonl` 保留并首次加载迁移，封存来访在 `visits.jsonl`；文件由 dashboard 保存在 `YANZHI_FILES_ROOT/.room/<room_id>/`，打开时只列清单、不移动。cc 聊天只展示进出门牌；浏览器房间列表和时间线不含过程或便条，未打开的详情只含门牌，打开后的详情可读条目和来访过程但始终省略工具便条。handoff 只含房间数量。官端 claude.ai 直连 MCP 没有聊天里的门，工具调用过程会被看到，这是已知限制；自建引擎暂不提供 room。dashboard 房间页展示已打开的条目、文件与来访过程，HTML 使用作品沙箱播放器。滚动窗口门牌由 Haven 按 session_id + context_revision:chat_day 冻结，标题为「【我的房间 · 今天的门牌】」；浏览器上下文核对只看到已封存，固定 handoff 的「言之的房间」节仅有数量。固定说明由用户在协作者提示词模块中维护。

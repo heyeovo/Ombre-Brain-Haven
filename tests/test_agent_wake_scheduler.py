@@ -7,7 +7,7 @@ from unittest.mock import patch
 import httpx
 
 from agent_wake_scheduler import AgentWakeScheduler
-from agent_wake_store import AgentWakeStore
+from agent_wake_store import AgentWakeStore, _insert_alarm, _sync_alarm_mirror
 
 
 class _Response:
@@ -87,6 +87,25 @@ class AgentWakeSchedulerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(restored["retry_at"])
         self.assertEqual(restored["consecutive_failures"], 1)
+
+    async def test_callback_uses_run_reason_and_pending_alarm_snapshot(self):
+        now = datetime.now(timezone.utc)
+        scope = ('default', 'window-1', 'subscription')
+        self.store.create_schedule(profile_id=scope[0], session_id=scope[1], lane_id=scope[2], agent_wake_enabled=True)
+        conn = self.store._connect()
+        with conn:
+            for i, minutes in enumerate((-2, -1, 10)):
+                _insert_alarm(conn, scope, alarm_id=f'w_{i:06x}',
+                              at=(now + timedelta(minutes=minutes)).isoformat(), reason=f'reason-{i}')
+            _sync_alarm_mirror(conn, scope)
+        conn.close()
+        scheduler = AgentWakeScheduler(self.store, runner_url='https://dashboard.test/api/cc-agent-wake-runner',
+                                       token='secret', owner='owner-a')
+        with patch('agent_wake_scheduler.httpx.AsyncClient', _Client):
+            await scheduler.run_once(now=now)
+        payload = _Client.calls[0][2]
+        self.assertEqual(payload['reason'], 'reason-0；reason-1')
+        self.assertEqual([item['alarm_id'] for item in payload['pending_alarms']], ['w_000002'])
 
 
 if __name__ == "__main__":

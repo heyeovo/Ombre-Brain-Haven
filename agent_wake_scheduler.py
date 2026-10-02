@@ -50,7 +50,8 @@ class AgentWakeScheduler:
             "lease_owner": self.owner,
             "cause": run["cause"],
             "due_at": run["due_at"],
-            "reason": schedule.get("wake_reason", "") if run["cause"] == "agent_schedule" else "",
+            "reason": run.get("reason", "") if run["cause"] == "agent_schedule" else "",
+            "pending_alarms": run.get("pending_alarms", []),
             "silence_source_turn_id": schedule.get("silence_source_turn_id", 0),
             "followup_source_turn_id": schedule.get("followup_source_turn_id", 0),
         }

@@ -59,7 +59,7 @@ def normalize_appearance(raw: Any, available_asset_id: str = "") -> dict[str, An
 
     return {
         "version": 1,
-        "theme": source.get("theme") if source.get("theme") in {"apricot", "sakura", "mist", "dusk"} else "apricot",
+        "theme": source.get("theme") if source.get("theme") in {"apricot", "sakura", "mist", "dusk", "pearl", "canopy", "rain", "silver"} else "apricot",
         "background": safe_background,
         "glass": {
             "blur": round(_number(glass.get("blur"), 12, 0, 30), 1),

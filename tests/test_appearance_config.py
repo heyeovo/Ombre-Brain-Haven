@@ -20,7 +20,7 @@ class AppearanceConfigTest(unittest.TestCase):
             "effects": {"rain": {"mode": "weather", "intensity": 9}},
         })
         self.assertEqual(value["theme"], "apricot")
-        for theme in ("apricot", "sakura", "mist", "dusk"):
+        for theme in ("apricot", "sakura", "mist", "dusk", "pearl", "canopy", "rain", "silver"):
             self.assertEqual(normalize_appearance({"theme": theme})["theme"], theme)
         self.assertEqual(normalize_appearance({"theme": "linen"})["theme"], "apricot")
         self.assertEqual(value["background"], {"kind": "gradient", "intensity": 0.7, "accentMode": "theme"})
@@ -74,6 +74,11 @@ class AppearanceConfigTest(unittest.TestCase):
             self.assertEqual(saved["background"]["assetId"], asset_id)
             self.assertEqual(GatewayStateStore(str(path)).load_cc_appearance(), saved)
             self.assertEqual(store.save_cc_appearance(saved), saved)
+
+            for theme in ("pearl", "canopy", "rain", "silver"):
+                saved = store.save_cc_appearance({**saved, "theme": theme})
+                self.assertEqual(saved["theme"], theme)
+                self.assertEqual(GatewayStateStore(str(path)).load_cc_appearance(), saved)
 
             store.delete_cc_appearance_background()
             store.delete_cc_appearance_background()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -52,6 +53,49 @@ def _ensure_columns(
     for name, ddl in columns.items():
         if name not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+
+def _alarm_payloads(conn: sqlite3.Connection, scope: tuple[str, str, str]) -> list[dict[str, Any]]:
+    return [dict(row) for row in conn.execute(
+        """SELECT alarm_id, at, reason FROM agent_wake_alarms
+           WHERE profile_id = ? AND session_id = ? AND lane_id = ? ORDER BY at, alarm_id""", scope
+    ).fetchall()]
+
+
+def _insert_alarm(conn: sqlite3.Connection, scope: tuple[str, str, str], *, at: str,
+                  reason: str = '', alarm_id: str = '', source_turn_id: int = 0) -> None:
+    if not at:
+        return
+    if not alarm_id:
+        existing = {item['alarm_id'] for item in _alarm_payloads(conn, scope)}
+        while not alarm_id or alarm_id in existing:
+            alarm_id = 'w_' + uuid.uuid4().hex[:6]
+    conn.execute("""INSERT INTO agent_wake_alarms
+        (profile_id, session_id, lane_id, alarm_id, at, reason, source_turn_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (*scope, alarm_id, _iso(at), reason, source_turn_id, _iso(_utc_now())))
+
+
+def _delete_alarms(conn: sqlite3.Connection, scope: tuple[str, str, str], alarm_id: str = '') -> None:
+    conn.execute("""DELETE FROM agent_wake_alarms
+        WHERE profile_id = ? AND session_id = ? AND lane_id = ?"""
+        + (" AND alarm_id = ?" if alarm_id else ''), (*scope, alarm_id) if alarm_id else scope)
+
+
+def _sync_alarm_mirror(conn: sqlite3.Connection, scope: tuple[str, str, str]) -> dict[str, Any]:
+    row = conn.execute("""SELECT * FROM agent_wake_schedules
+        WHERE profile_id = ? AND session_id = ? AND lane_id = ?""", scope).fetchone()
+    if row is None:
+        return {}
+    alarms = _alarm_payloads(conn, scope)
+    values = dict(row)
+    values['next_agent_wake_at'] = alarms[0]['at'] if alarms else ''
+    values['wake_reason'] = alarms[0]['reason'] if alarms else ''
+    values['due_at'] = AgentWakeStore._computed_due_at(values)
+    conn.execute("""UPDATE agent_wake_schedules SET next_agent_wake_at = ?, wake_reason = ?, due_at = ?
+        WHERE profile_id = ? AND session_id = ? AND lane_id = ?""",
+        (values['next_agent_wake_at'], values['wake_reason'], values['due_at'], *scope))
+    return values
 
 
 def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
@@ -140,6 +184,17 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
             "updated_at": "TEXT NOT NULL DEFAULT ''",
         },
     )
+    conn.execute("""CREATE TABLE IF NOT EXISTS agent_wake_alarms (
+        profile_id TEXT NOT NULL, session_id TEXT NOT NULL, lane_id TEXT NOT NULL,
+        alarm_id TEXT NOT NULL, at TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+        source_turn_id INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+        PRIMARY KEY (profile_id, session_id, lane_id, alarm_id))""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_wake_alarms_at ON agent_wake_alarms (at)")
+    for row in conn.execute("SELECT * FROM agent_wake_schedules WHERE next_agent_wake_at != ''").fetchall():
+        scope = (row["profile_id"], row["session_id"], row["lane_id"])
+        if not _alarm_payloads(conn, scope):
+            _insert_alarm(conn, scope, at=row["next_agent_wake_at"], reason=row["wake_reason"])
+        _sync_alarm_mirror(conn, scope)
     # The switch was introduced after silence timers already existed. Defaulting the
     # new column off must also invalidate those persisted callbacks immediately.
     stale_silence_rows = conn.execute(
@@ -206,11 +261,17 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    upgrade_run_snapshots = 'fired_alarm_ids' not in {
+        str(row[1]) for row in conn.execute('PRAGMA table_info(agent_wake_runs)').fetchall()
+    }
     _ensure_columns(
         conn,
         "agent_wake_runs",
         {
             "wake_id": "TEXT NOT NULL DEFAULT ''",
+            "fired_alarm_ids": "TEXT NOT NULL DEFAULT '[]'",
+            "reason": "TEXT NOT NULL DEFAULT ''",
+            "pending_alarms": "TEXT NOT NULL DEFAULT '[]'",
             "profile_id": "TEXT NOT NULL DEFAULT ''",
             "session_id": "TEXT NOT NULL DEFAULT ''",
             "lane_id": "TEXT NOT NULL DEFAULT ''",
@@ -227,6 +288,15 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
             "updated_at": "TEXT NOT NULL DEFAULT ''",
         },
     )
+    if upgrade_run_snapshots:
+        for run in conn.execute("""SELECT * FROM agent_wake_runs
+                WHERE cause = 'agent_schedule' AND status IN ('claimed', 'running')""").fetchall():
+            alarms = _alarm_payloads(conn, (run['profile_id'], run['session_id'], run['lane_id']))
+            fired = [alarm for alarm in alarms if alarm['at'] <= run['due_at']]
+            pending = [alarm for alarm in alarms if alarm['at'] > run['due_at']]
+            conn.execute("""UPDATE agent_wake_runs SET fired_alarm_ids = ?, reason = ?, pending_alarms = ?
+                WHERE wake_id = ?""", (json.dumps([alarm['alarm_id'] for alarm in fired]),
+                '；'.join(alarm['reason'] for alarm in fired), json.dumps(pending, ensure_ascii=False), run['wake_id']))
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_wake_runs_wake_id
@@ -361,6 +431,8 @@ class AgentWakeStore:
         if row is None:
             return {}
         payload = dict(row)
+        for key in ("fired_alarm_ids", "pending_alarms"):
+            payload[key] = json.loads(payload.get(key) or "[]")
         payload["schedule_version"] = int(payload.get("schedule_version") or 0)
         payload["turn_id"] = int(payload["turn_id"]) if payload.get("turn_id") is not None else None
         return payload
@@ -459,6 +531,10 @@ class AgentWakeStore:
                         defaults["gc_eligible_at"], now, now,
                     ),
                 )
+                if cursor.rowcount == 1:
+                    _insert_alarm(conn, (profile, session, lane), at=defaults['next_agent_wake_at'],
+                                  reason=defaults['wake_reason'])
+                    _sync_alarm_mirror(conn, (profile, session, lane))
             return self.get_schedule(
                 profile_id=profile, session_id=session, lane_id=lane
             ), cursor.rowcount == 1
@@ -476,7 +552,7 @@ class AgentWakeStore:
                 """,
                 (profile, session, lane),
             ).fetchone()
-            return self._schedule_payload(row)
+            return {**self._schedule_payload(row), 'alarms': _alarm_payloads(conn, (profile, session, lane))} if row else {}
         finally:
             conn.close()
 
@@ -505,7 +581,8 @@ class AgentWakeStore:
                     """,
                     (profile,),
                 ).fetchall()
-            return [self._schedule_payload(row) for row in rows]
+            return [{**self._schedule_payload(row), 'alarms': _alarm_payloads(conn,
+                     (row['profile_id'], row['session_id'], row['lane_id']))} for row in rows]
         finally:
             conn.close()
 
@@ -625,6 +702,10 @@ class AgentWakeStore:
                 raise AgentWakeConflictError(
                     int(expected_version), int(latest["schedule_version"] if latest else 0)
                 )
+            if 'next_agent_wake_at' in normalized:
+                _delete_alarms(conn, (profile, session, lane))
+                _insert_alarm(conn, (profile, session, lane), at=values['next_agent_wake_at'], reason=values['wake_reason'])
+            _sync_alarm_mirror(conn, (profile, session, lane))
             conn.commit()
         except Exception:
             conn.rollback()
@@ -653,6 +734,8 @@ class AgentWakeStore:
                     """,
                     (profile, session, lane, int(expected_version)),
                 )
+                if cursor.rowcount == 1:
+                    _delete_alarms(conn, (profile, session, lane))
             if cursor.rowcount == 1:
                 return True
             row = conn.execute(
@@ -773,6 +856,9 @@ class AgentWakeStore:
             recovered = run is not None
             if run is None:
                 wake_id = f"wake_{uuid.uuid4().hex}"
+                alarms = _alarm_payloads(conn, (row['profile_id'], row['session_id'], row['lane_id']))
+                fired = [item for item in alarms if item['at'] <= now_iso] if self._cause(row) == 'agent_schedule' else []
+                pending = [item for item in alarms if item['at'] > now_iso]
                 conn.execute(
                     """
                     INSERT INTO agent_wake_runs
@@ -789,6 +875,10 @@ class AgentWakeStore:
                 run = conn.execute(
                     "SELECT * FROM agent_wake_runs WHERE wake_id = ?", (wake_id,)
                 ).fetchone()
+                conn.execute("""UPDATE agent_wake_runs SET fired_alarm_ids = ?, reason = ?, pending_alarms = ?
+                    WHERE wake_id = ?""", (json.dumps([item['alarm_id'] for item in fired]),
+                    '；'.join(item['reason'] for item in fired), json.dumps(pending, ensure_ascii=False), wake_id))
+                run = conn.execute('SELECT * FROM agent_wake_runs WHERE wake_id = ?', (wake_id,)).fetchone()
             else:
                 conn.execute(
                     """
@@ -806,7 +896,7 @@ class AgentWakeStore:
             claimed_schedule["lease_owner"] = safe_owner
             claimed_schedule["lease_until"] = lease_until
             return {
-                "schedule": self._schedule_payload(claimed_schedule),
+                "schedule": {**self._schedule_payload(claimed_schedule), 'alarms': _alarm_payloads(conn, (row['profile_id'], row['session_id'], row['lane_id']))},
                 "run": self._run_payload(run),
                 "recovered": recovered,
             }
@@ -1174,7 +1264,7 @@ def delete_agent_wake_session_records(
 ) -> dict[str, int]:
     """Delete only one verified profile/session's wake control-plane records."""
     counts: dict[str, int] = {}
-    for table in ("agent_wake_runs", "agent_wake_schedules"):
+    for table in ("agent_wake_alarms", "agent_wake_runs", "agent_wake_schedules"):
         cursor = conn.execute(
             f"DELETE FROM {table} WHERE profile_id = ? AND session_id = ?",
             (str(profile_id), str(session_id)),

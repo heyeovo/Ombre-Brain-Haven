@@ -1787,7 +1787,8 @@ class GatewayStateContractsTest(unittest.TestCase):
         restored = store.get_conversation_turn_by_request_id(profile_id="default", request_id="wake-1")
         raw = json.loads(restored["raw_json"])
         self.assertEqual(raw["agent_wake"]["outcome"], "noop")
-        self.assertEqual(raw["next_wake"]["reason"], "稍后再看")
+        self.assertEqual(raw["wake_ops"][0]["reason"], "稍后再看")
+        self.assertNotIn("next_wake", raw)
         unchanged = store.get_agent_wake_schedule(
             profile_id="default", session_id="session-1", lane_id="subscription"
         )

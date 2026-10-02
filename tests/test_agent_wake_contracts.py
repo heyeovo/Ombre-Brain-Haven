@@ -241,6 +241,7 @@ class AgentWakeStoreContractsTest(unittest.TestCase):
             session_id="session-a",
             lane_id="subscription",
             expected_version=1,
+            next_agent_wake_at=self.past(),
             wake_reason="only this lane",
         )
         self.assertEqual(updated["wake_reason"], "only this lane")

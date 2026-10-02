@@ -11,7 +11,8 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from agent_wake_store import AgentWakeStore, delete_agent_wake_session_records, initialize_agent_wake_schema
+from agent_wake_store import (AgentWakeStore, delete_agent_wake_session_records, initialize_agent_wake_schema,
+                              _alarm_payloads, _insert_alarm, _delete_alarms, _sync_alarm_mirror)
 from bark_notifications import BarkNotificationStore, initialize_bark_notification_schema
 from conversation_slice_store import (
     delete_conversation_slice_session_records,
@@ -393,6 +394,7 @@ class GatewayStateStore:
             now_iso=now_iso,
         )
         values = dict(row)
+        scope = (profile_id, session_id, lane_id)
         model_activity_at = cls._agent_wake_timestamp(update.get("model_activity_at"))
         cache_refresh_at = cls._agent_wake_timestamp(update.get("cache_refresh_at"))
         if model_activity_at:
@@ -440,9 +442,17 @@ class GatewayStateStore:
                 values["followup_at"] = ""
                 values["followup_source_turn_id"] = 0
                 values["followup_count"] = int(values.get("followup_count") or 0) + 1
-            elif wake_cause == "agent_schedule" and wake_at and str(values.get("next_agent_wake_at") or "") == wake_at:
-                values["next_agent_wake_at"] = ""
-                values["wake_reason"] = ""
+            elif wake_cause == "agent_schedule":
+                run = conn.execute("""SELECT fired_alarm_ids FROM agent_wake_runs
+                    WHERE wake_id = ? AND profile_id = ? AND session_id = ? AND lane_id = ?""",
+                    (str(wake_event.get('wake_id') or ''), *scope)).fetchone()
+                if run:
+                    for alarm_id in json.loads(run['fired_alarm_ids']):
+                        _delete_alarms(conn, scope, alarm_id)
+                elif wake_at:  # Compatibility for old callers without a persisted run.
+                    for alarm in _alarm_payloads(conn, scope):
+                        if alarm['at'] == wake_at:
+                            _delete_alarms(conn, scope, alarm['alarm_id'])
             elif wake_cause == "cache_keepalive" and not cache_refresh_at:
                 values["cache_keepalive_deadline"] = ""
                 values["cache_state"] = "cold"
@@ -452,22 +462,33 @@ class GatewayStateStore:
             values["followup_source_turn_id"] = 0
             values["followup_count"] = 0
 
-        decision = update.get("wake_decision")
-        if isinstance(decision, dict):
+        ops = update.get('wake_ops')
+        if not isinstance(ops, list):
+            decision = update.get('wake_decision')
+            ops = [decision] if isinstance(decision, dict) else []
+        for decision in ops:
+            if not isinstance(decision, dict):
+                continue
             action = str(decision.get("action") or "")
             if action == "cancel":
-                values["next_agent_wake_at"] = ""
-                values["wake_reason"] = ""
-                values["followup_at"] = ""
-                values["followup_source_turn_id"] = 0
-                values["followup_count"] = 0
+                alarm_id = str(decision.get('alarm_id') or '')
+                _delete_alarms(conn, scope, alarm_id)
+                if not alarm_id:
+                    values["followup_at"] = ""
+                    values["followup_source_turn_id"] = 0
+                    values["followup_count"] = 0
             elif action == "schedule" and bool(values.get("agent_wake_enabled")):
-                values["next_agent_wake_at"] = cls._agent_wake_timestamp(decision.get("at"))
-                values["wake_reason"] = str(decision.get("reason") or "").strip()[:90]
+                _insert_alarm(conn, scope, at=cls._agent_wake_timestamp(decision.get('at')),
+                              reason=str(decision.get('reason') or '').strip()[:50],
+                              alarm_id=str(decision.get('alarm_id') or ''), source_turn_id=turn_id)
             elif action == "followup" and bool(values.get("agent_wake_enabled")):
                 values["followup_at"] = cls._agent_wake_timestamp(decision.get("at"))
                 values["followup_source_turn_id"] = int(turn_id)
 
+        for alarm in _alarm_payloads(conn, scope)[5:]:
+            _delete_alarms(conn, scope, alarm['alarm_id'])
+        mirror = _sync_alarm_mirror(conn, scope)
+        values.update({key: mirror[key] for key in ('next_agent_wake_at', 'wake_reason')})
         values["due_at"] = cls._agent_wake_due_at(values)
         conn.execute(
             """
@@ -503,12 +524,13 @@ class GatewayStateStore:
                 profile_id, session_id, lane_id,
             ),
         )
+        _sync_alarm_mirror(conn, scope)
         updated = conn.execute(
             """SELECT * FROM agent_wake_schedules
                WHERE profile_id = ? AND session_id = ? AND lane_id = ?""",
             (profile_id, session_id, lane_id),
         ).fetchone()
-        return cls._agent_wake_payload(updated)
+        return {**cls._agent_wake_payload(updated), 'alarms': _alarm_payloads(conn, scope)}
 
     def _init_db(self) -> None:
         conn = self._connect()
@@ -2486,7 +2508,7 @@ class GatewayStateStore:
                        WHERE profile_id = ? AND session_id = ? AND lane_id = ?""",
                     (profile, session, lane),
                 ).fetchone()
-            return self._agent_wake_payload(row)
+            return {**self._agent_wake_payload(row), 'alarms': _alarm_payloads(conn, (profile, session, lane))} if row else {}
         finally:
             conn.close()
 
@@ -2622,13 +2644,17 @@ class GatewayStateStore:
                     profile, session, lane,
                 ),
             )
+            if 'next_agent_wake_at' in changes:
+                _delete_alarms(conn, (profile, session, lane))
+                _insert_alarm(conn, (profile, session, lane), at=values['next_agent_wake_at'], reason=values['wake_reason'])
+            _sync_alarm_mirror(conn, (profile, session, lane))
             updated = conn.execute(
                 """SELECT * FROM agent_wake_schedules
                    WHERE profile_id = ? AND session_id = ? AND lane_id = ?""",
                 (profile, session, lane),
             ).fetchone()
             conn.commit()
-            return self._agent_wake_payload(updated)
+            return {**self._agent_wake_payload(updated), 'alarms': _alarm_payloads(conn, (profile, session, lane))}
         except Exception:
             conn.rollback()
             raise
@@ -2694,7 +2720,7 @@ class GatewayStateStore:
                 (profile, session, lane),
             ).fetchone()
             conn.commit()
-            return self._agent_wake_payload(updated)
+            return {**self._agent_wake_payload(updated), 'alarms': _alarm_payloads(conn, (profile, session, lane))}
         except Exception:
             conn.rollback()
             raise
@@ -2779,15 +2805,15 @@ class GatewayStateStore:
             raw_payload = self._json_object(raw_json)
             raw_payload["turn_kind"] = safe_turn_kind
             decision = wake_update.get("wake_decision")
-            if isinstance(decision, dict):
-                raw_payload["next_wake"] = (
-                    {
-                        "at": str(decision.get("at") or ""),
-                        "reason": str(decision.get("reason") or ""),
-                    }
-                    if decision.get("action") == "schedule"
-                    else {"action": "cancel"}
-                )
+            ops = wake_update.get('wake_ops')
+            if not isinstance(ops, list):
+                ops = [decision] if isinstance(decision, dict) else None
+            if ops is not None:
+                raw_payload['wake_ops'] = [
+                    {key: op[key] for key in ('action', 'at', 'reason') if key in op}
+                    for op in ops
+                    if isinstance(op, dict) and op.get('action') in {'schedule', 'cancel', 'followup'}
+                ]
             wake_metadata = wake_update.get("agent_wake")
             if safe_turn_kind == "agent_wake" and isinstance(wake_metadata, dict):
                 raw_payload["agent_wake"] = {

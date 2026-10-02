@@ -44,7 +44,7 @@ DAILY_CHAT_MEMORY_ENTITY_HINTS = [
     ("Codex", ["codex"]),
     ("DeepSeek", ["deepseek"]),
     ("SiliconFlow", ["siliconflow", "硅基流动", "硅基"]),
-    ("Darkroom", ["darkroom", "暗房"]),
+    ("Darkroom", ["darkroom", "暗房", "房间"]),
 ]
 DAILY_CHAT_MEMORY_TOPIC_HINTS = [
     ("词图", ["词图", "word map", "word_map"]),

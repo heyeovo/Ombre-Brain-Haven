@@ -216,12 +216,14 @@ DEFAULT_OVERVIEW_STOPWORD_PREFIXES = DEFAULT_STOPWORD_PREFIXES
 DEFAULT_OVERVIEW_ALIASES = {
     "darkroom": "暗房",
     "darkroom door": "暗房",
+    "room": "房间",
     "mcp": "MCP",
     "dashboard": "Dashboard",
     "codex": "Codex",
 }
 DEFAULT_OVERVIEW_PRIORITY_TERMS = {
     "darkroom",
+    "房间",
     "recall_cues",
     "暗房",
     "忱孚",

@@ -344,7 +344,7 @@ choose_feature_scope() {
   local choice
   line
   printf '选择功能范围\n'
-  printf '1. 只用 Ombre MCP 部分（MCP 工具 + Dashboard + 画像/Darkroom，不启动 Gateway）\n'
+  printf '1. 只用 Ombre MCP 部分（MCP 工具 + Dashboard + 画像/房间，不启动 Gateway）\n'
   printf '2. 部署全部（MCP + Dashboard + Gateway 自动注入）\n'
   read -r -p '输入（1-2）：' choice
   case "${choice}" in
@@ -849,7 +849,7 @@ print_client_guide() {
   fi
   printf '自我锚点用 breath(domain="self_anchor")，分段查用 breath(domain="self_anchor", query="关键词")。\n'
   printf '画像在 Dashboard 的 Persona/画像面板手动生成/刷新；profile_fact 需要证据 bucket/moment 后再确认。\n'
-  printf '暗房默认读写同一个 active 房间草稿，new_room=true 才新开；darkroom_view 只有 completeness>=1 且解锁后才回显房间 revisions。\n'
+  printf '房间统一用 room：enter 新建或续进，write 写条目，read 自己随时读，leave 留便条，open 到锁时间后公开。\n'
   printf '完整工具说明见 docs/Tool Guide.md；Dashboard 桶列表可批量选择并删除普通记忆桶。\n'
 
   case "${DEPLOY_TARGET}" in
@@ -930,13 +930,11 @@ EOF
     Use profile_fact(...) only with evidence bucket or evidence moment.
     Gateway portrait memory reads profile_fact by default and does not include ordinary anchors unless explicitly enabled.
 
-  Darkroom:
-    Use darkroom_continue_context(limit=3) only to read the current active room draft, continue private reflection, and judge completeness.
-    darkroom_enter note should default to first person; do not use third-person self-reference unless quoting external facts or Xiaoyu.
-    darkroom_enter updates the current active room draft by default; pass new_room=true to open a separate room.
-    External client tool lists should expose darkroom_enter(note=..., visibility="active", lock_for="6h", new_room=false) and read-only darkroom_view.
-    visibility can be active / archived / retracted.
-    darkroom_view returns room revision contents only when visibility is active, completeness is 1, and the lock has expired.
+  Room:
+    Use room(action="enter") to start a room; provide room_id to continue one.
+    Use write/content for entries, read for private contents, list for doors, leave/note for private continuation notes.
+    lock_until uses Beijing time; none clears the lock. Only open is restricted by the lock.
+    In cc, all non-open calls enter the private room and seal the process. open publishes contents when unlocked.
 
   Dream Context:
     dream.surface_enabled controls breath() dream surfacing.

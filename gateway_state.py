@@ -4371,6 +4371,78 @@ class GatewayStateStore:
             "updated_at": str(row["updated_at"] or ""),
         }
 
+    @staticmethod
+    def _validate_rolling_pinned_snapshot(snapshot: Any) -> list[dict[str, str]]:
+        if not isinstance(snapshot, list) or len(snapshot) > 10000:
+            raise ValueError("pinned_snapshot must be a bucket array (at most 10000)")
+        result: list[dict[str, str]] = []
+        ids: set[str] = set()
+        for item in snapshot:
+            if not isinstance(item, dict) or not all(
+                isinstance(item.get(key), str) for key in ("id", "title", "content")
+            ):
+                raise ValueError("pinned_snapshot requires string id, title and content")
+            bucket_id = item["id"]
+            if not bucket_id.strip() or bucket_id in ids:
+                raise ValueError("pinned_snapshot IDs must be nonempty and unique")
+            ids.add(bucket_id)
+            result.append({key: item[key] for key in ("id", "title", "content")})
+        return result
+
+    def initialize_conversation_pinned_snapshot(
+        self, *, profile_id: str, session_id: str, persona_id: str,
+        expected_context_revision: int, snapshot: Any,
+    ) -> dict[str, Any]:
+        """Fill a legacy revision once without changing its prompt/revision/state version."""
+        snapshot = self._validate_rolling_pinned_snapshot(snapshot)
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        safe_session_id = str(session_id or "").strip()
+        safe_persona_id = str(persona_id or "").strip()
+        if not safe_session_id or not safe_persona_id:
+            raise ValueError("session_id and persona_id are required")
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT persona_id, rolling_context_json, context_revision, deleted_at
+                   FROM conversation_sessions WHERE profile_id = ? AND session_id = ?""",
+                (safe_profile_id, safe_session_id),
+            ).fetchone()
+            if row is None or row["deleted_at"]:
+                raise ValueError("session not found")
+            actual_persona = str(row["persona_id"] or "ombre")
+            if actual_persona != safe_persona_id:
+                raise ConversationPersonaConflictError(safe_persona_id, actual_persona)
+            if int(row["context_revision"] or 0) != int(expected_context_revision):
+                raise ValueError("context_revision_conflict")
+            config = self._json_object(row["rolling_context_json"])
+            if config.get("strategy") != "daily_rolling":
+                raise ValueError("pinned snapshot requires daily_rolling")
+            if "pinned_snapshot" not in config:
+                config["pinned_snapshot"] = snapshot
+                encoded = json.dumps(config, ensure_ascii=False)
+                conn.execute(
+                    """UPDATE conversation_sessions SET rolling_context_json = ?
+                       WHERE profile_id = ? AND session_id = ?""",
+                    (encoded, safe_profile_id, safe_session_id),
+                )
+                conn.execute(
+                    """UPDATE conversation_context_versions SET config_json = ?
+                       WHERE profile_id = ? AND session_id = ? AND revision = ?""",
+                    (encoded, safe_profile_id, safe_session_id, int(expected_context_revision)),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        # Reject a concurrent rebuild instead of returning a different revision's snapshot.
+        state = self.get_conversation_session_state(profile_id=safe_profile_id, session_id=safe_session_id)
+        if int(state.get("context_revision") or 0) != int(expected_context_revision):
+            raise ValueError("context_revision_conflict")
+        return state
+
     def patch_conversation_rolling_context(
         self,
         *,
@@ -4498,6 +4570,8 @@ class GatewayStateStore:
                     next_config[field] = selected_ids
             if allow_fixed_body_restore:
                 next_config["allow_fixed_body_restore"] = True
+            if "pinned_snapshot" in config:
+                next_config["pinned_snapshot"] = self._validate_rolling_pinned_snapshot(config["pinned_snapshot"])
             comparable_current = {
                 key: current[key]
                 for key in (
@@ -4508,6 +4582,8 @@ class GatewayStateStore:
                 )
                 if key in current
             }
+            if "pinned_snapshot" in config and "pinned_snapshot" in current:
+                comparable_current["pinned_snapshot"] = current["pinned_snapshot"]
             if next_config == comparable_current:
                 conn.rollback()
                 return self.get_conversation_session_state(

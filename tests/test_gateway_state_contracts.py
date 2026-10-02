@@ -524,6 +524,89 @@ class GatewayStateContractsTest(unittest.TestCase):
                 updates={"effective_engine": "selfhost"},
             )
 
+    def test_pinned_snapshot_backfill_is_once_only_durable_and_revision_neutral(self):
+        store = self.make_store()
+        self.commit(store, request_id="snapshot-source", expected=0)
+        saved = store.patch_conversation_rolling_context(
+            profile_id="default", session_id="session-1", persona_id="ombre",
+            config={"strategy": "daily_rolling", "selected_pinned_ids": ["pin-1"]},
+        )
+        original = [{"id": "pin-1", "title": "旧标题", "content": "旧正文"}]
+        updated = [{"id": "pin-1", "title": "新标题", "content": "新正文"}]
+        args = dict(profile_id="default", session_id="session-1", persona_id="ombre",
+                    expected_context_revision=saved["context_revision"])
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(
+                lambda snapshot: store.initialize_conversation_pinned_snapshot(**args, snapshot=snapshot),
+                [original, updated],
+            ))
+        winner = results[0]["rolling_context"]["pinned_snapshot"]
+        self.assertEqual(results[1]["rolling_context"]["pinned_snapshot"], winner)
+        self.assertEqual(results[0]["context_revision"], saved["context_revision"])
+        self.assertEqual(results[0]["state_version"], saved["state_version"])
+        # Reopening also runs the existing idempotent schema initializer.
+        reopened = self.make_store()
+        state = reopened.get_conversation_session_state(profile_id="default", session_id="session-1")
+        self.assertEqual(state["rolling_context"]["pinned_snapshot"], winner)
+        unchanged = reopened.patch_conversation_rolling_context(
+            profile_id="default", session_id="session-1", persona_id="ombre", config=state["rolling_context"],
+        )
+        self.assertEqual(unchanged["context_revision"], saved["context_revision"])
+        rebuilt = reopened.patch_conversation_rolling_context(
+            profile_id="default", session_id="session-1", persona_id="ombre",
+            config={**state["rolling_context"], "pinned_snapshot": []},
+        )
+        self.assertEqual(rebuilt["context_revision"], saved["context_revision"] + 1)
+        self.assertEqual(rebuilt["rolling_context"]["pinned_snapshot"], [])
+        again = reopened.initialize_conversation_pinned_snapshot(
+            **{**args, "expected_context_revision": rebuilt["context_revision"]}, snapshot=updated,
+        )
+        self.assertEqual(again["rolling_context"]["pinned_snapshot"], [])
+        with self.assertRaisesRegex(ValueError, "context_revision_conflict"):
+            reopened.initialize_conversation_pinned_snapshot(**args, snapshot=updated)
+
+    def test_pinned_snapshot_backfill_enforces_profile_persona_and_deleted_scope(self):
+        store = self.make_store()
+        self.commit(store, request_id="snapshot-scope", expected=0)
+        saved = store.patch_conversation_rolling_context(
+            profile_id="default", session_id="session-1", persona_id="ombre", config={"strategy": "daily_rolling"},
+        )
+        args = dict(profile_id="default", session_id="session-1", persona_id="ombre",
+                    expected_context_revision=saved["context_revision"], snapshot=[])
+        with self.assertRaisesRegex(ValueError, "session not found"):
+            store.initialize_conversation_pinned_snapshot(**{**args, "profile_id": "other"})
+        with self.assertRaises(ConversationPersonaConflictError):
+            store.initialize_conversation_pinned_snapshot(**{**args, "persona_id": "other"})
+        conn = store._connect()
+        conn.execute("UPDATE conversation_sessions SET deleted_at = 'deleted' WHERE session_id = 'session-1'")
+        conn.commit()
+        conn.close()
+        with self.assertRaisesRegex(ValueError, "session not found"):
+            store.initialize_conversation_pinned_snapshot(**args)
+
+    def test_pinned_snapshot_validation_and_revision_invalidation(self):
+        store = self.make_store()
+        self.commit(store, request_id="snapshot-validate", expected=0)
+        snapshot = [{"id": "pin-1", "title": "标题", "content": "正文"}]
+        saved = store.patch_conversation_rolling_context(
+            profile_id="default", session_id="session-1", persona_id="ombre",
+            config={"strategy": "daily_rolling", "pinned_snapshot": snapshot},
+        )
+        self.assertEqual(saved["rolling_context"]["pinned_snapshot"], snapshot)
+        for invalid in (None, {}, [{"id": "pin-1"}], snapshot + snapshot):
+            with self.assertRaises(ValueError):
+                store.patch_conversation_rolling_context(
+                    profile_id="default", session_id="session-1", persona_id="ombre",
+                    config={"strategy": "daily_rolling", "pinned_snapshot": invalid},
+                )
+        # Older callers can omit snapshot: an actual config change invalidates it.
+        rebuilt = store.patch_conversation_rolling_context(
+            profile_id="default", session_id="session-1", persona_id="ombre",
+            config={"day_modes": {"2026-09-10": "omit"}},
+        )
+        self.assertNotIn("pinned_snapshot", rebuilt["rolling_context"])
+        self.assertEqual(rebuilt["context_revision"], saved["context_revision"] + 1)
+
     def test_daily_rolling_context_is_versioned_only_when_configuration_changes(self):
         store = self.make_store()
         self.commit(store, request_id="rolling-source", expected=0)

@@ -3611,6 +3611,24 @@ class GatewayService:
                 return JSONResponse({"error": str(exc)}, status_code=400)
             return JSONResponse({"ok": True, "session": state})
 
+        if "rolling_pinned_snapshot" in body:
+            try:
+                revision = body.get("expected_context_revision")
+                if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+                    raise ValueError("expected_context_revision must be a nonnegative integer")
+                state = self.state_store.initialize_conversation_pinned_snapshot(
+                    profile_id=profile_id,
+                    session_id=session_id,
+                    persona_id=str(body.get("persona_id") or "").strip(),
+                    expected_context_revision=revision,
+                    snapshot=body.get("rolling_pinned_snapshot"),
+                )
+            except ConversationPersonaConflictError as exc:
+                return JSONResponse({"error": "conversation_persona_conflict"}, status_code=409)
+            except (TypeError, ValueError) as exc:
+                return JSONResponse({"error": str(exc)}, status_code=409 if str(exc) == "context_revision_conflict" else 400)
+            return JSONResponse({"ok": True, "session": state})
+
         if "rolling_context" in body:
             persona_id = str(body.get("persona_id") or "").strip()
             if not persona_id:

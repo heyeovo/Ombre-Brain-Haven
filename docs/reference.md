@@ -63,7 +63,8 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `persona_engine.py` / `portrait_engine.py` | 用户画像（persona 状态 + 画像生成） |
 | `memory_*.py` | 记忆分层：layers/nodes/edges/metadata/moments/diffusion/relevance/write_gate |
 | `todo_store.py` / `reminder_store.py` | 待办 / 照顾备忘持久化 |
-| `darkroom.py` / `dream_engine.py` | 深色房调试 / 自动 dream |
+| `room_store.py` / `darkroom.py` | 房间索引、旧条目迁移、锁、私密便条与幂等来访；复用旧 JSONL IO |
+| `dream_engine.py` | 自动 dream |
 | `utils.py` | 配置加载、`LLM_PRICING`、`estimate_llm_cost`、`auto_merge` |
 
 `reflection.legacy_daily_memory_paused=true` 是旧日印象、旧自动记忆和旧每日活动汇总的硬暂停闸；它优先于运行时覆盖文件里的旧开关。旧数据与配置保留，关系整理和记忆 enrichment/backfill 仍可继续运行。新日回顾完全走 `daily_review.*` 与独立表。
@@ -141,6 +142,21 @@ OMBRE_SCORING_WARMTH_BOOST= # 温暖偏置初始值
 ```
 POST /auth/login  { password } → set-cookie
 ```
+
+### 房间（Brain，服务端 Bearer）
+
+认证只接受 `OMBRE_GATEWAY_TOKEN`（或 gateway 配置 token）的 Bearer，不接受浏览器 Cookie。
+
+```
+POST /api/rooms/visits                         # 来访按 id 幂等，冲突或房间不存在 400
+GET  /api/rooms                               # 门牌、次数、总时长、最后来访；无便条
+GET  /api/rooms/visits?limit=&before=          # 时间倒序，before 为 entered_at 上界；无 process
+GET  /api/rooms/{id}                          # closed 只给门牌；opened 加条目和过程，永不返回便条
+GET  /api/rooms/door-snapshot?session_id=&key= # 私密上下文快照，按 session_id + 当前 key 冻结；A 仅实现，B 注入
+GET  /api/darkroom/status                     # 兼容旧 dashboard.html，房间门口状态
+```
+
+`room` 的 read 不受锁限制，open 在北京时间 lock_until 前拒绝；none 清锁。迁移保留原 entries.jsonl，按 room_id 建 rooms.json：全部撤回的房间排除，release 对应房间为 opened，最晚未到期旧锁转房间锁。来访和门牌公开投影采用字段白名单；opened 来访里 room 工具的便条参数与带便条的回复也省略。
 
 ### 桶 CRUD
 ```

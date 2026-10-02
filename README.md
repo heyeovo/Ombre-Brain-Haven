@@ -2,7 +2,7 @@
 
 Ombre Brain 是一套以 Markdown 记忆桶为长期真源、同时提供 MCP 与聊天 Gateway 的个人连续性系统。
 
-本仓库基于 [P0luz/Ombre-Brain](https://github.com/P0luz/Ombre-Brain) 二次开发。它保留原版的记忆桶、情绪坐标、遗忘曲线、向量检索和 Dashboard，并加入了保守召回、图关系、原文检索、跨窗口 handoff、画像、自我入口、照顾备忘、Darkroom、Dream、自动写入门卫，以及 OpenAI / Anthropic 兼容 Gateway。
+本仓库基于 [P0luz/Ombre-Brain](https://github.com/P0luz/Ombre-Brain) 二次开发。它保留原版的记忆桶、情绪坐标、遗忘曲线、向量检索和 Dashboard，并加入了保守召回、图关系、原文检索、跨窗口 handoff、画像、自我入口、照顾备忘、房间、Dream、自动写入门卫，以及 OpenAI / Anthropic 兼容 Gateway。
 
 > 这不是原版 Ombre-Brain 的无改动镜像。请使用本仓库源码部署；旧 Docker 镜像和历史 compose 文件不包含完整 fork 能力。
 
@@ -455,7 +455,7 @@ http://your-host:18001/dashboard
 
 Python 直跑或直接访问容器内部服务时使用 `http://127.0.0.1:8000/dashboard`。
 
-Dashboard 可查看和编辑 bucket、画像、独立日回顾、记忆图、Darkroom、提醒与调试状态。生产环境请设置 `OMBRE_DASHBOARD_PASSWORD` 并通过 HTTPS 暴露。
+Dashboard 可查看和编辑 bucket、画像、独立日回顾、记忆图、房间门口状态、提醒与调试状态。生产环境请设置 `OMBRE_DASHBOARD_PASSWORD` 并通过 HTTPS 暴露。
 
 ### 原文写入与检索 API
 
@@ -555,7 +555,7 @@ Codex 接线时注意：
 | `comment_bucket` / `delete_bucket_comment` | 添加或删除年轮 |
 | `profile_fact` | 管理带证据的画像事实 |
 | `reminder_create/list/update` | 管理独立照顾备忘 |
-| `darkroom_enter/rooms/view` | 写入、列出和在解锁后读取 Darkroom |
+| `room` | enter / write / read / list / leave / open；私密条目、来访封存与便条，锁只限制 open |
 | `trace` / `pulse` / `introspection` | 近期轨迹、系统脉搏与内省 |
 | `search_chat` | 按关键词搜索聊天原文（FTS5 + LIKE）；支持日期/角色/会话过滤和排除当前窗口 |
 | `get_chat_context` | 按 turn_id 展开某条聊天记录的前后 N 轮上下文 |
@@ -659,3 +659,7 @@ pytest tests/ -v                       # 详细输出
 ## License
 
 原项目代码遵循原仓库的 MIT License。本 fork 新增内容的个人学习、自用、非商业二改与商业使用边界见 [`NOTICE.md`](NOTICE.md) 和 [`LICENSE`](LICENSE)。
+
+### 言之的房间
+
+旧暗房已合并为 `room`。房间索引与便条在 `state/darkroom/rooms.json`，原条目 `entries.jsonl` 保留并首次加载迁移，封存来访在 `visits.jsonl`；文件由 dashboard 保存在 `YANZHI_FILES_ROOT/.room/<room_id>/`，打开时只列清单、不移动。cc 聊天只展示进出门牌；浏览器房间列表和时间线不含过程或便条，未打开的详情只含门牌，打开后的详情可读条目和来访过程但始终省略工具便条。handoff 只含房间数量。官端 claude.ai 直连 MCP 没有聊天里的门，工具调用过程会被看到，这是已知限制；自建引擎暂不提供 room。A 提供存储、工具和聊天门牌，房间页与每日注入属于后续 B。

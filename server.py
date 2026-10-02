@@ -73,7 +73,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from bucket_manager import BucketManager
 from dehydrator import ANALYZE_PRODUCT_PROMPT, MERGE_PRODUCT_PROMPT, Dehydrator
 from decay_engine import DecayEngine
-from darkroom import DarkroomStore
+from room_store import RoomStore
 from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
 from favorite_tags import has_favorite_memory_tag, has_favorite_policy_tag
@@ -299,7 +299,7 @@ portrait_engine = DailyPortraitMaintainer(config)      # Daily portrait state / 
 dream_engine = DreamEngine(config)                     # Night dream worker / 夜梦
 identity_semantic_store = IdentitySemanticStore(config) # Private relationship alias index / 私有关系语义索引
 word_map_store = WordMapStore(config)                   # Derived generic word co-occurrence index / 派生通用词图
-darkroom_store = DarkroomStore(config)                  # Private reflection room / 不回显正文的暗房
+darkroom_store = RoomStore(config)                  # Private rooms and sealed visits / 房间与封存来访
 gateway_state_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gateway_state.db"))
 automation_store = AutomationStore(config)
 _daily_schedule_cfg = config.get("daily_review", {}) if isinstance(config.get("daily_review"), dict) else {}
@@ -1918,23 +1918,10 @@ async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", de
 def _format_handoff_darkroom_door() -> str:
     try:
         status = darkroom_store.status()
+        return f"言之有 {status['count']} 间房间（{status['closed_count']} 间未打开），用 room list 查看"
     except Exception as exc:
-        logger.warning("Handoff darkroom status failed / handoff 暗房状态失败: %s", exc)
+        logger.warning("Handoff room status failed: %s", exc)
         return ""
-    count = int(status.get("count") or 0)
-    last_entered = str(status.get("last_entered_at") or "").strip()
-    lines = [
-        str(status.get("door") or "暗房存在。门口只显示状态，不显示未显影正文。"),
-        "darkroom_enter opens a new room by default; use new_room=false only when explicitly continuing the current active room. Unreleased draft text stays private until darkroom_view allows it.",
-    ]
-    if count:
-        detail = f"entries={count}"
-        if last_entered:
-            detail += f", last_entered={last_entered}"
-        lines.append(detail)
-    else:
-        lines.append("entries=0")
-    return "\n".join(lines)
 
 
 def _format_handoff_profile_facts(all_buckets: list[dict], limit: int = 6) -> str:
@@ -9476,111 +9463,21 @@ async def hold(
 
 
 # =============================================================
-# Tool 2.5: darkroom — Private unfinished reflection
-# 工具 2.5：darkroom — 暗房，存放未显影的内在反思
+# Tool 2.5: room — Private rooms and sealed visits
+# 工具 2.5：room — 房间与封存来访
 # =============================================================
 @mcp.tool()
-async def darkroom_enter(
-    note: str,
-    mode: str = "continue",
-    mood: str = "",
-    tags: str = "",
-    source: str = "mcp",
-    visibility: str = "active",
-    lock_for: str = "",
-    new_room: bool = True,
-) -> str:
-    """写入一段未显影的私密反思；默认第一人称，不用第三人称自述；默认新开房间，new_room=false 才续写当前 active 房间；写错要撤回已有房间时传 new_room=false + visibility="retracted"；不回显 note 正文。"""
+async def room(action: str, room_id: str = "", title: str = "", content: str = "", note: str = "", lock_until: str = "", include_visits: bool = False) -> str:
+    """言之的房间：enter 进门（不传 room_id 开新房，可带 title）/ write 写条目 / read 读房间 / list 门牌 / leave 出门留便条 / open 打开给小羊看；除 open 外调用即在房间内，过程不对外显示。"""
     try:
-        result = darkroom_store.enter(
-            note,
-            mood=mood,
-            tags=tags,
-            source=source,
-            mode=mode,
-            visibility=visibility,
-            lock_for=lock_for,
-            new_room=new_room,
-        )
-    except ValueError as exc:
-        return f"暗房写入失败: {exc}"
-    rid = result.get("room_id", "?")
-    eid = result.get("entry_id", "?")
-    rev = result.get("revision", "?")
-    locked = result.get("locked_until", "")
-    lock_note = f" [锁至{locked[:16]}]" if locked else ""
-    return f"暗房 → [{rid}] #{rev} ({eid}){lock_note}"
-
-
-@mcp.tool()
-async def darkroom_rooms(limit: int = 20, visibility: str = "active") -> str:
-    """只读列出暗房门牌，不返回正文；默认列 active 房间，可传 visibility="all" 看全部门牌，用 room_id 再调用 darkroom_view。"""
-    try:
-        result = darkroom_store.rooms(limit=limit, visibility=visibility)
-    except ValueError as exc:
-        return f"列出失败: {exc}"
-    rooms = result.get("rooms", [])
-    if not rooms:
-        return "暗房没有符合条件的房间。"
-    lines = [f"暗房 {result.get('visibility', visibility)} 房间，共 {len(rooms)} 间："]
-    for r in rooms:
-        rid = r.get("room_id", "?")
-        rc = r.get("revision_count", r.get("revision", "?"))
-        lw = (r.get("latest_written_at") or "")[:16]
-        extra = ""
-        if r.get("locked"):
-            extra = f" 🔒解锁:{r.get('unlock_at', '?')[:16]}"
-        lines.append(f"[{rid}] 修订{rc}次 最后:{lw}{extra}")
-    return "\n".join(lines)
-
-
-@mcp.tool()
-async def darkroom_view(entry_id: str = "latest") -> str:
-    """只读查看一条已解锁的暗房内容；未到锁门时间不返回正文。"""
-    try:
-        result = darkroom_store.view(entry_id=entry_id)
-    except KeyError:
-        return "暗房条目不存在。"
-    if result.get("status") == "locked":
-        return f"🔒 已锁，解锁时间: {result.get('unlock_at', '?')[:16]}"
-    if result.get("status") != "visible":
-        return f"暗房内容不可见: {result.get('status', '?')}"
-    eid = result.get("entry_id", "?")
-    rid = result.get("room_id", "?")
-    content = result.get("content", "")
-    lines = [f"[{rid}] ({eid})", "", content]
-    entries = result.get("entries") or []
-    if len(entries) > 1:
-        lines.append("")
-        lines.append("--- 修订历史 ---")
-        for item in entries:
-            ieid = item.get("entry_id", "?")
-            iat = (item.get("written_at") or item.get("created_at") or "")[:16]
-            itags = ", ".join(item.get("tags") or []) if item.get("tags") else ""
-            lines.append(f"[{ieid}] {iat}" + (f" [{itags}]" if itags else ""))
-    return "\n".join(lines)
+        return darkroom_store.act(action, room_id, title, content, note, lock_until, include_visits)
+    except (ValueError, KeyError) as exc:
+        return f"房间操作失败：{exc}"
 
 
 async def darkroom_status() -> dict:
-    """查看暗房门口状态。不返回任何暗房正文。"""
+    """兼容旧 Dashboard 的房间门口状态。"""
     return darkroom_store.status()
-
-
-@mcp.tool()
-async def darkroom_release(entry_id: str = "latest", reason: str = "") -> str:
-    """把一条暗房内容显影并带出来。会公开返回正文，只在明确想让内容可见时调用。"""
-    try:
-        result = darkroom_store.release(entry_id=entry_id, reason=reason)
-    except KeyError:
-        return "暗房条目不存在。"
-    if result.get("status") == "locked":
-        return f"🔒 已锁，解锁时间: {result.get('unlock_at', '?')[:16]}"
-    if result.get("status") != "released":
-        return f"暗房显影失败: {result.get('status', '?')}"
-    rid = result.get("room_id", "?")
-    eid = result.get("entry_id", "?")
-    content = result.get("content", "")
-    return f"暗房显影 [{rid}] ({eid})\n\n{content}"
 
 
 # =============================================================
@@ -13193,6 +13090,62 @@ async def api_journal_detail(request):
         "unlock_hint": meta.get("unlock_hint", ""),
         "content": strip_wikilinks((journal or {}).get("content", "")),
     })
+
+def _require_room_bearer(request):
+    from starlette.responses import JSONResponse
+    token = os.environ.get("OMBRE_GATEWAY_TOKEN") or str(config.get("gateway", {}).get("token") or "")
+    supplied = _bearer_token(dict(request.headers))
+    if token and supplied and hmac.compare_digest(token, supplied):
+        return None
+    return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+
+@mcp.custom_route("/api/rooms/visits", methods=["POST", "GET"])
+async def api_room_visits(request):
+    from starlette.responses import JSONResponse
+    err = _require_room_bearer(request)
+    if err:
+        return err
+    try:
+        if request.method == "POST":
+            return JSONResponse(darkroom_store.save_visit(await request.json()))
+        return JSONResponse({"visits": darkroom_store.public_visits(request.query_params.get("limit", 50), request.query_params.get("before", ""))})
+    except (ValueError, TypeError, KeyError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@mcp.custom_route("/api/rooms/door-snapshot", methods=["GET"])
+async def api_room_door_snapshot(request):
+    from starlette.responses import JSONResponse
+    err = _require_room_bearer(request)
+    if err:
+        return err
+    try:
+        return JSONResponse(darkroom_store.door_snapshot(request.query_params.get("session_id", ""), request.query_params.get("key", "")))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@mcp.custom_route("/api/rooms", methods=["GET"])
+async def api_rooms(request):
+    from starlette.responses import JSONResponse
+    err = _require_room_bearer(request)
+    if err:
+        return err
+    return JSONResponse({"rooms": darkroom_store.public_rooms()})
+
+
+@mcp.custom_route("/api/rooms/{id}", methods=["GET"])
+async def api_room_detail(request):
+    from starlette.responses import JSONResponse
+    err = _require_room_bearer(request)
+    if err:
+        return err
+    try:
+        return JSONResponse(darkroom_store.public_detail(request.path_params["id"]))
+    except KeyError:
+        return JSONResponse({"error": "房间不存在"}, status_code=404)
+
 
 @mcp.custom_route("/api/darkroom/status", methods=["GET"])
 async def api_darkroom_status(request):

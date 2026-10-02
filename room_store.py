@@ -65,6 +65,7 @@ class RoomStore(DarkroomStore):
                 ("id", "title", "status", "lock_until", "created_at", "updated_at", "opened_at")}
         door.update(visit_count=len(visits), total_duration_ms=sum(v["duration_ms"] for v in visits),
                     last_visit=max((v["entered_at"] for v in visits), default=""))
+        door["last_visit_duration_ms"] = max(visits, key=lambda v: v["entered_at"])["duration_ms"] if visits else 0
         return door
 
     def public_rooms(self):
@@ -103,7 +104,7 @@ class RoomStore(DarkroomStore):
             visits = sorted(self._lines(self.visits_path), key=lambda v: (v["entered_at"], v["id"]), reverse=True)
             if before:
                 visits = [v for v in visits if v["entered_at"] < before]
-            return [{**{k: v[k] for k in ("id", "room_id", "entered_at", "left_at", "duration_ms", "session_id", "request_id")},
+            return [{**{k: v[k] for k in ("id", "room_id", "entered_at", "left_at", "duration_ms", "session_id", "request_id", "turn_kind")},
                      "room_title": rooms.get(v["room_id"], {}).get("title", "未命名")}
                     for v in visits[:max(1, min(100, int(limit)))]]
 
@@ -138,8 +139,11 @@ class RoomStore(DarkroomStore):
             snapshots = self._json(self.snapshots_path, {})
             cached = snapshots.get(session_id)
             if cached and cached["key"] == key:
+                if cached["content"].startswith("【我的房间】"):
+                    cached["content"] = cached["content"].replace("【我的房间】", "【我的房间 · 今天的门牌】", 1)
+                    self._write_json_unlocked(self.snapshots_path, snapshots)
                 return cached
-            lines = ["【我的房间】"]
+            lines = ["【我的房间 · 今天的门牌】"]
             for room in self._rooms().values():
                 if room["status"] == "closed":
                     door = self._door(room)

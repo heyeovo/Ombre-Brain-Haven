@@ -1894,6 +1894,7 @@ async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", de
         ("Relationship Portrait", relationship_portrait, 160, False),
         ("Recent Continuity", recent_continuity, 650, True),
         ("照顾备忘", care_memos, 180, True),
+        ("言之的房间", _format_handoff_darkroom_door(), 45, False),
         ("Optional Anchors", anchors, 90, True),
     ]
     intro = "\n".join([

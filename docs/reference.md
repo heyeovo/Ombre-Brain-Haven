@@ -152,11 +152,13 @@ POST /api/rooms/visits                         # 来访按 id 幂等，冲突或
 GET  /api/rooms                               # 门牌、次数、总时长、最后来访；无便条
 GET  /api/rooms/visits?limit=&before=          # 时间倒序，before 为 entered_at 上界；无 process
 GET  /api/rooms/{id}                          # closed 只给门牌；opened 加条目和过程，永不返回便条
-GET  /api/rooms/door-snapshot?session_id=&key= # 私密上下文快照，按 session_id + 当前 key 冻结；A 仅实现，B 注入
+GET  /api/rooms/door-snapshot?session_id=&key= # 私密上下文快照，按 session_id + 当前 key 冻结；标题「【我的房间 · 今天的门牌】」，由 dashboard 滚动窗口服务端注入
 GET  /api/darkroom/status                     # 兼容旧 dashboard.html，房间门口状态
 ```
 
 `room` 的 read 不受锁限制，open 在北京时间 lock_until 前拒绝；none 清锁。迁移保留原 entries.jsonl，按 room_id 建 rooms.json：全部撤回的房间排除，release 对应房间为 opened，最晚未到期旧锁转房间锁。来访和门牌公开投影采用字段白名单；opened 来访里 room 工具的便条参数与带便条的回复也省略。
+
+公开来访含 `turn_kind`（chat / agent_wake）供时间线标明唤醒；公开门牌含 `last_visit_duration_ms`，供关门页显示最近停留时长。`_build_handoff_breath` 的「言之的房间」节只放数量与 `room list` 提示，不含标题、便条或房间内容。门牌旧缓存标题升级时保留同 key 的原内容与创建时间，不重新生成。
 
 ### 桶 CRUD
 ```

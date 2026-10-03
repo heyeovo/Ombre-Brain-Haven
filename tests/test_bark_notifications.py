@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from contextlib import closing
 from unittest.mock import patch
 
 import httpx
@@ -50,7 +51,7 @@ class BarkNotificationContractsTest(unittest.TestCase):
         )
         self.assertTrue(schedule["bark_notification_enabled"])
 
-    def commit_wake(self, *, request_id="wake-1", assistant_text="第一段。\n第二段。", segments=None):
+    def commit_wake(self, *, request_id="wake-1", assistant_text="第一段。\n第二段。", segments=None, delivery=None):
         if segments is None:
             segments = [
                 {"kind": "text", "markdown": "第一段。\n"},
@@ -70,7 +71,8 @@ class BarkNotificationContractsTest(unittest.TestCase):
             raw_json=json.dumps({"display_segments": {"version": 1, "segments": segments}}),
             agent_wake_update={
                 "model_activity_at": "2026-09-02T00:00:00+00:00",
-                "agent_wake": {"wake_id": request_id, "cause": "agent_schedule"},
+                "agent_wake": {"wake_id": request_id, "cause": "agent_schedule",
+                               **({"delivery": delivery} if delivery is not None else {})},
             },
             created_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
         )
@@ -133,6 +135,82 @@ class BarkNotificationContractsTest(unittest.TestCase):
         self.assertEqual(len(rows), 3)
         self.assertNotIn("print(1)", rows[1]["body"])
         self.assertIn("还有 2 段", rows[2]["body"])
+
+    def test_quiet_delivery_is_persisted_visible_idempotent_and_passive(self):
+        self.save_ready_config()
+        self.make_wake_schedule()
+        schedule = self.gateway.get_agent_wake_schedule(profile_id="default", session_id="session-1", lane_id="subscription")
+        self.gateway.patch_agent_wake_schedule(profile_id="default", session_id="session-1", lane_id="subscription",
+            expected_version=schedule["schedule_version"], changes={"keepalive_paused_until_user": True})
+        committed = self.commit_wake(delivery="quiet")
+        self.assertEqual([row["level"] for row in self.outbox_rows()], ["passive", "passive"])
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            row = conn.execute("SELECT raw_json, assistant_text FROM conversation_turns WHERE id = ?",
+                               (committed["turn"]["id"],)).fetchone()
+        self.assertEqual(json.loads(row[0])["agent_wake"]["delivery"], "quiet")
+        self.assertEqual(json.loads(row[0])["agent_wake"]["outcome"], "message")
+        self.assertTrue(row[1])
+        self.assertFalse(self.gateway.get_agent_wake_schedule(profile_id="default", session_id="session-1",
+                                                            lane_id="subscription")["keepalive_paused_until_user"])
+        self.assertTrue(self.commit_wake(delivery="quiet")["idempotent_replay"])
+        self.assertEqual(len(self.outbox_rows()), 2)
+        BarkNotificationStore(self.db_path)
+        self.assertEqual([row["level"] for row in self.outbox_rows()], ["passive", "passive"])
+
+    def test_explicit_loud_and_invalid_delivery_keep_active_first_segment(self):
+        self.save_ready_config()
+        self.make_wake_schedule()
+        for delivery in ("loud", "invalid", {"bad": "value"}, ["quiet"]):
+            with self.subTest(delivery=delivery):
+                self.commit_wake(delivery=delivery)
+                self.assertEqual([row["level"] for row in self.outbox_rows()], ["active", "passive"])
+                with closing(sqlite3.connect(self.db_path)) as conn:
+                    conn.execute("DELETE FROM notification_outbox")
+                    conn.execute("DELETE FROM conversation_turns")
+                    conn.execute("DELETE FROM conversation_sessions")
+                    conn.commit()
+
+    def test_quiet_obeys_profile_and_window_notification_switches(self):
+        for disabled in ("profile", "window"):
+            with self.subTest(disabled=disabled):
+                self.save_ready_config(enabled=disabled != "profile")
+                if disabled == "profile":
+                    self.make_wake_schedule()
+                else:
+                    schedule = self.gateway.get_agent_wake_schedule(profile_id="default", session_id="session-1",
+                                                                   lane_id="subscription")
+                    self.gateway.patch_agent_wake_schedule(profile_id="default", session_id="session-1",
+                        lane_id="subscription", expected_version=schedule["schedule_version"],
+                        changes={"bark_notification_enabled": False})
+                self.commit_wake(delivery="quiet", request_id="disabled-" + disabled)
+                self.assertEqual(self.outbox_rows(), [])
+                with closing(sqlite3.connect(self.db_path)) as conn:
+                    conn.execute("DELETE FROM conversation_turns")
+                    conn.execute("DELETE FROM conversation_sessions")
+                    conn.commit()
+
+    def test_quiet_direct_enqueue_respects_delivery_default_and_scope(self):
+        self.save_ready_config()
+        self.make_wake_schedule()
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            for turn_id, delivery in enumerate((None, "loud", "quiet", "invalid"), 1):
+                count = self.store.enqueue_agent_wake_for_turn(conn, profile_id="default",
+                    session_id="session-1", lane_id="subscription", turn_id=turn_id,
+                    assistant_text="正文", created_at="2026-10-04T12:00:00Z",
+                    raw_json=json.dumps({"display_segments": {"version": 3, "segments": [
+                        {"kind": "text", "markdown": "第一段"}, {"kind": "text", "markdown": "第二段"}]} }),
+                    **({"delivery": delivery} if delivery is not None else {}))
+                self.assertEqual(count, 2)
+                levels = [row[0] for row in conn.execute(
+                    "SELECT level FROM notification_outbox WHERE turn_id = ? ORDER BY segment_index", (turn_id,))]
+                self.assertEqual(levels, ["passive", "passive"] if delivery == "quiet" else ["active", "passive"])
+            self.assertEqual(self.store.enqueue_agent_wake_for_turn(conn, profile_id="other",
+                session_id="session-1", lane_id="subscription", turn_id=5, assistant_text="正文",
+                raw_json="{}", created_at="2026-10-04T12:00:00Z", delivery="quiet"), 0)
+        finally:
+            conn.close()
 
     def test_outbox_failure_rolls_back_turn(self):
         self.save_ready_config()

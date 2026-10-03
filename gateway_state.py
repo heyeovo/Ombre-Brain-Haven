@@ -3134,6 +3134,9 @@ class GatewayStateStore:
                     now_iso=created_iso,
                 )
             if safe_turn_kind == "agent_wake" and str(assistant_text or "").strip():
+                wake_metadata = wake_update.get("agent_wake")
+                delivery = wake_metadata.get("delivery", "loud") if isinstance(wake_metadata, dict) else "loud"
+                delivery = delivery if delivery in ("loud", "quiet") else "loud"
                 BarkNotificationStore.enqueue_agent_wake_for_turn(
                     conn,
                     profile_id=safe_profile_id,
@@ -3143,6 +3146,7 @@ class GatewayStateStore:
                     assistant_text=str(assistant_text or ""),
                     raw_json=str(raw_json or ""),
                     created_at=created_iso,
+                    delivery=delivery,
                 )
             if requested_attachment_ids:
                 placeholders = ",".join("?" for _ in requested_attachment_ids)

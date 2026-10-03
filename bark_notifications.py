@@ -309,6 +309,7 @@ class BarkNotificationStore:
         assistant_text: str,
         raw_json: str,
         created_at: str,
+        delivery: str = "loud",
     ) -> int:
         if not str(assistant_text or "").strip():
             return 0
@@ -370,7 +371,7 @@ class BarkNotificationStore:
                 (
                     f"{batch_key}:{index}", batch_key, _profile_id(profile_id), str(session_id),
                     str(lane_id), int(turn_id), index, version, kind, "Claude 主动消息", body,
-                    "active" if index == 0 else "passive", f"cc:{session_id}", deep_link,
+                    "active" if index == 0 and delivery != "quiet" else "passive", f"cc:{session_id}", deep_link,
                     int(config.get("segment_interval_ms") or 1000), now, now, now,
                 ),
             )

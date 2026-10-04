@@ -14,8 +14,11 @@
 import os
 import json
 import math
+import time
+import asyncio
 import sqlite3
 import logging
+import weakref
 
 from openai import AsyncOpenAI
 
@@ -50,6 +53,20 @@ class EmbeddingEngine:
         # --- SQLite path: buckets_dir/embeddings.db ---
         db_path = os.path.join(config["buckets_dir"], "embeddings.db")
         self.db_path = db_path
+
+        # --- Health snapshot (runtime only; lost on restart) ---
+        # --- 健康快照（仅运行态，重启丢失）---
+        self.last_success_at: float | None = None
+        self.last_failure_at: float | None = None
+        self.last_error = ""
+        self.consecutive_failures = 0
+
+        # AsyncOpenAI keeps an httpx pool bound to the event loop that first used it.
+        # Brain runs schedulers on their own loops, so each extra loop gets its own client.
+        # AsyncOpenAI 的连接池绑定首次使用它的事件循环；Brain 的调度线程各有循环，各自建客户端。
+        self._base_client = None
+        self._base_loop = None
+        self._loop_clients = weakref.WeakKeyDictionary()
 
         # --- Initialize client ---
         if self.enabled:
@@ -98,7 +115,9 @@ class EmbeddingEngine:
             self._store_embedding(bucket_id, embedding)
             return True
         except Exception as e:
-            logger.warning(f"Embedding generation failed for {bucket_id}: {e}")
+            reason = self._describe_error(e)
+            self._record_failure(reason)
+            logger.warning("Embedding store failed / 向量写入失败 for %s: %s", bucket_id, reason)
             return False
 
     async def _generate_embedding(self, text: str, *, kind: str = "document") -> list[float]:
@@ -107,16 +126,79 @@ class EmbeddingEngine:
         prepared = self._prepare_embedding_input(text, kind=kind)
         truncated = prepared[: self.max_chars]
         try:
-            response = await self.client.embeddings.create(
+            client = self._client_for_running_loop()
+            if client is None:
+                self._record_failure("client_unavailable")
+                return []
+            response = await client.embeddings.create(
                 model=self.model,
                 input=truncated,
             )
             if response.data and len(response.data) > 0:
+                self._record_success()
                 return response.data[0].embedding
+            self._record_failure("empty_response")
             return []
         except Exception as e:
-            logger.warning(f"Embedding API call failed: {e}")
+            reason = self._describe_error(e)
+            self._record_failure(reason)
+            logger.warning("Embedding API call failed / 向量接口调用失败 (%s): %s", kind, reason)
             return []
+
+    def _client_for_running_loop(self):
+        base = self.client
+        if base is None or not isinstance(base, AsyncOpenAI):
+            return base
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return base
+        if self._base_client is not base:
+            # First use, or hot reload swapped the client: bind it to this loop.
+            self._base_client = base
+            self._base_loop = loop
+            self._loop_clients = weakref.WeakKeyDictionary()
+            return base
+        if loop is self._base_loop:
+            return base
+        client = self._loop_clients.get(loop)
+        if client is None:
+            client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=30.0)
+            self._loop_clients[loop] = client
+        return client
+
+    def _describe_error(self, exc: Exception) -> str:
+        status = getattr(exc, "status_code", None)
+        message = str(exc).replace("\n", " ").strip()
+        if self.api_key:
+            message = message.replace(self.api_key, "[REDACTED]")
+        prefix = type(exc).__name__ + (f" {status}" if status else "")
+        return f"{prefix}: {message[:160]}" if message else prefix
+
+    def _record_success(self) -> None:
+        self.last_success_at = time.time()
+        self.consecutive_failures = 0
+
+    def _record_failure(self, reason: str) -> None:
+        self.last_failure_at = time.time()
+        self.last_error = str(reason or "unknown")[:200]
+        self.consecutive_failures += 1
+
+    def health_snapshot(self) -> dict:
+        return {
+            "enabled": bool(self.enabled),
+            "model": self.model,
+            "last_success_at": self.last_success_at,
+            "last_failure_at": self.last_failure_at,
+            "last_error": self.last_error,
+            "consecutive_failures": self.consecutive_failures,
+        }
+
+    async def self_check(self) -> bool:
+        """Embed a short probe query; result lands in the health snapshot."""
+        if not self.enabled:
+            return False
+        return bool(await self._generate_embedding("embedding self check", kind="query"))
 
     def _store_embedding(self, bucket_id: str, embedding: list[float]):
         """Store embedding in SQLite."""
@@ -226,6 +308,11 @@ class EmbeddingEngine:
                 else "embedding_stale_model_or_dimension"
             )
         return statuses
+
+    def missing_bucket_ids(self, bucket_ids: list[str]) -> list[str]:
+        """Buckets without a usable vector for the active model (missing, invalid or stale)."""
+        statuses = self.get_embedding_statuses(bucket_ids)
+        return [bucket_id for bucket_id, status in statuses.items() if status != "indexed"]
 
     async def search_similar(self, query: str, top_k: int = 10) -> list[tuple[str, float]]:
         """

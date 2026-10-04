@@ -52,7 +52,8 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `bucket_manager.py` | 桶 CRUD、搜索、评分、回收站、命中统计、分词 |
 | `dehydrator.py` | LLM 脱水、合并、打标；三类调用共用可热更新的 dehydration token、temperature、thinking 参数（含 `_last_merge_usage` 成本追踪） |
 | `decay_engine.py` | 衰减引擎，只计算排序 score；不自动 resolved、digested 或 archive |
-| `embedding_engine.py` | 向量嵌入 + 相似度搜索；可区分当前模型可用、缺失、损坏及模型/维度过期的桶向量状态 |
+| `embedding_engine.py` | 向量嵌入 + 相似度搜索；可区分当前模型可用、缺失、损坏及模型/维度过期的桶向量状态；每个事件循环各用一个 API 客户端（Brain 调度线程各有循环）；记录运行态健康快照（最近成功/失败、错误类型、连续失败数） |
+| `embedding_maintenance.py` | 单桶向量刷新重试（2s/10s/30s）+ 缺失/过期向量巡检：Brain 启动约 40 秒后自检一次向量接口，之后按 `embedding.sweep_interval_minutes`（默认 30）巡检、每次最多补 `sweep_limit` 张；`POST /admin/backfill` 用同一个巡检器不限量补齐。结果见 `GET /api/status` 的 `embedding` 字段 |
 | `import_memory.py` | 对话历史导入引擎（含成本追踪） |
 | `raw_events.py` | 隔离的原文 SQLite、显式原文检索、运行时/历史档案 scope、历史窗口目录与按时间分页读取、消息与导入幂等、私密白名单聊天档案分块归档 |
 | `raw_archive_import.py` | Claude 官方与 Kelivo 导出的流式白名单适配、预览审计、跨来源疑似重复、可见聊天＋推理档案打包及确认式上传 CLI；工具和附件内容不入 Haven |
@@ -243,7 +244,7 @@ POST /api/scoring-config                                        # 写旋钮（�
 POST /api/scoring-config/reset                                  # 重置为默认值
 GET  /api/breath-debug?q=&valence=&arousal=&threshold=          # 模拟 breath（默认不记命中统计；rerank=true 时走 search 会记）
 GET  /api/recall-debug                                           # 召回调试
-GET  /api/status                                                 # 状态
+GET  /api/status                                                 # 状态；含 embedding 健康快照与最近一次巡检结果
 ```
 
 ### 日记

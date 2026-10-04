@@ -154,6 +154,8 @@ embedding:
   query_timeout_seconds: 5         # Gateway recall query timeout / Gateway 召回查询向量超时秒数
   query_instruction: "Given a memory search query, retrieve relevant long-term memory passages."
   document_instruction: ""
+  sweep_interval_minutes: 30       # Brain refills missing/stale bucket vectors; 0 disables / 缺失向量巡检间隔，0 关闭
+  sweep_limit: 30                  # Max buckets refreshed per sweep / 每次巡检最多补几张
   # api_key: ""                   # Use env var OMBRE_EMBEDDING_API_KEY / 请使用环境变量
   # Common embedding model examples / 常见向量模型示例：
   #   SiliconFlow Qwen: Qwen/Qwen3-Embedding-4B

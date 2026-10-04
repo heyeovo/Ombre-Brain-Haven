@@ -76,6 +76,7 @@ from decay_engine import DecayEngine
 from room_store import RoomStore
 from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
+from embedding_maintenance import EmbeddingSweeper, refresh_with_retry
 from favorite_tags import has_favorite_memory_tag, has_favorite_policy_tag
 from gateway_state import GatewayStateStore
 from identity import identity_names
@@ -283,7 +284,6 @@ prompt_store = PromptStore(
 )
 dehydrator = Dehydrator(config, prompt_resolver=prompt_store.get_effective)  # Dehydrator / 脱水器
 decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引擎
-embedding_engine = EmbeddingEngine(config)            # Embedding engine / 向量化引擎
 reranker_engine = RerankerEngine(config)              # Reranker / 召回重排序
 recall_diagnostics = RecallDiagnosticsLogger(config)  # Recall diagnostics / 召回诊断
 
@@ -3192,6 +3192,10 @@ def _refresh_entity_edges_for_bucket(bucket: dict | None) -> int:
     return len(saved)
 
 
+# Strong refs so the event loop cannot garbage-collect a refresh task mid-flight.
+_EMBEDDING_REFRESH_TASKS: set = set()
+
+
 def _queue_embedding_refresh(bucket_id: str) -> bool:
     if not bucket_id or not getattr(embedding_engine, "enabled", False):
         return False
@@ -3199,7 +3203,9 @@ def _queue_embedding_refresh(bucket_id: str) -> bool:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return False
-    loop.create_task(_refresh_bucket_embedding_async(bucket_id))
+    task = loop.create_task(_refresh_bucket_embedding_async(bucket_id))
+    _EMBEDDING_REFRESH_TASKS.add(task)
+    task.add_done_callback(_EMBEDDING_REFRESH_TASKS.discard)
     return True
 
 
@@ -3218,12 +3224,8 @@ def _queue_embedding_refresh_if_changed(
 
 
 async def _refresh_bucket_embedding_async(bucket_id: str) -> None:
-    try:
-        ok = await _refresh_bucket_embedding(bucket_id)
-        if not ok:
-            logger.debug("Embedding refresh skipped or failed / 向量刷新跳过或失败: %s", bucket_id)
-    except Exception as e:
-        logger.warning("Embedding refresh failed / 向量刷新失败: %s: %s", bucket_id, e)
+    # Retries log their own warnings; whatever still fails is picked up by the sweep.
+    await refresh_with_retry(_refresh_bucket_embedding, bucket_id)
 
 
 # =============================================================
@@ -3703,13 +3705,22 @@ def _handoff_query_hint(query: str) -> str:
     return f"细节用 breath(query=\"{escaped}\") 查。"
 
 
-async def _refresh_bucket_embedding(bucket_id: str) -> bool:
+async def _refresh_bucket_embedding(bucket_id: str, mgr=None) -> bool:
     if not getattr(embedding_engine, "enabled", False):
         return False
-    bucket = await bucket_mgr.get(bucket_id)
+    bucket = await (mgr or bucket_mgr).get(bucket_id)
     if not bucket:
         return False
     return await embedding_engine.generate_and_store(bucket_id, bucket_text_for_embedding(bucket))
+
+
+async def _all_bucket_ids(mgr=None) -> list[str]:
+    buckets = await (mgr or bucket_mgr).list_all(include_archive=True)
+    # Empty-text buckets can never get a vector; leave them out so the sweep doesn't retry forever.
+    return [str(bucket.get("id") or "") for bucket in buckets if bucket_text_for_embedding(bucket)]
+
+
+embedding_sweeper = EmbeddingSweeper(embedding_engine, _all_bucket_ids, _refresh_bucket_embedding)
 
 
 def _delete_bucket_indexes(bucket_id: str) -> tuple[dict, list[str]]:
@@ -16158,6 +16169,10 @@ async def api_status(request):
         return JSONResponse(
             {
                 "decay_engine": "running" if decay_engine.is_running else "stopped",
+                "embedding": {
+                    **embedding_engine.health_snapshot(),
+                    "last_sweep": embedding_sweeper.last_result,
+                },
                 "buckets": {
                     "permanent": stats.get("permanent_count", 0),
                     "dynamic": stats.get("dynamic_count", 0),
@@ -16508,9 +16523,10 @@ async def admin_backfill(request):
     err = _require_dashboard_auth(request)
     if err: return err
     try:
-        import asyncio
-        from backfill_embeddings import backfill
-        asyncio.create_task(backfill(batch_size=20))
+        # In-process engine and bucket manager: the same client the write path uses.
+        task = asyncio.create_task(embedding_sweeper.run_once(limit=None))
+        _EMBEDDING_REFRESH_TASKS.add(task)
+        task.add_done_callback(_EMBEDDING_REFRESH_TASKS.discard)
         return JSONResponse({"status": "started"})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -16971,6 +16987,40 @@ if __name__ == "__main__":
         dt = threading.Thread(target=_start_dream_scheduler, daemon=True)
         dt.start()
         logger.info("Dream scheduler loop started / 夜梦定时器循环已启动")
+
+        embedding_cfg = config.get("embedding", {}) if isinstance(config.get("embedding"), dict) else {}
+        embedding_sweep_minutes = _int_between(embedding_cfg.get("sweep_interval_minutes"), 30, 0, 1440)
+        embedding_sweep_limit = _int_between(embedding_cfg.get("sweep_limit"), 30, 1, 500)
+
+        async def _embedding_sweep_loop():
+            await asyncio.sleep(40)
+            if await embedding_engine.self_check():
+                logger.info("Embedding self check passed / 向量自检通过: %s", embedding_engine.model)
+            else:
+                logger.warning(
+                    "Embedding self check failed / 向量自检失败: %s",
+                    embedding_engine.last_error or "engine disabled",
+                )
+            local_bucket_mgr = BucketManager(config)
+            while True:
+                try:
+                    await embedding_sweeper.run_once(
+                        limit=embedding_sweep_limit,
+                        list_bucket_ids=lambda: _all_bucket_ids(local_bucket_mgr),
+                        refresh=lambda bucket_id: _refresh_bucket_embedding(bucket_id, local_bucket_mgr),
+                    )
+                except Exception as e:
+                    logger.warning("Embedding sweep failed / 向量巡检失败: %s", e)
+                await asyncio.sleep(embedding_sweep_minutes * 60)
+
+        def _start_embedding_sweeper():
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(_embedding_sweep_loop())
+
+        if embedding_sweep_minutes > 0:
+            est = threading.Thread(target=_start_embedding_sweeper, daemon=True)
+            est.start()
+            logger.info("Embedding sweep loop started / 向量巡检循环已启动: every %s min", embedding_sweep_minutes)
 
         # --- Add CORS middleware so remote clients (Cloudflare Tunnel / ngrok) can connect ---
         # --- 添加 CORS 中间件，让远程客户端（Cloudflare Tunnel / ngrok）能正常连接 ---

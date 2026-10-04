@@ -34,8 +34,8 @@ OMBRE_TRANSPORT=streamable-http python server.py
 
 | 文件 | 职责 |
 |------|------|
-| `server.py` | **Brain** 入口（~640KB）。MCP 工具注册（`@mcp.custom_route`）+ REST API + 记忆核心 |
-| `gateway.py` | **Gateway** 入口（~965KB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线（透镜调试区分检索前排除与相关性拒绝）+ cc 持久化路由（`Route()` 注册） |
+| `server.py` | **Brain** 入口（约 700KB）。MCP 工具注册（`@mcp.tool`）+ REST API（`@mcp.custom_route`）+ 记忆核心 |
+| `gateway.py` | **Gateway** 入口（约 1MB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线（透镜调试区分检索前排除与相关性拒绝）+ cc 持久化路由（`Route()` 注册） |
 | `gateway_state.py` | Gateway/cc SQLite 状态：带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式、固定 handoff、版本化按天滚动配置及 turn watermark、每协作者唯一主窗标记、软删除防复活、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision 成对指针及上一检查点、显式 Haven 正文恢复的原子 lane 切换记录、Context GC 配置/历史、带 `created/recalled/breath` 原因与 context revision 生命周期的召回隔离账本；日期清单按日汇总正文、工具、附件视觉/文件正文、召回、thinking、运行时时间戳、消息框架和 agent wake 的 token 预估；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox，正式主动消息（含 quiet，`delivery` 原样保存在 raw）还会在该事务内解除缓存保活的临时暂停，no-op 不解除 |
 | `appearance_config.py` | Dashboard 外观配置的服务端白名单 normalize，背景图 MIME/体积/尺寸校验、EXIF 方向修正与压缩；不接受客户端直接指定任意图片路径 |
 | `conversation_slice_store.py` | CC 自动聊天切片的独立 SQLite 契约：在 `gateway_state.db` 中维护版本化批次、切片、任务状态、CAS 重切 revision 与独立 embedding 元数据；负责永久消息规范化 hash、source/coverage 校验、幂等创建、原子激活、source 变化失效及窗口永久删除级联。本模块不调用模型、不做召回或 Context 注入 |
@@ -126,7 +126,7 @@ scoring_weights:
 完整清单见 **ENV_VARS.md**。核心项：
 
 ```
-OMBRE_API_KEY=             # LLM API key（必须）
+OMBRE_API_KEY=             # LLM API key（可选；不填则脱水、打标等依赖模型的能力不可用）
 OMBRE_BASE_URL=            # LLM API 地址
 OMBRE_TRANSPORT=           # stdio / streamable-http
 OMBRE_BUCKETS_DIR=         # 存储目录
@@ -241,7 +241,7 @@ GET  /api/recent-searches?limit=                                # 检索追溯
 GET  /api/scoring-config                                        # 读评分旋钮
 POST /api/scoring-config                                        # 写旋钮（持久化 runtime_config.json）
 POST /api/scoring-config/reset                                  # 重置为默认值
-GET  /api/breath-debug?q=&valence=&arousal=&threshold=          # 模拟 breath（亦记录命中统计）
+GET  /api/breath-debug?q=&valence=&arousal=&threshold=          # 模拟 breath（默认不记命中统计；rerank=true 时走 search 会记）
 GET  /api/recall-debug                                           # 召回调试
 GET  /api/status                                                 # 状态
 ```
@@ -293,11 +293,11 @@ POST /api/prompts                     # 按 revision 持久保存产品 Prompt�
 POST /api/prompts/reset               # 删除用户覆盖并恢复当前代码默认
 POST /api/prompts/test                # analyze/merge 局部草稿试跑；不改共享实例、不持久化
 GET|POST /api/todos / PATCH|DELETE /api/todos/{id} / POST /api/todos/{id}/writeback   # 待办；GET count_only=1 只返回数量；删除桶 Todo 只清 todo 元数据，保留桶
-GET  /api/reminders / POST /api/reminders / DELETE /api/reminders/{id}  # 照顾备忘
+GET  /api/reminders / POST /api/reminders / PATCH /api/reminders/{id}  # 照顾备忘（无 DELETE，更新 / 归档走 PATCH）
 GET  /api/persona / GET /api/portrait-state*                        # 画像
 GET  /api/moments / GET /api/edges / GET /api/word-map*              # 记忆图；单桶 moments 返回桶内边与带目标桶名称的跨桶边
 POST /api/ingest-raw / POST /api/memories                            # 原文写入；前者兼容历史档案查重/分块归档动作
-GET  /api/daily-chat-memory/pending | /run | /confirm                # 每日聊天记忆
+GET  /api/daily-chat-memory/pending · POST /run · POST /confirm      # 每日聊天记忆（人工审核入口已删、接口保留，见 MEM-01）
 GET|PATCH /api/daily-reviews                                            # 日回顾列表 / 手动微调
 POST /api/daily-reviews/run                                             # 指定日期手动生成日回顾
 ```
@@ -305,7 +305,7 @@ POST /api/daily-reviews/run                                             # 指定
 ### Hooks & 调试
 ```
 GET /breath-hook                      # SessionStart hook（自动 breath）
-GET /dream-hook                       # 自动 dream
+GET /dream-hook                       # /introspection-hook 的旧兼容路径（清醒自省），不是夜梦生成
 GET /introspection-hook               # 自省 hook
 GET /api/debug/injections             # 注入调试；含检索前排除桶及 recalled/created/breath 原因与日期（见 README「Gateway 注入边界」）
 ```

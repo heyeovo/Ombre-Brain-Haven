@@ -549,7 +549,7 @@ Codex 接线时注意：
 | --- | --- |
 | `breath` | 浮现记忆、按 query/date 查询、执行新窗口 handoff；`domain="pinned"` 一次读取钉选桶全集（受 `max_tokens` 总预算约束） |
 | `grow` | 写入或合并长期记忆 |
-| `hold` | 暂存当前值得抓住的片段；成功返回 `{status, action, bucket_id, bucket_name}` |
+| `hold` | 写入一条长期记忆（持久记忆桶）；成功返回 `{status, action, bucket_id, bucket_name}` |
 | `read_bucket` | 读取指定 bucket 原文与全部年轮；journey 额外列出证据桶名称与 ID |
 | `read_daily_reviews` | 按日期范围或最近若干已结束日历日只读当前独立日回顾；返回缺失日期，不暴露来源窗口 |
 | `comment_bucket` / `delete_bucket_comment` | 添加或删除年轮 |

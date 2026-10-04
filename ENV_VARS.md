@@ -1,6 +1,6 @@
 # 环境变量参考
 
-所有环境变量均为可选。推荐只设置前 4 个核心密钥变量，其余配置通过 `config.yaml` 管理（支持 Dashboard 热更新，重启不丢失）。
+运行 Haven 本身不强制任何环境变量；但部署和部分能力有条件必填：Coolify Compose 必须填 `HAVEN_RELEASE_SHA`，启用 CC 唤醒调度需要下文「CC 主动唤醒 runner」两项。推荐只设置前 4 个核心密钥变量，其余配置通过 `config.yaml` 管理（支持 Dashboard 热更新，重启不丢失）。
 
 ## 核心密钥（建议设置）
 

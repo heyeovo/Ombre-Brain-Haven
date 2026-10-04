@@ -1,5 +1,4 @@
 import itertools
-import json
 import os
 import re
 import sqlite3
@@ -1539,7 +1538,3 @@ def _float_between(value: Any, default: float, lower: float, upper: float) -> fl
     except (TypeError, ValueError):
         number = default
     return max(lower, min(upper, number))
-
-
-def dumps_debug(payload: Any) -> str:
-    return json.dumps(payload, ensure_ascii=False, indent=2)

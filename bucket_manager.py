@@ -2621,9 +2621,6 @@ class BucketManager:
             return False
         return True
 
-        logger.info(f"Archived bucket / 归档记忆桶: {bucket_id} → archive/{primary_domain}/")
-        return True
-
     async def activate(self, bucket_id: str) -> bool:
         """
         Move an archived bucket back to dynamic storage and mark it active.

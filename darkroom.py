@@ -381,12 +381,6 @@ class DarkroomStore:
             "released_count": int(state.get("released_count") or 0),
         }
 
-    def _last_entry_unlocked(self, *, visibility: str = "active") -> dict | None:
-        last = None
-        for entry in self._iter_entries_unlocked(visibility=visibility):
-            last = entry
-        return last
-
     def _entry_room_id(self, entry: dict | None) -> str:
         if not entry:
             return ""

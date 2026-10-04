@@ -12328,11 +12328,9 @@ class GatewayService:
             kind = str(metadata.get("comment_kind") or "").strip().lower()
             ordinal = self._moment_ordinal(year_ring)
             score = 0.0
-            query_hit = False
             for term in query_terms:
                 if term and term.lower() in text:
                     score += 3.0
-                    query_hit = True
             for term in seed_terms:
                 if term and term.lower() in text:
                     score += 1.0

@@ -1355,19 +1355,6 @@ class PersonaStateEngine:
         conn.close()
         return int(count or 0)
 
-    def _event_exists(self, session_id: str, exchange_hash: str) -> bool:
-        conn = self._connect()
-        row = conn.execute(
-            """
-            SELECT 1 FROM persona_events
-            WHERE profile_id = ? AND session_id = ? AND exchange_hash = ?
-            LIMIT 1
-            """,
-            (self.profile_id, session_id, exchange_hash),
-        ).fetchone()
-        conn.close()
-        return row is not None
-
     def _exchange_hash(self, session_id: str, user_message: str, assistant_response: str) -> str:
         text = "\n".join([self.profile_id, session_id, user_message, assistant_response])
         return hashlib.sha256(text.encode("utf-8")).hexdigest()

@@ -1934,13 +1934,6 @@ class DailyPortraitMaintainer:
             parsed = parsed.replace(tzinfo=self.tz)
         return parsed.astimezone(self.tz).date().isoformat()
 
-    def _same_local_date(self, value: datetime | None, date_key: str) -> bool:
-        if value is None:
-            return False
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=self.tz)
-        return value.astimezone(self.tz).date().isoformat() == date_key
-
     def _evidence_intersects(self, evidence: Any, bucket_ids: set[str], session_ids: set[str]) -> bool:
         rows = evidence if isinstance(evidence, list) else []
         for row in rows:

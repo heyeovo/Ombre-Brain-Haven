@@ -347,8 +347,8 @@ GET /api/debug/injections             # 注入调试；含检索前排除桶及 
 ### 关键词命中优先
 当 query 的 token 精确匹配了桶的 name 或 domain 时，即使综合分未过 `fuzzy_threshold` 也强制通过（normalized 设为 threshold × 0.7）。
 
-### auto_merge 控制
-`OMBRE_AUTO_MERGE=false` 时 `_merge_or_create()` 跳过合并，始终新建桶。用于手动合并工作流。
+### hold 不自动合并
+`_merge_or_create()` 始终新建桶（2026-10-04 移除了从未触发的自动合并分支：三个调用方都传 `allow_merge=False`，且写回语句在 return 之后不可达）。`OMBRE_AUTO_MERGE` 与 `merge_threshold` 已不影响 hold；导入流程的合并另由 `import.auto_merge_enabled` 控制。
 
 ### Journal 缓存
 `_JOURNAL_CACHE` 60s TTL。新建、编辑、删除日记时均 `_invalidate_cache("JOURNAL")`。Journal 使用独立目录和专属 GET/PATCH/DELETE；标题、正文、作者、`event_time`、锁定状态可编辑，`created` 不随编辑改变。

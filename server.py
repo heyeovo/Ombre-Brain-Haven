@@ -4226,66 +4226,9 @@ async def _merge_or_create(
     locked: bool = False,
     unlock_hint: str = "",
     event_time: str = "",
-    allow_merge: bool = True,
     source: str = "",
 ) -> tuple[str, bool]:
-    try:
-        existing = await bucket_mgr.search(
-            content,
-            limit=1,
-            domain_filter=domain or None,
-            include_archive=False,
-        )
-    except Exception as e:
-        logger.warning(f"Search for merge failed, creating new / 合并搜索失败，新建: {e}")
-        existing = []
-
     related_bucket = await _find_readonly_related_bucket(content)
-
-    if allow_merge and existing and existing[0].get("score", 0) > config.get("merge_threshold", 90):
-        bucket = existing[0]
-        # --- Never merge into pinned/protected buckets ---
-        # --- 不合并到钉选/保护桶 ---
-        if not (
-            bucket["metadata"].get("pinned")
-            or bucket["metadata"].get("protected")
-            or bucket["metadata"].get("type") == "feel"
-            or _is_profile_fact_bucket(bucket)
-        ):
-            try:
-                merged = await dehydrator.merge(bucket["content"], content)
-                merged = _normalize_memory_sections_for_write(merged)
-                old_v = bucket["metadata"].get("valence", 0.5)
-                old_a = bucket["metadata"].get("arousal", 0.3)
-                merged_valence = round((old_v + valence) / 2, 2)
-                merged_arousal = round((old_a + arousal) / 2, 2)
-                update_kwargs = dict(
-                    content=merged,
-                    tags=list(set(bucket["metadata"].get("tags", []) + tags)),
-                    importance=max(bucket["metadata"].get("importance", 5), importance),
-                    domain=list(set(bucket["metadata"].get("domain", []) + domain)),
-                    valence=merged_valence,
-                    arousal=merged_arousal,
-                )
-                _queue_embedding_refresh(bucket["id"])
-                return bucket["id"], bucket["metadata"].get("name", bucket["id"]), True, related_bucket
-
-                if wish:
-                    update_kwargs["wish"] = True
-                if todo:
-                    update_kwargs["todo"] = todo
-                    update_kwargs["todo_done"] = todo_done
-                    update_kwargs["extra_metadata"] = {"todo_domain": todo_domain}
-                await bucket_mgr.update(bucket["id"], **update_kwargs)
-                # --- Update embedding after merge ---
-                try:
-                    await embedding_engine.generate_and_store(bucket["id"], merged)
-                except Exception:
-                    pass
-                return bucket["metadata"].get("name", bucket["id"]), True
-
-            except Exception as e:
-                logger.warning(f"Merge failed, creating new / 合并失败，新建: {e}")
 
     bucket_id = await bucket_mgr.create(
         content=content,
@@ -8168,12 +8111,11 @@ async def breath(
         if dream_block:
             parts.append(dream_block)
 
-        if not parts:
-            return "权重池平静，没有需要处理的记忆。"
-        return "\n\n".join(parts)
-
         if wish_result:
             parts.append("=== 还记得这个吗 ===\n" + wish_result)
+
+        if not parts:
+            return "权重池平静，没有需要处理的记忆。"
         return "\n\n".join(parts)
 
 
@@ -9447,7 +9389,6 @@ async def hold(
         valence=final_valence,
         arousal=final_arousal,
         name=suggested_name,
-            allow_merge=False,
             wish=wish,
             todo=todo,
             todo_domain=todo_domain,
@@ -9633,7 +9574,6 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
             valence=analysis.get("valence", 0.5),
             arousal=analysis.get("arousal", 0.3),
             name=title.strip() or analysis.get("suggested_name", ""),
-            allow_merge=False,
             source="AI",
             memory_subject=fast_classification["memory_subject"],
             memory_layer=fast_classification["memory_layer"],
@@ -9686,8 +9626,7 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
                 valence=item.get("valence", 0.5),
                 arousal=item.get("arousal", 0.3),
                 name=item.get("name", ""),
-                allow_merge=False,
-                source="AI",
+                    source="AI",
                 memory_subject=item_classification["memory_subject"],
                 memory_layer=item_classification["memory_layer"],
                 memory_classification_source=item_classification["memory_classification_source"],

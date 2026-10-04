@@ -171,7 +171,7 @@ Webhook 推送格式（JSON）：
 
 | 变量名 | 说明 |
 |--------|------|
-| `OMBRE_AUTO_MERGE` | 覆盖 memory merge 行为（`true`/`false`） |
+| `OMBRE_AUTO_MERGE` | 已无效：hold 不再自动合并（2026-10-04），仍会被解析但无代码读取 |
 | `OMBRE_MEMORY_WRITE_TOKEN` | 外部写入认证令牌（留空复用 `OMBRE_GATEWAY_TOKEN`） |
 | `OMBRE_DIARY_MCP_URL` | 外部日记 MCP 地址 |
 | `OMBRE_DIARY_MCP_TOKEN_ENV` | 外部日记 MCP 认证 Token 所在环境变量名 |

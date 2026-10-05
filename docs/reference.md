@@ -37,7 +37,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `server.py` | **Brain** 入口（约 700KB）。MCP 工具注册（`@mcp.tool`）+ REST API（`@mcp.custom_route`）+ 记忆核心 |
 | `gateway.py` | **Gateway** 入口（约 1MB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线（透镜调试区分检索前排除与相关性拒绝）+ cc 持久化路由（`Route()` 注册） |
 | `gateway_state.py` | Gateway/cc SQLite 状态：带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式、固定 handoff、版本化按天滚动配置及 turn watermark、每协作者唯一主窗标记、软删除防复活、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision 成对指针及上一检查点、显式 Haven 正文恢复的原子 lane 切换记录、Context GC 配置/历史、带 `created/recalled/breath` 原因与 context revision 生命周期的召回隔离账本；日期清单按日汇总正文、工具、附件视觉/文件正文、召回、thinking、运行时时间戳、消息框架和 agent wake 的 token 预估；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox，正式主动消息（含 quiet，`delivery` 原样保存在 raw）还会在该事务内解除缓存保活的临时暂停，no-op 不解除 |
-| `trpg_store.py` | 独立 `state/trpg.sqlite`；profile 隔离、phase/CAS、角色/检定/日志事务；`view_for` 是玩家可见性与字段白名单的唯一查询边界 |
+| `trpg_store.py` | 独立 `state/trpg.sqlite`；profile 隔离、phase/CAS、角色/检定/日志事务、公开与 DM 前情提要（recap）；`view_for` 是玩家可见性与字段白名单的唯一查询边界 |
 | `trpg_dice.py` | CoC 7 d100、三档难度、奖励/惩罚骰和 SAN 损失式；生产用 `secrets`，测试可注入随机源 |
 | `trpg_mcp.py` | Brain HTTP 端口上的两个独立 FastMCP + 小羊 REST；独立 Bearer 鉴权，组合主/子 lifespan 启动 session manager |
 | `appearance_config.py` | Dashboard 外观配置的服务端白名单 normalize，背景图 MIME/体积/尺寸校验、EXIF 方向修正与压缩；不接受客户端直接指定任意图片路径 |
@@ -149,6 +149,7 @@ OMBRE_SCORING_WARMTH_BOOST= # 温暖偏置初始值
 ```text
 GET  /trpg/api/modules                          # [{id,title}]，无模组正文
 POST /trpg/api/modules                          # §导入 JSON；响应仅 title/scenes_count/clues_count/npcs_count
+GET  /trpg/api/modules/{module}/pregens          # [{index,name,occupation,sheet}]，仅预设调查员
 GET  /trpg/api/games                            # id/title/phase/创建与更新时间
 POST /trpg/api/games                            # {module_id,title?,characters?}
 GET  /trpg/api/games/{game}/table?since_seq=0     # 小羊视图：phase/公开场景/同伴名与职业/自己的卡/日志/线索/自己的待掷检定

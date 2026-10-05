@@ -180,7 +180,7 @@ def test_real_http_isolation_and_tools(http_server):
     assert initialized.status_code == 200
     assert rpc(client, 'dm', 'dm-secret', 'initialize', {'protocolVersion':'2025-03-26', 'capabilities':{}, 'clientInfo':{'name':'test','version':'1'}}).status_code == 200
     dm_tools = rpc(client, 'dm', 'dm-secret', 'tools/list').json()['result']['tools']
-    assert {tool['name'] for tool in dm_tools} == {'get_state','get_log','search_module','read_module','narrate','request_check','secret_roll','reveal_clue','update_character','set_scene','create_character'}
+    assert {tool['name'] for tool in dm_tools} == {'get_state','get_log','search_module','read_module','narrate','request_check','secret_roll','reveal_clue','update_character','set_scene','create_character','write_recap'}
     tools = rpc(client, 'player', 'player-secret', 'tools/list').json()['result']['tools']
     assert {t['name'] for t in tools} == {'get_table','get_my_character','get_clues','submit_action','roll_check'}
     assert call(client,'player','player-secret','submit_action',{'text':'wrong turn'})['isError']
@@ -305,3 +305,53 @@ def test_dm_character_scene_and_reveal_idempotence(store, game):
         store.set_scene(game,'missing')
     with pytest.raises(ValueError):
         store.request_check(game,'npc:n1','luck')
+
+
+def test_latest_recaps(store, game):
+    assert store.latest_recap(game, 'dm') == {}
+    store.write_recap(game, 'old public', 'KEEPER_RECAP')
+    store.write_recap(game, public='new public')
+    for viewer in ('xiaoyang', 'yanzhi'):
+        assert store.latest_recap(game, viewer) == {'public': 'new public'}
+    assert store.latest_recap(game, 'dm') == {'public': 'new public', 'keeper': 'KEEPER_RECAP'}
+    assert store.view_for(game, 'dm')['phase'] == 'players'
+    for args in ((None, None), (' ', ''), ('valid', 42)):
+        with pytest.raises(ValueError):
+            store.write_recap(game, *args)
+    store.initialize()
+    assert TrpgStore(store.path, 'test').latest_recap(game, 'xiaoyang') == {'public': 'new public'}
+    with pytest.raises(ValueError):
+        TrpgStore(store.path, 'other').latest_recap(game, 'dm')
+
+
+def test_http_pregens_and_recaps(http_server):
+    client, _ = http_server
+    headers = {'Authorization': 'Bearer gateway-secret'}
+    client.post('/trpg/api/modules', headers=headers, json=FAKE)
+    module = client.get('/trpg/api/modules', headers=headers).json()[0]['id']
+    response = client.get(f'/trpg/api/modules/{module}/pregens', headers=headers)
+    assert response.status_code == 200
+    assert response.json() == [dict(index=i, **p) for i, p in enumerate(FAKE['pregens'])]
+    for hidden in ('keeper_', 'scenes', 'clues', 'npcs'):
+        assert hidden not in response.text
+    game = client.post('/trpg/api/games', headers=headers, json={'module_id': module}).json()['id']
+    result = call(client, 'dm', 'dm-secret', 'write_recap', {'public': 'PUBLIC_RECAP', 'keeper': 'KEEPER_RECAP'})
+    assert not result.get('isError')
+    for data in (client.get(f'/trpg/api/games/{game}/table', headers=headers).text,
+                 json.dumps(call(client, 'player', 'player-secret', 'get_table'))):
+        assert 'PUBLIC_RECAP' in data and 'KEEPER_RECAP' not in data
+    dm = json.dumps(call(client, 'dm', 'dm-secret', 'get_log'))
+    assert 'PUBLIC_RECAP' in dm and 'KEEPER_RECAP' in dm
+
+
+def test_pregens_field_whitelist_and_profile(store):
+    module = json.loads(json.dumps(FAKE))
+    module['pregens'][0]['keeper_text'] = 'KEEPER_PREGEN'
+    module['pregens'][0]['sheet']['keeper_notes'] = 'KEEPER_SHEET'
+    store.import_module(module)
+    module_id = store.list_modules()[0]['id']
+    pregens = store.list_pregens(module_id)
+    assert set(pregens[0]) == {'index', 'name', 'occupation', 'sheet'}
+    assert 'KEEPER_' not in json.dumps(pregens)
+    with pytest.raises(ValueError):
+        TrpgStore(store.path, 'other').list_pregens(module_id)

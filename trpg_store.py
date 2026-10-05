@@ -7,6 +7,7 @@ from pathlib import Path
 import trpg_dice
 
 PLAYERS = ('xiaoyang', 'yanzhi')
+SHEET_FIELDS = {'name', 'occupation', 'characteristics', 'hp', 'hp_max', 'san', 'san_start', 'mp', 'luck', 'skills', 'background', 'notes'}
 PHASES = {'players': {'yanzhi', 'dm'}, 'yanzhi': {'dm'}, 'dm': {'players', 'checks'}, 'checks': {'dm'}}
 
 
@@ -121,6 +122,33 @@ class TrpgStore:
     def list_modules(self):
         with self.db() as c:
             return [dict(r) for r in c.execute('SELECT id,title FROM trpg_modules WHERE profile_id=?', (self.profile_id,))]
+
+    def list_pregens(self, module):
+        with self.db() as c:
+            return [dict(index=i, name=pregen['name'], occupation=pregen['occupation'],
+                         sheet={key: value for key, value in pregen['sheet'].items() if key in SHEET_FIELDS})
+                    for i, pregen in enumerate(self._module(c, module)['pregens'])]
+
+    def write_recap(self, game, public=None, keeper=None):
+        for text in (public, keeper):
+            if text is not None and not isinstance(text, str):
+                raise ValueError('invalid recap text')
+        if not any(text and text.strip() for text in (public, keeper)):
+            raise ValueError('empty recap')
+        with self.db() as c:
+            self._game(c, game)
+            for recipient, text in (('all', public), ('dm', keeper)):
+                if text and text.strip():
+                    self._log(c, game, 'recap', recipient, 'dm', text)
+        return {'ok': True}
+
+    def latest_recap(self, game, viewer):
+        logs = self.view_for(game, viewer)['log']
+        result = {}
+        for log in logs:
+            if log['kind'] == 'recap':
+                result['public' if log['visible_to'] == 'all' else 'keeper'] = log['text']
+        return result
 
     def list_games(self):
         with self.db() as c:
@@ -243,8 +271,7 @@ class TrpgStore:
             raise ValueError('invalid owner')
         if not isinstance(sheet, dict):
             raise ValueError('invalid sheet')
-        allowed = {'name', 'occupation', 'characteristics', 'hp', 'hp_max', 'san', 'san_start', 'mp', 'luck', 'skills', 'background', 'notes'}
-        sheet = {k: v for k, v in sheet.items() if k in allowed}
+        sheet = {k: v for k, v in sheet.items() if k in SHEET_FIELDS}
         for key in ('name', 'occupation', 'background', 'notes'):
             if key in sheet and not isinstance(sheet[key], str):
                 raise ValueError('invalid ' + key)

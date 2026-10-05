@@ -78,6 +78,10 @@ def create_trpg_app(store):
         return store.narrate(store.active_game(), public, private, gm_note)
 
     @dm.tool()
+    def write_recap(public: str | None = None, keeper: str | None = None):
+        return store.write_recap(store.active_game(), public, keeper)
+
+    @dm.tool()
     def request_check(owner: str, type: str, reason: str, skill: str | None = None,
                       difficulty: str = 'regular', bonus: int = 0, penalty: int = 0, san_loss: str | None = None):
         return store.request_check(store.active_game(), owner, type, skill, difficulty, bonus, penalty, san_loss, reason)
@@ -105,6 +109,9 @@ def create_trpg_app(store):
 
     async def modules(request):
         return JSONResponse(store.list_modules() if request.method == 'GET' else store.import_module(await request.json()))
+
+    async def pregens(request):
+        return JSONResponse(store.list_pregens(request.path_params['module']))
 
     async def games(request):
         if request.method == 'GET':
@@ -144,6 +151,7 @@ def create_trpg_app(store):
 
     api = Starlette(routes=[
         Route('/modules', modules, methods=['GET', 'POST']),
+        Route('/modules/{module}/pregens', pregens, methods=['GET']),
         Route('/games', games, methods=['GET', 'POST']),
         Route('/games/{game}/table', table, methods=['GET']),
         Route('/games/{game}/action', action, methods=['POST']),

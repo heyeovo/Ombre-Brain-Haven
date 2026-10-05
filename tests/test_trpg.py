@@ -355,3 +355,65 @@ def test_pregens_field_whitelist_and_profile(store):
     assert 'KEEPER_' not in json.dumps(pregens)
     with pytest.raises(ValueError):
         TrpgStore(store.path, 'other').list_pregens(module_id)
+
+
+def test_p2b_settings_runtime_migration(store, game):
+    assert store.game_settings(game) == {'yanzhi_model': 'claude-opus-4-6', 'persona_id': ''}
+    for model in ('gpt-5', 'claude-haiku-4-5', 'Claude-opus-4-6', '', None):
+        with pytest.raises(ValueError):
+            store.game_settings(game, {'yanzhi_model': model})
+    store.game_settings(game, {'yanzhi_model': 'claude-sonnet-5', 'persona_id': 'main'})
+    store.yanzhi_runtime(game, {'session_id': 'sdk-session', 'session_tokens': 123, 'last_seen_seq': 2})
+    store.initialize()
+    restored = TrpgStore(store.path, 'test')
+    assert restored.game_settings(game)['persona_id'] == 'main'
+    assert restored.yanzhi_runtime(game)['session_id'] == 'sdk-session'
+    with pytest.raises(ValueError):
+        TrpgStore(store.path, 'other').yanzhi_runtime(game)
+    with pytest.raises(ValueError):
+        store.yanzhi_runtime(game, {'last_seen_seq': -1})
+
+
+def test_p2b_http(http_server):
+    client, _ = http_server
+    headers = {'Authorization': 'Bearer gateway-secret'}
+    client.post('/trpg/api/modules', headers=headers, json=FAKE)
+    module = client.get('/trpg/api/modules', headers=headers).json()[0]['id']
+    game = client.post('/trpg/api/games', headers=headers, json={'module_id': module}).json()['id']
+    prefix = f'/trpg/api/games/{game}'
+    assert client.get(prefix + '/settings', headers=headers).json()['yanzhi_model'] == 'claude-opus-4-6'
+    assert client.patch(prefix + '/settings', headers=headers, json={'yanzhi_model': 'gpt-5'}).status_code == 400
+    assert client.patch(prefix + '/settings', headers=headers, json={'yanzhi_model': 'claude-opus-5-5'}).status_code == 200
+    assert client.put(prefix + '/yanzhi-runtime', headers=headers, json={'session_id': 'test'}).status_code == 200
+    assert client.get(prefix + '/yanzhi-runtime', headers=headers).json()['session_id'] == 'test'
+    client.post(prefix + '/settle', headers=headers, json={'expected_phase': 'players'})
+    call(client, 'dm', 'dm-secret', 'narrate', {'public': 'PUBLIC', 'private': {'xiaoyang': 'X_PRIVATE', 'yanzhi': 'Y_PRIVATE'}, 'gm_note': 'GM_NOTE_SENTINEL'})
+    call(client, 'dm', 'dm-secret', 'write_recap', {'public': 'PUBLIC_RECAP', 'keeper': 'KEEPER_RECAP'})
+    call(client, 'dm', 'dm-secret', 'secret_roll', {'type': 'luck', 'reason': 'SECRET_ROLL_SENTINEL'})
+    call(client, 'dm', 'dm-secret', 'reveal_clue', {'clue_id': 'c2', 'to': 'xiaoyang'})
+    response = client.get(prefix + '/yanzhi-view', headers=headers)
+    assert 'Y_PRIVATE' in response.text and response.json()['latest_recap'] == {'public': 'PUBLIC_RECAP'}
+    for hidden in ('keeper_', 'KEEPER_', 'X_PRIVATE', 'GM_NOTE_SENTINEL', 'SECRET_ROLL_SENTINEL', 'XIAOYANG_CLUE', 'UNREVEALED_CLUE'):
+        assert hidden not in response.text
+    assert client.post(prefix + '/yanzhi-table-talk', headers=headers, json={'text': 'hello'}).status_code == 200
+    view = client.get(prefix + '/yanzhi-view', headers=headers).json()
+    assert view['phase'] == 'dm'
+    assert view['log'][-1]['author'] == 'yanzhi' and view['log'][-1]['kind'] == 'table_talk'
+    assert client.get(prefix + '/yanzhi-view?since_seq=999', headers=headers).json()['log'] == []
+    for path in ('settings', 'yanzhi-runtime', 'yanzhi-view'):
+        assert client.get(prefix + '/' + path).status_code == 401
+
+
+def test_p2b_upgrade_existing_games(tmp_path):
+    path = tmp_path / 'legacy-games.sqlite'
+    with sqlite3.connect(path) as c:
+        c.execute('CREATE TABLE trpg_games(profile_id TEXT, id TEXT PRIMARY KEY, title TEXT, module_id TEXT, phase TEXT, scene_id TEXT, created_at TEXT, updated_at TEXT)')
+        c.execute("INSERT INTO trpg_games VALUES('test','old','title','module','players',NULL,NULL,NULL)")
+    store = TrpgStore(path, 'test')
+    store.game_settings('old', {'persona_id': 'chosen'})
+    store.yanzhi_runtime('old', {'session_id': 'resumed'})
+    store.initialize()
+    assert store.game_settings('old')['persona_id'] == 'chosen'
+    assert store.yanzhi_runtime('old')['session_id'] == 'resumed'
+    with pytest.raises(ValueError):
+        TrpgStore(path, 'other').game_settings('old')

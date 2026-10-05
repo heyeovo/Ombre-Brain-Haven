@@ -429,7 +429,7 @@ Brain 的 HTTP 模式在同一端口提供独立 TRPG 服务：言之连接 `/tr
 
 言之只拥有 `get_table(since_seq)`、`get_my_character`、`get_clues`、`submit_action(text)`、`roll_check(check_id)` 五个工具；游戏行动必须经 `submit_action` 提交，最终回复作为桌边话。DM 可以读取 `overview`、场景/线索/NPC id 或 `pregen:索引`；`create_character(owner,sheet={"pregen":索引})` 可复制预设卡。`secret_roll` 默认 owner 为言之，也可明确指定玩家/NPC。所有掷骰由 Haven 用 `secrets` 完成，模型不得编造点数。
 
-部署需保留 state 数据卷，并给 Brain 配置独立 MCP 密钥；本服务不调用模型。Dashboard 跑团页/会话隔离与 DM 容器由后续阶段接入，跑团会话应仅挂玩家 MCP，使用专用跑团提示词。
+部署需保留 state 数据卷，并给 Brain 配置独立 MCP 密钥；本服务不调用模型。Dashboard 跑团会话独立于聊天归档，挂玩家 MCP 与 Ombre Brain，使用协作者全量提示词和跑团说明；每局模型设置与 SDK 续接运行态保存在此库。DM 容器由后续阶段接入。
 
 ### MCP
 

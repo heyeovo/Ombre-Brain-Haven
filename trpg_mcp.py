@@ -146,6 +146,21 @@ def create_trpg_app(store):
         body = await request.json()
         return JSONResponse(store.advance(request.path_params['game'], body['expected_phase'], body['phase']))
 
+    async def settings(request):
+        changes = await request.json() if request.method == 'PATCH' else None
+        return JSONResponse(store.game_settings(request.path_params['game'], changes))
+
+    async def yanzhi_runtime(request):
+        value = await request.json() if request.method == 'PUT' else None
+        return JSONResponse(store.yanzhi_runtime(request.path_params['game'], value))
+
+    async def yanzhi_view(request):
+        return JSONResponse(store.yanzhi_view(request.path_params['game'], int(request.query_params.get('since_seq', '0'))))
+
+    async def yanzhi_talk(request):
+        body = await request.json()
+        return JSONResponse(store.submit(request.path_params['game'], 'yanzhi', body['text'], table_talk=True))
+
     async def bad_request(request, exc):
         return JSONResponse({'error': str(exc)}, status_code=409 if isinstance(exc, Conflict) else 400)
 
@@ -153,6 +168,10 @@ def create_trpg_app(store):
         Route('/modules', modules, methods=['GET', 'POST']),
         Route('/modules/{module}/pregens', pregens, methods=['GET']),
         Route('/games', games, methods=['GET', 'POST']),
+        Route('/games/{game}/settings', settings, methods=['GET', 'PATCH']),
+        Route('/games/{game}/yanzhi-runtime', yanzhi_runtime, methods=['GET', 'PUT']),
+        Route('/games/{game}/yanzhi-view', yanzhi_view, methods=['GET']),
+        Route('/games/{game}/yanzhi-table-talk', yanzhi_talk, methods=['POST']),
         Route('/games/{game}/table', table, methods=['GET']),
         Route('/games/{game}/action', action, methods=['POST']),
         Route('/games/{game}/table-talk', talk, methods=['POST']),

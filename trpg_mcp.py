@@ -110,6 +110,12 @@ def create_trpg_app(store):
     async def modules(request):
         return JSONResponse(store.list_modules() if request.method == 'GET' else store.import_module(await request.json()))
 
+    async def delete_module(request):
+        return JSONResponse(store.delete_module(request.path_params['module']))
+
+    async def end_game(request):
+        return JSONResponse(store.end_game(request.path_params['game']))
+
     async def pregens(request):
         return JSONResponse(store.list_pregens(request.path_params['module']))
 
@@ -166,6 +172,8 @@ def create_trpg_app(store):
 
     api = Starlette(routes=[
         Route('/modules', modules, methods=['GET', 'POST']),
+        Route('/modules/{module}', delete_module, methods=['DELETE']),
+        Route('/games/{game}/end', end_game, methods=['POST']),
         Route('/modules/{module}/pregens', pregens, methods=['GET']),
         Route('/games', games, methods=['GET', 'POST']),
         Route('/games/{game}/settings', settings, methods=['GET', 'PATCH']),

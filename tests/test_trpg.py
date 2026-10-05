@@ -358,7 +358,7 @@ def test_pregens_field_whitelist_and_profile(store):
 
 
 def test_p2b_settings_runtime_migration(store, game):
-    assert store.game_settings(game) == {'yanzhi_model': 'claude-opus-4-6', 'persona_id': ''}
+    assert store.game_settings(game) == {'yanzhi_model': 'claude-opus-4-6', 'persona_id': '', 'context_pinned': True, 'context_review_days': 5, 'context_main_rounds': 10}
     for model in ('gpt-5', 'claude-haiku-4-5', 'Claude-opus-4-6', '', None):
         with pytest.raises(ValueError):
             store.game_settings(game, {'yanzhi_model': model})
@@ -533,3 +533,38 @@ def test_module_import_id_conflicts_and_profile_boundary(store):
         store.import_module({**FAKE, 'id': '../invalid'})
     store.import_module({**FAKE, 'id': 'fixed'})
     assert store.list_modules()[0]['id'] == 'fixed'
+
+
+@pytest.mark.parametrize('changes', [{'context_pinned': False}, {'context_review_days': 0}, {'context_main_rounds': 30}, {'persona_id': 'other'}])
+def test_context_settings_reset_session(store, game, changes):
+    store.yanzhi_runtime(game, {'session_id': 'old', 'session_tokens': 123, 'last_seen_seq': 8})
+    store.game_settings(game, changes)
+    runtime = store.yanzhi_runtime(game)
+    assert runtime['session_id'] is None and runtime['session_tokens'] == 0
+    assert runtime['last_seen_seq'] == 8
+
+
+def test_model_and_unchanged_settings_keep_session(store, game):
+    store.yanzhi_runtime(game, {'session_id': 'old', 'session_tokens': 123})
+    store.game_settings(game, {'yanzhi_model': 'claude-sonnet-5', 'context_pinned': True})
+    assert store.yanzhi_runtime(game)['session_id'] == 'old'
+
+
+@pytest.mark.parametrize('changes', [{'context_pinned': 1}, {'context_review_days': -1}, {'context_review_days': 8}, {'context_review_days': True}, {'context_review_days': 1.5}, {'context_main_rounds': -1}, {'context_main_rounds': 31}, {'context_main_rounds': '10'}])
+def test_context_settings_http_validation(http_server, changes):
+    client, _ = http_server
+    headers = {'Authorization': 'Bearer gateway-secret'}
+    client.post('/trpg/api/modules', headers=headers, json=FAKE)
+    module = client.get('/trpg/api/modules', headers=headers).json()[0]['id']
+    game = client.post('/trpg/api/games', headers=headers, json={'module_id': module}).json()['id']
+    assert client.patch(f'/trpg/api/games/{game}/settings', headers=headers, json=changes).status_code == 400
+
+
+def test_inflight_result_cannot_restore_reset_session(store, game):
+    settings = store.game_settings(game)
+    store.game_settings(game, {'context_review_days': 2})
+    runtime = store.yanzhi_runtime(game, {'session_id': 'stale', 'session_tokens': 123, 'last_seen_seq': 4, 'expected_settings': settings})
+    assert runtime['session_id'] is None and runtime['session_tokens'] == 0
+    assert runtime['last_seen_seq'] == 4
+    runtime = store.yanzhi_runtime(game, {'session_id': 'new', 'session_tokens': 1, 'expected_settings': store.game_settings(game)})
+    assert runtime['session_id'] == 'new'

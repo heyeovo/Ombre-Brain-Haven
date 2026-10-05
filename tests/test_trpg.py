@@ -417,3 +417,119 @@ def test_p2b_upgrade_existing_games(tmp_path):
     assert store.yanzhi_runtime('old')['session_id'] == 'resumed'
     with pytest.raises(ValueError):
         TrpgStore(path, 'other').game_settings('old')
+
+
+def test_end_archive_and_new_game(store, game):
+    module = store.list_modules()[0]['id']
+    store.advance(game, 'players', 'dm')
+    store.write_recap(game, 'public recap', 'keeper recap')
+    store.narrate(game, 'story')
+    store.request_check(game, 'xiaoyang', 'luck')
+    before = store.view_for(game, 'xiaoyang')
+    store.yanzhi_runtime(game, {'running_since': 'now', 'last_error': 'error'})
+    ended = store.end_game(game)
+    assert ended['ended_at'] and store.end_game(game) == ended
+    assert store.yanzhi_runtime(game)['running_since'] is None
+    assert store.yanzhi_runtime(game)['last_error'] is None
+    assert store.list_games()[0]['module_id'] == module
+    assert store.list_games()[0]['ended_at'] == ended['ended_at']
+    with pytest.raises(ValueError):
+        store.active_game()
+    new = store.create_game(module)['id']
+    assert store.active_game() == new
+    assert store.view_for(game, 'xiaoyang')['log'] == before['log']
+    assert store.view_for(game, 'xiaoyang')['my_character'] == before['my_character']
+    assert store.view_for(game, 'xiaoyang')['checks'] == before['checks']
+    assert store.latest_recap(game, 'xiaoyang') == {'public': 'public recap'}
+
+
+@pytest.mark.parametrize('operation', [
+    lambda s,g: s.submit(g, 'xiaoyang', 'action'),
+    lambda s,g: s.submit(g, 'xiaoyang', 'talk', True),
+    lambda s,g: s.submit(g, 'yanzhi', 'talk', True),
+    lambda s,g: s.advance(g, 'players', 'dm'),
+    lambda s,g: s.narrate(g, 'story'),
+    lambda s,g: s.write_recap(g, 'recap'),
+    lambda s,g: s.request_check(g, 'xiaoyang', 'luck'),
+    lambda s,g: s.roll_check(g, 'missing', 'xiaoyang'),
+    lambda s,g: s.set_scene(g, 'scene'),
+    lambda s,g: s.reveal_clue(g, 'clue', 'all'),
+    lambda s,g: s.create_character(g, 'xiaoyang', {}),
+    lambda s,g: s.update_character(g, 'xiaoyang', {'hp': 1}, 'reason'),
+    lambda s,g: s.game_settings(g, {}),
+    lambda s,g: s.yanzhi_runtime(g, {}),
+])
+def test_ended_rejects_every_write(store, game, operation):
+    store.end_game(game)
+    with pytest.raises(Conflict, match='game ended'):
+        operation(store, game)
+
+
+def test_soft_delete_archive_restore_and_isolation(store, game):
+    module = store.list_modules()[0]['id']
+    with pytest.raises(Conflict):
+        store.delete_module(module)
+    other = TrpgStore(store.path, 'other')
+    with pytest.raises(ValueError):
+        other.end_game(game)
+    with pytest.raises(ValueError):
+        other.delete_module(module)
+    store.end_game(game)
+    store.delete_module(module)
+    store.delete_module(module)
+    assert store.list_modules() == []
+    with pytest.raises(ValueError, match='module not found'):
+        store.create_game(module)
+    for viewer in ('xiaoyang', 'yanzhi', 'dm'):
+        assert store.view_for(game, viewer)['ended_at']
+    assert store.yanzhi_view(game)['ended_at']
+    assert store.read_module(game, item_id='overview')
+    store.import_module({**FAKE, 'id': module, 'title': 'Restored'})
+    assert store.list_modules() == [{'id': module, 'title': 'Restored'}]
+    assert store.create_game(module)
+
+
+def test_end_columns_legacy_migration(store, game):
+    with store.db() as c:
+        c.execute('ALTER TABLE trpg_games DROP COLUMN ended_at')
+        c.execute('ALTER TABLE trpg_modules DROP COLUMN deleted_at')
+    store.initialize()
+    store.initialize()
+    assert store.list_games()[0]['ended_at'] is None
+    assert store.list_modules()
+    assert store.view_for(game, 'xiaoyang')['ended_at'] is None
+
+
+def test_end_delete_rest(http_server):
+    client, _ = http_server
+    headers = {'Authorization': 'Bearer gateway-secret'}
+    client.post('/trpg/api/modules', headers=headers, json=FAKE)
+    module = client.get('/trpg/api/modules', headers=headers).json()[0]['id']
+    game = client.post('/trpg/api/games', headers=headers, json={'module_id': module}).json()['id']
+    end = f'/trpg/api/games/{game}/end'
+    delete = f'/trpg/api/modules/{module}'
+    assert client.post(end).status_code == 401
+    assert client.delete(delete).status_code == 401
+    assert client.delete(delete, headers=headers).status_code == 409
+    result = client.post(end, headers=headers)
+    assert result.status_code == 200 and result.json()['ended_at']
+    assert client.post(end, headers=headers).json() == result.json()
+    assert client.post(f'/trpg/api/games/{game}/table-talk', headers=headers, json={'text':'hi'}).status_code == 409
+    assert client.delete(delete, headers=headers).status_code == 200
+    assert client.get(f'/trpg/api/games/{game}/table', headers=headers).status_code == 200
+    assert client.post('/trpg/api/games', headers=headers, json={'module_id':module}).status_code == 400
+
+
+def test_module_import_id_conflicts_and_profile_boundary(store):
+    store.import_module({**FAKE, 'id': 'fixed'})
+    with pytest.raises(Conflict):
+        store.import_module({**FAKE, 'id': 'fixed'})
+    store.delete_module('fixed')
+    other = TrpgStore(store.path, 'other')
+    with pytest.raises(Conflict):
+        other.import_module({**FAKE, 'id': 'fixed'})
+    assert other.list_modules() == []
+    with pytest.raises(ValueError, match='invalid module id'):
+        store.import_module({**FAKE, 'id': '../invalid'})
+    store.import_module({**FAKE, 'id': 'fixed'})
+    assert store.list_modules()[0]['id'] == 'fixed'

@@ -92,6 +92,10 @@ class TrpgStore:
                     c.execute(f'INSERT INTO {table} ({quoted}) SELECT {quoted} FROM {legacy}')
                     c.execute(f'DROP TABLE {legacy}')
                     columns = new_columns
+                if name in ('games', 'modules'):
+                    field = 'ended_at' if name == 'games' else 'deleted_at'
+                    if field not in columns:
+                        c.execute(f'ALTER TABLE {table} ADD COLUMN {field} TEXT')
                 if name == 'games':
                     for field in ('settings_json', 'runtime_json'):
                         if field not in columns:
@@ -99,14 +103,16 @@ class TrpgStore:
                 if name == 'checks' and 'secret' not in columns:
                     c.execute(f'ALTER TABLE {table} ADD COLUMN secret INTEGER NOT NULL DEFAULT 0')
 
-    def _game(self, c, game):
+    def _game(self, c, game, *, writable=False):
         row = c.execute('SELECT * FROM trpg_games WHERE profile_id=? AND id=?', (self.profile_id, game)).fetchone()
         if not row:
             raise ValueError('game not found')
+        if writable and row['ended_at'] is not None:
+            raise Conflict('game ended')
         return dict(row)
 
-    def _module(self, c, module):
-        row = c.execute('SELECT keeper_json FROM trpg_modules WHERE profile_id=? AND id=?', (self.profile_id, module)).fetchone()
+    def _module(self, c, module, *, available=False):
+        row = c.execute('SELECT keeper_json FROM trpg_modules WHERE profile_id=? AND id=?' + (' AND deleted_at IS NULL' if available else ''), (self.profile_id, module)).fetchone()
         if not row:
             raise ValueError('module not found')
         return json.loads(row[0])
@@ -119,20 +125,42 @@ class TrpgStore:
 
     def import_module(self, data):
         validate_module(data)
-        module = uid()
+        module = data.get('id', uid())
+        if not isinstance(module, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', module):
+            raise ValueError('invalid module id')
         with self.db() as c:
-            c.execute('INSERT INTO trpg_modules VALUES(?,?,?,?,?)', (self.profile_id, module, data['title'], data['public_intro'], json.dumps(data)))
+            existing = c.execute('SELECT profile_id,deleted_at FROM trpg_modules WHERE id=?', (module,)).fetchone()
+            if existing and (existing['profile_id'] != self.profile_id or existing['deleted_at'] is None):
+                raise Conflict('module already exists')
+            c.execute('INSERT INTO trpg_modules(profile_id,id,title,public_intro,keeper_json) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,public_intro=excluded.public_intro,keeper_json=excluded.keeper_json,deleted_at=NULL', (self.profile_id, module, data['title'], data['public_intro'], json.dumps(data)))
         return {'title': data['title'], **{key + '_count': len(data[key]) for key in ('scenes', 'clues', 'npcs')}}
+
+    def end_game(self, game):
+        with self.db() as c:
+            g = self._game(c, game)
+            if g['ended_at'] is None:
+                runtime = json.loads(g['runtime_json'])
+                runtime.update(running_since=None, last_error=None)
+                c.execute('UPDATE trpg_games SET ended_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP,runtime_json=? WHERE profile_id=? AND id=?', (json.dumps(runtime), self.profile_id, game))
+            return {'ended_at': self._game(c, game)['ended_at']}
+
+    def delete_module(self, module_id):
+        with self.db() as c:
+            self._module(c, module_id)
+            if c.execute('SELECT 1 FROM trpg_games WHERE profile_id=? AND module_id=? AND ended_at IS NULL', (self.profile_id, module_id)).fetchone():
+                raise Conflict('active game uses module')
+            c.execute('UPDATE trpg_modules SET deleted_at=COALESCE(deleted_at,CURRENT_TIMESTAMP) WHERE profile_id=? AND id=?', (self.profile_id, module_id))
+        return {'ok': True}
 
     def list_modules(self):
         with self.db() as c:
-            return [dict(r) for r in c.execute('SELECT id,title FROM trpg_modules WHERE profile_id=?', (self.profile_id,))]
+            return [dict(r) for r in c.execute('SELECT id,title FROM trpg_modules WHERE profile_id=? AND deleted_at IS NULL', (self.profile_id,))]
 
     def list_pregens(self, module):
         with self.db() as c:
             return [dict(index=i, name=pregen['name'], occupation=pregen['occupation'],
                          sheet={key: value for key, value in pregen['sheet'].items() if key in SHEET_FIELDS})
-                    for i, pregen in enumerate(self._module(c, module)['pregens'])]
+                    for i, pregen in enumerate(self._module(c, module, available=True)['pregens'])]
 
     def write_recap(self, game, public=None, keeper=None):
         for text in (public, keeper):
@@ -141,7 +169,7 @@ class TrpgStore:
         if not any(text and text.strip() for text in (public, keeper)):
             raise ValueError('empty recap')
         with self.db() as c:
-            self._game(c, game)
+            self._game(c, game, writable=True)
             for recipient, text in (('all', public), ('dm', keeper)):
                 if text and text.strip():
                     self._log(c, game, 'recap', recipient, 'dm', text)
@@ -165,7 +193,7 @@ class TrpgStore:
             if 'persona_id' in changes and not isinstance(changes['persona_id'], str):
                 raise ValueError('invalid persona_id')
         with self.db() as c:
-            settings = {**defaults, **json.loads(self._game(c, game)['settings_json'])}
+            settings = {**defaults, **json.loads(self._game(c, game, writable=changes is not None)['settings_json'])}
             if changes is not None:
                 settings.update(changes)
                 c.execute('UPDATE trpg_games SET settings_json=? WHERE profile_id=? AND id=?', (json.dumps(settings), self.profile_id, game))
@@ -183,7 +211,7 @@ class TrpgStore:
                 if key in value and value[key] is not None and not isinstance(value[key], str):
                     raise ValueError('invalid ' + key)
         with self.db() as c:
-            runtime = {**defaults, **json.loads(self._game(c, game)['runtime_json'])}
+            runtime = {**defaults, **json.loads(self._game(c, game, writable=value is not None)['runtime_json'])}
             if value is not None:
                 runtime.update(value)
                 c.execute('UPDATE trpg_games SET runtime_json=? WHERE profile_id=? AND id=?', (json.dumps(runtime), self.profile_id, game))
@@ -194,7 +222,7 @@ class TrpgStore:
 
     def list_games(self):
         with self.db() as c:
-            return [dict(r) for r in c.execute('SELECT id,title,phase,created_at,updated_at FROM trpg_games WHERE profile_id=?', (self.profile_id,))]
+            return [dict(r) for r in c.execute('SELECT id,title,phase,module_id,ended_at,created_at,updated_at FROM trpg_games WHERE profile_id=?', (self.profile_id,))]
 
     def create_game(self, module_id, title=None, characters=None):
         if title is not None and (not isinstance(title, str) or not title.strip()):
@@ -203,9 +231,9 @@ class TrpgStore:
             raise ValueError('invalid character owners')
         game = uid()
         with self.db() as c:
-            module = self._module(c, module_id)
-            if c.execute('SELECT 1 FROM trpg_games WHERE profile_id=?', (self.profile_id,)).fetchone():
-                raise Conflict('P1 supports one game per profile')
+            module = self._module(c, module_id, available=True)
+            if c.execute('SELECT 1 FROM trpg_games WHERE profile_id=? AND ended_at IS NULL', (self.profile_id,)).fetchone():
+                raise Conflict('one active game per profile')
             c.execute('INSERT INTO trpg_games(profile_id,id,title,module_id,phase,scene_id) VALUES(?,?,?,?,?,?)',
                       (self.profile_id, game, title or module['title'], module_id, 'players', module['scenes'][0]['id'] if module['scenes'] else None))
             for i, owner in enumerate(PLAYERS):
@@ -227,7 +255,7 @@ class TrpgStore:
         return {'id': game, 'title': title or module['title'], 'phase': 'players'}
 
     def active_game(self):
-        games = self.list_games()
+        games = [game for game in self.list_games() if game['ended_at'] is None]
         if len(games) != 1:
             raise ValueError('exactly one game required')
         return games[0]['id']
@@ -260,7 +288,7 @@ class TrpgStore:
                 check_sql += ' AND owner=? AND secret=0'
                 check_args.append(viewer)
             checks = [dict(r) for r in c.execute(check_sql, check_args)]
-            result = dict(id=game, title=g['title'], phase=g['phase'], scene=({'id': scene['id'], 'title': scene['title']} if scene else None), log=logs, clues=clues, checks=checks)
+            result = dict(id=game, title=g['title'], phase=g['phase'], ended_at=g['ended_at'], module_id=g['module_id'], scene=({'id': scene['id'], 'title': scene['title']} if scene else None), log=logs, clues=clues, checks=checks)
             if viewer == 'dm':
                 result.update(characters=chars, reveals=reveals)
             else:
@@ -269,7 +297,7 @@ class TrpgStore:
 
     def advance(self, game, expected_phase, phase):
         with self.db() as c:
-            g = self._game(c, game)
+            g = self._game(c, game, writable=True)
             if g['phase'] != expected_phase:
                 raise Conflict('phase CAS conflict')
             if phase not in PHASES.get(expected_phase, set()):
@@ -284,7 +312,7 @@ class TrpgStore:
         if owner not in PLAYERS or not isinstance(text, str) or not text.strip():
             raise ValueError('invalid submission')
         with self.db() as c:
-            g = self._game(c, game)
+            g = self._game(c, game, writable=True)
             if not table_talk and g['phase'] != {'xiaoyang': 'players', 'yanzhi': 'yanzhi'}[owner]:
                 raise Conflict('not your turn')
             self._log(c, game, 'table_talk' if table_talk else 'action', 'all', owner, text)
@@ -293,7 +321,7 @@ class TrpgStore:
         return {'ok': True}
 
     def _dm_turn(self, c, game):
-        if self._game(c, game)['phase'] != 'dm':
+        if self._game(c, game, writable=True)['phase'] != 'dm':
             raise Conflict('not DM turn')
 
     def narrate(self, game, public, private=None, gm_note=None):
@@ -395,7 +423,7 @@ class TrpgStore:
             raise ValueError('invalid check type')
         check_id = uid()
         with self.db() as c:
-            phase = self._game(c, game)['phase']
+            phase = self._game(c, game, writable=True)['phase']
             if secret and phase != 'dm':
                 raise Conflict('not DM turn')
             if phase not in ('dm', 'checks'):
@@ -423,7 +451,7 @@ class TrpgStore:
 
     def roll_check(self, game, check_id, owner):
         with self.db() as c:
-            if self._game(c, game)['phase'] != 'checks':
+            if self._game(c, game, writable=True)['phase'] != 'checks':
                 raise Conflict('not checks phase')
             return self._roll(c, game, check_id, owner, False)
 

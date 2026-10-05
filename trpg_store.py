@@ -1,5 +1,6 @@
 """Independent profile-scoped TRPG persistence and the sole visibility boundary."""
 import json
+import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -91,6 +92,10 @@ class TrpgStore:
                     c.execute(f'INSERT INTO {table} ({quoted}) SELECT {quoted} FROM {legacy}')
                     c.execute(f'DROP TABLE {legacy}')
                     columns = new_columns
+                if name == 'games':
+                    for field in ('settings_json', 'runtime_json'):
+                        if field not in columns:
+                            c.execute(f"ALTER TABLE {table} ADD COLUMN {field} TEXT NOT NULL DEFAULT '{{}}'")
                 if name == 'checks' and 'secret' not in columns:
                     c.execute(f'ALTER TABLE {table} ADD COLUMN secret INTEGER NOT NULL DEFAULT 0')
 
@@ -149,6 +154,43 @@ class TrpgStore:
             if log['kind'] == 'recap':
                 result['public' if log['visible_to'] == 'all' else 'keeper'] = log['text']
         return result
+
+    def game_settings(self, game, changes=None):
+        defaults = {'yanzhi_model': 'claude-opus-4-6', 'persona_id': ''}
+        if changes is not None:
+            if not isinstance(changes, dict) or set(changes) - set(defaults):
+                raise ValueError('invalid settings')
+            if 'yanzhi_model' in changes and (not isinstance(changes['yanzhi_model'], str) or not re.fullmatch(r'claude-(opus|sonnet)-[a-z0-9-]+', changes['yanzhi_model'])):
+                raise ValueError('invalid yanzhi_model')
+            if 'persona_id' in changes and not isinstance(changes['persona_id'], str):
+                raise ValueError('invalid persona_id')
+        with self.db() as c:
+            settings = {**defaults, **json.loads(self._game(c, game)['settings_json'])}
+            if changes is not None:
+                settings.update(changes)
+                c.execute('UPDATE trpg_games SET settings_json=? WHERE profile_id=? AND id=?', (json.dumps(settings), self.profile_id, game))
+            return settings
+
+    def yanzhi_runtime(self, game, value=None):
+        defaults = dict(session_id=None, session_tokens=0, last_seen_seq=0, last_error=None, running_since=None)
+        if value is not None:
+            if not isinstance(value, dict) or set(value) - set(defaults):
+                raise ValueError('invalid runtime')
+            for key in ('session_tokens', 'last_seen_seq'):
+                if key in value and (type(value[key]) is not int or value[key] < 0):
+                    raise ValueError('invalid ' + key)
+            for key in ('session_id', 'last_error', 'running_since'):
+                if key in value and value[key] is not None and not isinstance(value[key], str):
+                    raise ValueError('invalid ' + key)
+        with self.db() as c:
+            runtime = {**defaults, **json.loads(self._game(c, game)['runtime_json'])}
+            if value is not None:
+                runtime.update(value)
+                c.execute('UPDATE trpg_games SET runtime_json=? WHERE profile_id=? AND id=?', (json.dumps(runtime), self.profile_id, game))
+            return runtime
+
+    def yanzhi_view(self, game, since_seq=0):
+        return {**self.view_for(game, 'yanzhi', since_seq), 'latest_recap': self.latest_recap(game, 'yanzhi')}
 
     def list_games(self):
         with self.db() as c:

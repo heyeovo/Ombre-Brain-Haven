@@ -184,7 +184,7 @@ class TrpgStore:
         return result
 
     def game_settings(self, game, changes=None):
-        defaults = {'yanzhi_model': 'claude-opus-4-6', 'persona_id': ''}
+        defaults = {'yanzhi_model': 'claude-opus-4-6', 'persona_id': '', 'context_pinned': True, 'context_review_days': 5, 'context_main_rounds': 10}
         if changes is not None:
             if not isinstance(changes, dict) or set(changes) - set(defaults):
                 raise ValueError('invalid settings')
@@ -192,15 +192,31 @@ class TrpgStore:
                 raise ValueError('invalid yanzhi_model')
             if 'persona_id' in changes and not isinstance(changes['persona_id'], str):
                 raise ValueError('invalid persona_id')
+            if 'context_pinned' in changes and type(changes['context_pinned']) is not bool:
+                raise ValueError('invalid context_pinned')
+            for key, maximum in (('context_review_days', 7), ('context_main_rounds', 30)):
+                if key in changes and (type(changes[key]) is not int or not 0 <= changes[key] <= maximum):
+                    raise ValueError('invalid ' + key)
         with self.db() as c:
             settings = {**defaults, **json.loads(self._game(c, game, writable=changes is not None)['settings_json'])}
             if changes is not None:
+                reset = any(key in changes and changes[key] != settings[key] for key in ('persona_id', 'context_pinned', 'context_review_days', 'context_main_rounds'))
+                if reset:
+                    runtime = json.loads(self._game(c, game)['runtime_json'])
+                    runtime.update(session_id=None, session_tokens=0)
+                    c.execute('UPDATE trpg_games SET runtime_json=? WHERE profile_id=? AND id=?', (json.dumps(runtime), self.profile_id, game))
                 settings.update(changes)
                 c.execute('UPDATE trpg_games SET settings_json=? WHERE profile_id=? AND id=?', (json.dumps(settings), self.profile_id, game))
             return settings
 
     def yanzhi_runtime(self, game, value=None):
         defaults = dict(session_id=None, session_tokens=0, last_seen_seq=0, last_error=None, running_since=None)
+        expected_settings = None
+        if isinstance(value, dict) and 'expected_settings' in value:
+            value = dict(value)
+            expected_settings = value.pop('expected_settings')
+            if not isinstance(expected_settings, dict):
+                raise ValueError('invalid expected_settings')
         if value is not None:
             if not isinstance(value, dict) or set(value) - set(defaults):
                 raise ValueError('invalid runtime')
@@ -213,6 +229,11 @@ class TrpgStore:
         with self.db() as c:
             runtime = {**defaults, **json.loads(self._game(c, game, writable=value is not None)['runtime_json'])}
             if value is not None:
+                if expected_settings is not None:
+                    # Compare and save under the same BEGIN IMMEDIATE lock as settings reset.
+                    settings = {**{'persona_id': '', 'context_pinned': True, 'context_review_days': 5, 'context_main_rounds': 10}, **json.loads(self._game(c, game)['settings_json'])}
+                    if any(settings[key] != expected_settings.get(key, default) for key, default in (('persona_id', ''), ('context_pinned', True), ('context_review_days', 5), ('context_main_rounds', 10))):
+                        value = {key: item for key, item in value.items() if key not in ('session_id', 'session_tokens')}
                 runtime.update(value)
                 c.execute('UPDATE trpg_games SET runtime_json=? WHERE profile_id=? AND id=?', (json.dumps(runtime), self.profile_id, game))
             return runtime

@@ -161,7 +161,7 @@ POST /trpg/api/games/{game}/action               # {text}，players → yanzhi
 POST /trpg/api/games/{game}/table-talk           # {text}，不推进 phase
 POST /trpg/api/games/{game}/checks/{check}/roll   # 小羊本人名下 pending 检定，服务端掷骰
 POST /trpg/api/games/{game}/settle               # {expected_phase:"players"|"yanzhi"} → dm
-GET/PATCH /trpg/api/games/{game}/settings        # yanzhi_model（默认 claude-opus-4-6）、persona_id（空取 dashboard 默认协作者）
+GET/PATCH /trpg/api/games/{game}/settings        # yanzhi_model（默认 claude-opus-4-6）、persona_id（空取 dashboard 默认协作者）、context_pinned（bool，默认 true）、context_review_days（整数 0–7，默认 5）、context_main_rounds（整数 0–30，默认 10）
 GET/PUT /trpg/api/games/{game}/yanzhi-runtime     # session_id/session_tokens/last_seen_seq/last_error/running_since；profile 隔离
 GET  /trpg/api/games/{game}/yanzhi-view?since_seq=0 # 言之过滤视图 + public latest_recap，仅调度器
 POST /trpg/api/games/{game}/yanzhi-table-talk     # {text}，author=yanzhi，不改 phase，仅调度器
@@ -169,6 +169,8 @@ POST /trpg/api/games/{game}/phase                # {expected_phase,phase}，调�
 ```
 
 局的 `ended_at` 与模组的 `deleted_at` 为可重复初始化补列的 TEXT（旧库默认 NULL）。同一 profile 仅允许一局未结束的局，MCP active_game 只定位未结束局；`_game(..., writable=True)` 在写事务内集中拒绝结束后的写入（409）。结束永久保留角色卡、日志、检定和前情提要；软删除模组不再列出/建局，档案读取仍可使用原模组，导入相同 id 可覆盖并恢复软删除模组。
+
+每局设置存 settings_json，旧局缺字段时使用上述默认值；修改 context_* 或 persona_id 时在同一事务清空 runtime_json 的 session_id 并归零 session_tokens，模型修改不重开，已结束局拒绝修改。运行态写入可附 expected_settings（仅作事务内比较，不持久化），背景设置与原回合不一致时忽略 session_id/session_tokens，防止在途结果恢复旧会话。
 
 `characters` 是 `{xiaoyang: 预设索引或完整角色卡, yanzhi: 预设索引或完整角色卡}`，索引从 0 开始；省略时默认选前两个预设。每个 profile 同时只允许一局未结束的局，MCP 自动绑定当前未结束局，没有可改变视角或局 ID 的玩家工具。导入格式见 README 的跑团接入说明。参数错误为 400，回合错误、重复掷骰、CAS 冲突为 409，鉴权失败为 401。
 

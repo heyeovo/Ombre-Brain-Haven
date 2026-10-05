@@ -425,7 +425,7 @@ Brain 的 HTTP 模式在同一端口提供独立 TRPG 服务：言之连接 `/tr
 
 跑团数据独立持久化到 `state/trpg.sqlite`，状态目录使用既有 `OMBRE_STATE_DIR` / `config.state_dir`，未指定时用 `<buckets_dir>/../state`。不写记忆桶、聊天归档或召回；每个 profile 在 P1 只绑定一局。玩家接口通过存储层统一获取过滤后的视图，不返回守秘人原文、GM 备注、另一位玩家的私聊、未公开线索或暗骰日志。DM 仅通过自己的 MCP 搜索/读取模组和修改游戏状态；phase 收尾由 Dashboard 调度器调用带预期 phase 的 CAS 接口。
 
-模组上传 JSON 必须包含 `title`、`system:"coc7"`、`public_intro`、`keeper_overview` 和四个数组：`scenes[{id,title,keeper_text}]`、`clues[{id,title,text,handout}]`、`npcs[{id,name,keeper_text,sheet}]`、`pregens[{name,occupation,sheet}]`。场景/线索/NPC 的 id 全局唯一。角色卡白名单为 `name/occupation/characteristics/hp/hp_max/san/san_start/mp/luck/skills/background/notes`，数值为 0–100 的整数。开发样例仅使用 [假模组](tests/fixtures/trpg/fake-module.json)。上传响应只含标题与场景/线索/NPC 数量，列表只含 id/标题。
+模组上传 JSON 必须包含 `title`、`system:"coc7"`、`public_intro`、`keeper_overview` 和四个数组：`scenes[{id,title,keeper_text}]`、`clues[{id,title,text,handout}]`、`npcs[{id,name,keeper_text,sheet}]`、`pregens[{name,occupation,sheet}]`。场景/线索/NPC 的 id 全局唯一。角色卡白名单为 `name/occupation/characteristics/hp/hp_max/san/san_start/mp/luck/skills/background/notes`，数值为 0–100 的整数。开发样例仅使用 [假模组](tests/fixtures/trpg/fake-module.json)。上传响应只含标题与场景/线索/NPC 数量，列表只含 id/标题。Dashboard 可单独获取预设调查员来选卡；DM 可写公开与守秘人两份前情提要，玩家只能看到公开版（接口契约见上述 reference）。
 
 言之只拥有 `get_table(since_seq)`、`get_my_character`、`get_clues`、`submit_action(text)`、`roll_check(check_id)` 五个工具；游戏行动必须经 `submit_action` 提交，最终回复作为桌边话。DM 可以读取 `overview`、场景/线索/NPC id 或 `pregen:索引`；`create_character(owner,sheet={"pregen":索引})` 可复制预设卡。`secret_roll` 默认 owner 为言之，也可明确指定玩家/NPC。所有掷骰由 Haven 用 `secrets` 完成，模型不得编造点数。
 

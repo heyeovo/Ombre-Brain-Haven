@@ -146,6 +146,8 @@ OMBRE_SCORING_WARMTH_BOOST= # 温暖偏置初始值
 
 路由由 `trpg_mcp.py` 注册，挂载在 Brain 的 `/trpg`；独立 Gateway 端口不提供这些路由。REST 只接受 `OMBRE_GATEWAY_TOKEN` Bearer，视角固定为 `xiaoyang`，不接受 Cookie、OAuth 或 MCP token。所有局/模组/角色/日志/线索/检定查询均按启动时的 profile 隔离。
 
+DM MCP 的 `write_recap(public?, keeper?)` 写入独立的 `recap` 日志（至少一份非空），不改变 phase。`latest_recap(game, viewer)` 返回 `{public?: string}`，DM 另含 `{keeper?: string}`；每份各取最新一条，沿用 `view_for` 的可见性过滤。预设调查员查询只返回 pregens 字段，sheet 沿用角色卡白名单。
+
 ```text
 GET  /trpg/api/modules                          # [{id,title}]，无模组正文
 POST /trpg/api/modules                          # §导入 JSON；响应仅 title/scenes_count/clues_count/npcs_count

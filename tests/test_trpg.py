@@ -342,3 +342,16 @@ def test_http_pregens_and_recaps(http_server):
         assert 'PUBLIC_RECAP' in data and 'KEEPER_RECAP' not in data
     dm = json.dumps(call(client, 'dm', 'dm-secret', 'get_log'))
     assert 'PUBLIC_RECAP' in dm and 'KEEPER_RECAP' in dm
+
+
+def test_pregens_field_whitelist_and_profile(store):
+    module = json.loads(json.dumps(FAKE))
+    module['pregens'][0]['keeper_text'] = 'KEEPER_PREGEN'
+    module['pregens'][0]['sheet']['keeper_notes'] = 'KEEPER_SHEET'
+    store.import_module(module)
+    module_id = store.list_modules()[0]['id']
+    pregens = store.list_pregens(module_id)
+    assert set(pregens[0]) == {'index', 'name', 'occupation', 'sheet'}
+    assert 'KEEPER_' not in json.dumps(pregens)
+    with pytest.raises(ValueError):
+        TrpgStore(store.path, 'other').list_pregens(module_id)

@@ -7,6 +7,7 @@ from pathlib import Path
 import trpg_dice
 
 PLAYERS = ('xiaoyang', 'yanzhi')
+SHEET_FIELDS = {'name', 'occupation', 'characteristics', 'hp', 'hp_max', 'san', 'san_start', 'mp', 'luck', 'skills', 'background', 'notes'}
 PHASES = {'players': {'yanzhi', 'dm'}, 'yanzhi': {'dm'}, 'dm': {'players', 'checks'}, 'checks': {'dm'}}
 
 
@@ -124,7 +125,8 @@ class TrpgStore:
 
     def list_pregens(self, module):
         with self.db() as c:
-            return [dict(index=i, **{key: pregen[key] for key in ('name', 'occupation', 'sheet')})
+            return [dict(index=i, name=pregen['name'], occupation=pregen['occupation'],
+                         sheet={key: value for key, value in pregen['sheet'].items() if key in SHEET_FIELDS})
                     for i, pregen in enumerate(self._module(c, module)['pregens'])]
 
     def write_recap(self, game, public=None, keeper=None):
@@ -269,8 +271,7 @@ class TrpgStore:
             raise ValueError('invalid owner')
         if not isinstance(sheet, dict):
             raise ValueError('invalid sheet')
-        allowed = {'name', 'occupation', 'characteristics', 'hp', 'hp_max', 'san', 'san_start', 'mp', 'luck', 'skills', 'background', 'notes'}
-        sheet = {k: v for k, v in sheet.items() if k in allowed}
+        sheet = {k: v for k, v in sheet.items() if k in SHEET_FIELDS}
         for key in ('name', 'occupation', 'background', 'notes'):
             if key in sheet and not isinstance(sheet[key], str):
                 raise ValueError('invalid ' + key)

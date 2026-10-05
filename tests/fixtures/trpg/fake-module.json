@@ -1,0 +1,18 @@
+{
+  "title": "测试：纸月车站", "system": "coc7", "public_intro": "两位旅客抵达纸月车站。",
+  "keeper_overview": "KEEPER_OVERVIEW_SENTINEL：售票员藏起了钟表。",
+  "scenes": [
+    {"id": "s1", "title": "候车厅", "keeper_text": "KEEPER_SCENE_SENTINEL：钟在柜台下面。"},
+    {"id": "s2", "title": "站台", "keeper_text": "KEEPER_PLATFORM_SENTINEL：列车是纸做的。"}
+  ],
+  "clues": [
+    {"id": "c1", "title": "车票", "text": "ALL_CLUE：车票写着月亮。", "handout": true},
+    {"id": "c2", "title": "便条", "text": "XIAOYANG_CLUE：便条只交给小羊。", "handout": true},
+    {"id": "c3", "title": "暗格", "text": "UNREVEALED_CLUE：暗格里有钥匙。", "handout": false}
+  ],
+  "npcs": [{"id": "n1", "name": "纸售票员", "keeper_text": "KEEPER_NPC_SENTINEL：他知道全部秘密。", "sheet": {"hp": 10}}],
+  "pregens": [
+    {"name": "测试甲", "occupation": "记者", "sheet": {"characteristics": {"STR": 50,"CON": 50,"SIZ": 50,"DEX": 50,"APP": 50,"INT": 60,"POW": 50,"EDU": 60}, "hp": 10, "hp_max": 10, "san": 50, "san_start": 50, "mp": 10, "luck": 50, "skills": {"侦查": 60}, "background": "测试人物甲", "notes": ""}},
+    {"name": "测试乙", "occupation": "教师", "sheet": {"characteristics": {"STR": 50,"CON": 50,"SIZ": 50,"DEX": 50,"APP": 50,"INT": 60,"POW": 50,"EDU": 60}, "hp": 10, "hp_max": 10, "san": 50, "san_start": 50, "mp": 10, "luck": 50, "skills": {"侦查": 60}, "background": "测试人物乙", "notes": ""}}
+  ]
+}

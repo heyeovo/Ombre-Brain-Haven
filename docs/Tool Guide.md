@@ -2,6 +2,8 @@
 
 这份文档用于把 Ombre-Brain 接给 Operit、RikkaHub、ChatGPT MCP、Claude Connector 或其它聊天平台时，直接粘贴到平台指令里。
 
+> 本指南仅适用于 Ombre Brain 记忆会话。独立跑团会话使用专用提示词和玩家 MCP；跑团工具与服务端掷骰约定见 [README 跑团接入](../README.md#跑团接入)。
+
 ## Copy Block
 
 ```text

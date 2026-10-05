@@ -183,3 +183,12 @@ Webhook 推送格式（JSON）：
 ## Dashboard 持久配置
 
 非秘密热更新写入 `<state_dir>/config.runtime.yaml`；Dashboard 中新输入的 API key 写入 `<state_dir>/.env`，启动时自动读取。Coolify 已直接配置的同名环境变量优先级最高，不会被持久文件覆盖。
+
+## 跑团 MCP（Brain HTTP 端口）
+
+| 变量名 | 默认 | 说明 |
+|--------|------|------|
+| `TRPG_PLAYER_MCP_TOKEN` | 空 | `/trpg/player/mcp` 的独立 Bearer；玩家固定言之视角 |
+| `TRPG_DM_MCP_TOKEN` | 空 | `/trpg/dm/mcp` 的独立 Bearer；仅放在 Brain（验证端）与 trpg-dm 容器（客户端），不得放进 Dashboard |
+
+未配置对应 token 时该端点一律 401；两者必须互不相同，且均不得等于 `OMBRE_GATEWAY_TOKEN`，重复配置也拒绝。OB Bearer 和 ChatGPT OAuth 不能访问两套 MCP。Dashboard 服务端仅用已有 Gateway Bearer 调用 `/trpg/api/*`；浏览器不得取得这些密钥。部署时需要在 Brain 容器注入这两个变量，现有 Compose 不会自动转发新增变量，由发布维护者配置。

@@ -37,6 +37,9 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `server.py` | **Brain** 入口（约 700KB）。MCP 工具注册（`@mcp.tool`）+ REST API（`@mcp.custom_route`）+ 记忆核心 |
 | `gateway.py` | **Gateway** 入口（约 1MB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线（透镜调试区分检索前排除与相关性拒绝）+ cc 持久化路由（`Route()` 注册） |
 | `gateway_state.py` | Gateway/cc SQLite 状态：带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式、固定 handoff、版本化按天滚动配置及 turn watermark、每协作者唯一主窗标记、软删除防复活、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision 成对指针及上一检查点、显式 Haven 正文恢复的原子 lane 切换记录、Context GC 配置/历史、带 `created/recalled/breath` 原因与 context revision 生命周期的召回隔离账本；日期清单按日汇总正文、工具、附件视觉/文件正文、召回、thinking、运行时时间戳、消息框架和 agent wake 的 token 预估；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox，正式主动消息（含 quiet，`delivery` 原样保存在 raw）还会在该事务内解除缓存保活的临时暂停，no-op 不解除 |
+| `trpg_store.py` | 独立 `state/trpg.sqlite`；profile 隔离、phase/CAS、角色/检定/日志事务；`view_for` 是玩家可见性与字段白名单的唯一查询边界 |
+| `trpg_dice.py` | CoC 7 d100、三档难度、奖励/惩罚骰和 SAN 损失式；生产用 `secrets`，测试可注入随机源 |
+| `trpg_mcp.py` | Brain HTTP 端口上的两个独立 FastMCP + 小羊 REST；独立 Bearer 鉴权，组合主/子 lifespan 启动 session manager |
 | `appearance_config.py` | Dashboard 外观配置的服务端白名单 normalize，背景图 MIME/体积/尺寸校验、EXIF 方向修正与压缩；不接受客户端直接指定任意图片路径 |
 | `conversation_slice_store.py` | CC 自动聊天切片的独立 SQLite 契约：在 `gateway_state.db` 中维护版本化批次、切片、任务状态、CAS 重切 revision 与独立 embedding 元数据；负责永久消息规范化 hash、source/coverage 校验、幂等创建、原子激活、source 变化失效及窗口永久删除级联。本模块不调用模型、不做召回或 Context 注入 |
 | `conversation_slice_engine.py` | CC 自动聊天切片离线生成的未完成工作流：保留版本化硬约束、按 session 隔离的切片、slice-only、raw 退出入队、人工重切、最多 14 个真实聊天日的首批回填估算与显式任务执行；正式日回顾不调用本模块，后台暂不自动消费恢复队列，也不做召回或 Context 注入 |
@@ -137,7 +140,30 @@ OMBRE_SCORING_WARMTH_BOOST= # 温暖偏置初始值
 
 ## REST API
 
-**完整路由以代码为准**（`server.py` 的 `@mcp.custom_route` 90+ 条 + `gateway.py` 的 `Route()`），用 `grep -oE "@mcp\.custom_route\(\"[^\"]*\"" server.py` 实时查。下面列出 dashboard 前端实际消费的核心组：
+**完整路由以代码为准**（`server.py` 的 `@mcp.custom_route` 90+ 条 + `gateway.py` / `trpg_mcp.py` 的 `Route()`），用 `grep -oE "@mcp\.custom_route\(\"[^\"]*\"" server.py` 实时查。下面列出 dashboard 前端实际消费的核心组：
+
+### 跑团（Brain，独立于记忆系统）
+
+路由由 `trpg_mcp.py` 注册，挂载在 Brain 的 `/trpg`；独立 Gateway 端口不提供这些路由。REST 只接受 `OMBRE_GATEWAY_TOKEN` Bearer，视角固定为 `xiaoyang`，不接受 Cookie、OAuth 或 MCP token。所有局/模组/角色/日志/线索/检定查询均按启动时的 profile 隔离。
+
+```text
+GET  /trpg/api/modules                          # [{id,title}]，无模组正文
+POST /trpg/api/modules                          # §导入 JSON；响应仅 title/scenes_count/clues_count/npcs_count
+GET  /trpg/api/games                            # id/title/phase/创建与更新时间
+POST /trpg/api/games                            # {module_id,title?,characters?}
+GET  /trpg/api/games/{game}/table?since_seq=0     # 小羊视图：phase/公开场景/同伴名与职业/自己的卡/日志/线索/自己的待掷检定
+POST /trpg/api/games/{game}/action               # {text}，players → yanzhi
+POST /trpg/api/games/{game}/table-talk           # {text}，不推进 phase
+POST /trpg/api/games/{game}/checks/{check}/roll   # 小羊本人名下 pending 检定，服务端掷骰
+POST /trpg/api/games/{game}/settle               # {expected_phase:"players"|"yanzhi"} → dm
+POST /trpg/api/games/{game}/phase                # {expected_phase,phase}，调度器 CAS
+```
+
+`characters` 是 `{xiaoyang: 预设索引或完整角色卡, yanzhi: 预设索引或完整角色卡}`，索引从 0 开始；省略时默认选前两个预设。P1 每个 profile 只允许创建一局，MCP 自动绑定该局，没有可改变视角或局 ID 的玩家工具。导入格式见 README 的跑团接入说明。参数错误为 400，回合错误、重复掷骰、CAS 冲突为 409，鉴权失败为 401。
+
+phase 合法边为 `players → yanzhi/dm`、`yanzhi → dm`、`dm → players/checks`、`checks → dm`；存在待掷检定时不能返回 players/dm，进入 checks 必须已有待掷检定。DM 发起检定立即进入 checks，可在 checks 继续追加检定；最后一项掷完自动回到 dm。暗骰在 dm 内立即完成，不改变 phase。骰子结果、原始个位/十位/SAN 前后值、扣 SAN、日志与 phase 在同一 SQLite `BEGIN IMMEDIATE` 事务提交；重复掷骰不重复扣 SAN。
+
+`view_for(game, viewer, since_seq)` 统一过滤日志收件人、gm_note、暗骰、线索公开范围与检定归属，只返回公开场景 id/title、同伴 name/occupation 和自己的角色卡。DM 模组读取函数不注册到 REST 或玩家 MCP。模块导入响应和模组列表采用白名单；keeper JSON 从不进入玩家接口。旧版无 profile 表重建主键并归属 `default`，缺失 secret 列默认补 0，重复初始化不丢数据。
 
 ### 认证
 ```

@@ -17028,6 +17028,8 @@ if __name__ == "__main__":
             _app = mcp.streamable_http_app()
         else:
             _app = mcp.sse_app()
+        from trpg_mcp import mount_trpg
+        mount_trpg(_app, config, str(getattr(persona_engine, "profile_id", "") or "default"))
         if hasattr(_app, "add_event_handler"):
             async def _start_decay_engine_on_app_startup():
                 await _ensure_decay_engine_started_for_transport(transport)

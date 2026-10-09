@@ -31,7 +31,7 @@ from typing import Any, Callable
 
 from openai import AsyncOpenAI
 
-from identity import generic_identity_names, identity_names, render_identity_template
+from identity import identity_names, render_identity_template
 from memory_layers import normalize_write_classification
 from memory_metadata import domain_prompt_options_text, normalize_domain_key
 from utils import count_tokens_approx
@@ -71,29 +71,6 @@ def _sanitize_generated_tags(tags: object) -> list[str]:
         if text not in clean:
             clean.append(text)
     return clean[:15]
-
-
-# --- Dehydration prompt: instructs cheap LLM to compress information ---
-# --- 脱水提示词：指导廉价 LLM 压缩信息 ---
-DEHYDRATE_PROMPT = """你是一个记忆提炼专家。请将以下内容提炼为紧凑但有温度的摘要。
-
-压缩规则：
-1. 提取所有核心事实，去除真正的冗余重复
-2. 保留最新的情绪状态和态度
-3. 保留所有待办/未完成事项
-4. 关键数字、日期、名称必须保留
-5. 保留原文中的感官细节（温度、声音、画面、气味等），不改写，尽量用原词
-6. summary 中包含1句原文里最有情绪质地的表达，不要完全改写成新语言
-7. 保留内容类型标签（如：剧情游戏、故事虚构、角色扮演）
-
-输出格式（纯 JSON，无其他内容）：
-{
-  "core_facts": ["事实1", "事实2"],
-  "emotion_state": "当前情绪关键词",
-  "todos": ["待办1", "待办2"],
-  "keywords": ["关键词1", "关键词2"],
-  "summary": "核心总结，含1句保留原文温度的表达"
-}"""
 
 
 DIRECT_BUCKET_CAPSULE_PROMPT = """你是长期记忆证据压缩器。请把一整条记忆 bucket 压成 direct recall 胶囊。
@@ -179,9 +156,6 @@ def _render_dehydrator_template(template: str, names: dict) -> str:
     )
 
 
-DIGEST_PROMPT = _render_dehydrator_template(DIGEST_PROMPT_TEMPLATE, generic_identity_names())
-
-
 # --- Merge prompt: instruct LLM to blend old and new memories ---
 # --- 合并提示词：指导 LLM 揉合新旧记忆 ---
 MERGE_PROMPT_TEMPLATE = """你是一个信息合并专家。请将旧记忆与新内容合并为一份统一的简洁记录。
@@ -204,7 +178,6 @@ MERGE_PROMPT_TEMPLATE = """你是一个信息合并专家。请将旧记忆与�
 
 直接输出合并后的文本，不要加额外说明。"""
 
-MERGE_PROMPT = render_identity_template(MERGE_PROMPT_TEMPLATE, generic_identity_names())
 
 MERGE_PRODUCT_PROMPT = """把新旧记忆整理成一份自然、紧凑但仍保留情绪温度的记录。
 优先保留具体事实、关键称呼、短原话、承诺与关系变化；删除真正重复的表达。
@@ -297,7 +270,6 @@ class Dehydrator:
         else:
             self.client = None
 
-        self.dehydrate_prompt = DEHYDRATE_PROMPT
         self.analyze_prompt = ANALYZE_PROMPT
 
     def _product_prompt(self, name: str, default: str, override: str | None = None) -> str:
@@ -389,29 +361,6 @@ class Dehydrator:
         except Exception as e:
             raise RuntimeError(f"API 合并失败，请检查 API 连接: {e}") from e
 
-    # ---------------------------------------------------------
-    # API call: dehydration
-    # API 调用：脱水压缩
-    # ---------------------------------------------------------
-    async def _api_dehydrate(self, content: str) -> str:
-        """
-        Call LLM API for intelligent dehydration (via OpenAI-compatible client).
-        调用 LLM API 执行智能脱水。
-        """
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": self.dehydrate_prompt},
-                {"role": "user", "content": content[:3000]},
-            ],
-            **self._completion_options(
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-            ),
-        )
-        if not response.choices:
-            return ""
-        return response.choices[0].message.content or ""
 
     async def _api_direct_bucket_capsule(self, content: str) -> str:
         """Call LLM API for direct-recall whole-bucket capsule compression."""
@@ -479,7 +428,6 @@ class Dehydrator:
         if not response.choices:
             return ""
         return response.choices[0].message.content or ""
-
 
 
     # ---------------------------------------------------------

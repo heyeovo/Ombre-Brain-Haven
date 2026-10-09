@@ -719,27 +719,6 @@ class DreamEngine:
             score -= 1
         return score
 
-    def _normalize_model_result(self, raw: dict) -> tuple[str, dict, list[str]]:
-        dream_text = re.sub(r"\s+\n", "\n", str(raw.get("dream_text") or "")).strip()
-        if not dream_text:
-            raise ValueError("dream_text is empty")
-        affect = raw.get("core_affect") if isinstance(raw.get("core_affect"), dict) else {}
-        core_affect = {
-            "valence": round(_clamp(affect.get("valence", 0.5)), 2),
-            "arousal": round(_clamp(affect.get("arousal", 0.3), 0.3), 2),
-        }
-        cues = []
-        raw_cues = raw.get("recall_cues")
-        if isinstance(raw_cues, list):
-            for cue in raw_cues:
-                text = str(cue).strip()
-                if text and text not in cues:
-                    cues.append(text[:40])
-                if len(cues) >= 5:
-                    break
-        if len(cues) < 2:
-            cues = ["熟悉的话突然陌生", "夜里想起未说完的话"]
-        return dream_text, core_affect, cues
 
     async def generate(
         self,

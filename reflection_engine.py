@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from openai import AsyncOpenAI
 
-from identity import generic_identity_names, identity_names, render_identity_template
+from identity import identity_names, render_identity_template
 from memory_edges import RELATION_TYPES, MemoryEdgeStore
 from memory_metadata import domain_prompt_options_text, normalize_domain_key
 from persona_event_selection import select_persona_events
@@ -344,13 +344,6 @@ DAILY_ACTIVITY_SUMMARY_PROMPT_TEMPLATE = """你是 {ai_name} 的当天行动摘�
 - summary 用一句自然中文，35 到 90 字；不要 Markdown，不要列表，不要“今天的总结是”这种壳。
 - source_turn_ids / source_event_ids 只能使用输入里真实出现的 id；拿不准可留空。
 """
-
-
-REFLECT_PROMPT = render_identity_template(REFLECT_PROMPT_TEMPLATE, generic_identity_names())
-DIARY_MEMORY_PROMPT = render_identity_template(
-    DIARY_MEMORY_PROMPT_TEMPLATE.replace("{domain_options_text}", domain_prompt_options_text()),
-    generic_identity_names(),
-)
 
 
 AFFECT_ANCHOR_HEADER = "### affect_anchor"
@@ -4234,8 +4227,6 @@ class ReflectionEngine:
         ]
         return any(marker in text for marker in technical_markers)
 
-    def _fallback_memory_anchor(self, bucket: dict, tags: list[str]) -> dict:
-        return {}
 
     @staticmethod
     def _has_favorite_tag(tags: list[str]) -> bool:
@@ -4309,14 +4300,6 @@ class ReflectionEngine:
         }
         return compact in fixed_templates
 
-    def _scene_from_text(self, title: str, content: str) -> str:
-        text = strip_wikilinks(content).replace("\n", " ").strip()
-        for mark in ["。", "！", "？", ".", "!", "?"]:
-            if mark in text:
-                text = text.split(mark, 1)[0]
-                break
-        scene = text or title or "这条记忆被留下来的瞬间"
-        return self._compact_text(scene, 42)
 
     @staticmethod
     def _has_affect_anchor(content: str) -> bool:

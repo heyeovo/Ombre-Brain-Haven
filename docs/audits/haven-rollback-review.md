@@ -942,3 +942,84 @@
 ./portrait_engine.py:2942:        return os.path.join(state_dir, "portrait_state.json")
 ./scripts/one_click.sh:928:    Use Dashboard -> Persona/Portrait panel to generate or refresh portrait_state.json.
 ```
+
+## 第二轮（2026-10-11）
+
+基线 `21db61d`；分支 `chore/rollback-review-2`。负责人已确认第一组旧召回路线可删除；本轮重新核查当前引用，不依赖上一轮 D 分类直接下结论。
+
+### 第一组最终处理
+
+每项删前运行 `rg -n -w <符号> . --glob "!.venv" --glob "!docs/**"`（另排除本轮临时检查脚本）；包括字符串、测试在内均只剩定义。两个 `_format_direct_moment` 是不同模块的定义，不是互相调用。31 项全删，无因有效调用保留项。调用撤除背景为维护者提供的 `b06fdbc`、`1a4baad`、`060cc33`、`eaed9bf`、`6f1e317`、`3882f97`；停止跟踪旧测试为 `b0c8d37`。当前唯一正式路线见 `docs/recall-pipeline.md`。
+
+| 文件 | 符号 | 最终处理 |
+|---|---|---|
+| `gateway.py` | `_update_persona_after_response` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_query_has_handoff_transition_marker` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_build_recent_context_block` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_should_inject_recent_context` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_build_just_now_chat_context` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_format_direct_moment` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_build_moment_diffused_memory_block` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_moment_has_reliable_topic_evidence_for_diffusion_seed` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_diffusion_path_has_source_record_topic_evidence` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_moment_candidate_confidence` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_diffusion_path_has_date_neighbor` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_query_requires_topic_evidence` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_allows_caution_diffusion` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_build_related_memory_block` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_shadow_specific_topic_terms` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_emotional_reason_lookup_terms` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_bucket_evidence_labels` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_hard_bucket_evidence_labels` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_weak_bucket_evidence_block_reason` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_get_semantic_candidates` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_hook_recall_cards_from_debug` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_hook_recall_how_to_apply` | 删：仅定义，旧路线已撤除 |
+| `gateway.py` | `_prepend_dynamic_context_to_user_message` | 删：仅定义，旧路线已撤除 |
+| `server.py` | `_format_handoff_profile_facts` | 删：仅定义，旧路线已撤除 |
+| `server.py` | `_format_handoff_relationship_weather` | 删：仅定义，旧路线已撤除 |
+| `server.py` | `_auto_generate_moment_if_missing` | 删：仅定义，旧路线已撤除 |
+| `server.py` | `_is_self_anchor_write_content` | 删：仅定义，旧路线已撤除 |
+| `server.py` | `_format_direct_moment` | 删：仅定义，旧路线已撤除 |
+| `server.py` | `_query_requires_direct_topic_evidence` | 删：仅定义，旧路线已撤除 |
+| `server.py` | `_secondary_direct_limit` | 删：仅定义，旧路线已撤除 |
+| `server.py` | `_build_mcp_moment_diffused_memory_block` | 删：仅定义，旧路线已撤除 |
+
+### 第二组最终处理
+
+六项当前均无装饰器/注册，也没有有效调用。文档核查覆盖 README、reference、CLAUDE_PROMPT、Tool Guide；状态文件名不算函数入口。
+
+| 文件 / 符号 | 最终处理 | 依据 |
+|---|---|---|
+| `server.py:resurface` | 保留：替代证据不足 | `85741ef`（2026-06-07）撤掉 MCP 注册，但该提交只是缩减工具 schema，未证明独立入口被替代；`CLAUDE_PROMPT.md:75` 仍说明 query resurface 能力（并非独立函数调用说明）。按判断不了不删；普通 breath 路径及 `_select_resurface_buckets` 不动。 |
+| `server.py:portrait_maintain` | 删 | `85741ef` 撤掉 MCP 注册；此前 `d8a266f` 已建立 `/api/portrait-maintain` REST 入口直接调用 portrait engine。四份现行文档不声明该函数为现行入口。 |
+| `server.py:portrait_state` | 删 | `85741ef` 撤掉 MCP 注册；`d8a266f` 引入 `_portrait_state_payload` 与 `/api/portrait-state`，REST 直接读取 payload。README:206 的 `portrait_state.json` 是持久化文件，保留。 |
+| `darkroom.py:continue_context` | 删 | `dcc565f`（Remove darkroom completeness gate）删除 MCP 包装 `darkroom_continue_context` 及其调用，指引改为 darkroom_enter 继续草稿；当前房间路线仍在。四份现行文档无旧函数入口。 |
+| `persona_engine.py:update_from_user_message` | 删 | 从未注册为 MCP/REST；`55eb3a3`（Refactor persona state post-reply updates）将 Gateway 调用改为 build_pre_reply_guidance，旧方法仅转发。四份现行文档无该入口。 |
+| `bucket_manager.py:record_surface_trace` | 保留：现行文档仍声明 | `docs/reference.md:370` 明确声明该方法记录 breath 无查询浮现。它是 store 方法，从未注册 MCP/REST，因文档契约保留。 |
+
+### 连带删除
+
+逐轮对被删函数依赖再次 rg，确认失去全部有效引用后删除，直到没有新孤儿。同名 helper 分别核对作用域：Gateway 方法与 server 模块函数互不调用，保留另一模块仍被调用的同名实现。未删除任何公共 store API、配置字段、dataclass 字段、表结构、MCP 注册或 REST 路由。
+
+| 文件 | 连带删除的私有辅助函数 |
+|---|---|
+| `gateway.py` | `_recent_context_reason`, `_recent_context_in_cooldown`, `_build_bridge_just_now_raw_context`, `_select_just_now_turns`, `_query_requests_bridge_just_now_context`, `_diffusion_seed_topic_term_has_specific_residue`, `_moment_created_date_key`, `_recent_context_requires_topic_evidence`, `_query_wants_body_chain`, `_build_diffused_memory_block`, `_bucket_title_anchor_terms`, `_dedupe_evidence_labels`, `_hook_recall_debug_row_indexes`, `_hook_recall_cards_from_context_block`, `_hook_recall_card_from_debug_row`, `_session_idle_hours`, `_just_now_query_terms`, `_hook_recall_card_from_context_chunk`, `_hook_recall_row_for_ids`, `_hook_recall_render_shape`, `_hook_recall_first_line_summary`, `_bucket_temperature_context`, `_compact_diffused_summary`, `_node_facets_enabled`, `_node_resonance_lookup`, `_has_active_facets`, `_summary_from_jsonish_text` |
+| `server.py` | `_has_memory_section`, `_fallback_moment_from_body`, `_insert_moment_after_leading_body`, `_section_text_for_auto_moment`, `_format_related_moment`, `_query_wants_body_chain`, `_format_related_chain_bundle`, `_moment_diffusion_map`, `_seed_scores_for_moments`, `_diffused_temperature_context`, `_representative_moments_by_bucket` |
+
+连带私有函数共 38 个。另删 3 个文件内 import：Gateway 的 `seed_scores_for_buckets`、`can_bucket_be_related_target`，server 的 `path_has_old_version`。逐文件 AST/rg 确认只剩 import，无使用；其公共定义与其他模块调用保留。没有连带常量删除。
+
+### 配置兼容与正式文档
+
+- `gateway.head_recent_hours`：现在只剩初始化赋值，没有运行读取，保留配置键及字段。
+- `gateway.recent_context_reentry_idle_hours`、`recent_context_cooldown_hours`、`recent_context_budget`：旧 recent-context 注入消费者删除；设置读取、回显、更新仍在，不能称为完全无人读取。
+- `gateway.just_now_context_enabled/hours/max_turns/budget`：设置和诊断仍读取，未列作无人读取配置，也未删除。
+- README、reference、recall-pipeline 对被删符号无现行实现描述需更改。README 的 portrait_state.json 保留；reference 的 record_surface_trace 描述因方法保留而不改。仅更新本审计报告。BEHAVIOR_SPEC.md 未改。
+
+### 验证与验收
+
+- `.venv/bin/python -m pytest -q -x`：366 passed，10 subtests passed，57.24 秒；1 条既有 Pydantic lifespan forward-reference warning。
+- `.venv/bin/python -c "import server"`：退出码 0；`git diff --check` 通过。
+- 保留函数 AST（含装饰器）与基线完全一致；数据库、MCP/REST 入口与第三组符号未改。
+- 验收重点：第二组两个保留项的谨慎边界、跨模块同名私有 helper 的区分、配置字段兼容。
+- 本次不用部署；只在指定分支提交，不 push、不合并、不修改 main。

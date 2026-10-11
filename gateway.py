@@ -43,7 +43,6 @@ from memory_diffusion import (
     diffusion_options_from_config,
     path_has_caution,
     path_has_old_version,
-    seed_scores_for_buckets,
     should_suppress_context_candidate,
 )
 from memory_edges import MemoryEdgeStore
@@ -75,7 +74,6 @@ from memory_layers import (
     bucket_layer_debug,
     bucket_runtime_gate_debug,
     can_bucket_be_recent_context,
-    can_bucket_be_related_target,
     can_moment_be_direct_seed,
     can_moment_be_recall_context,
     can_moment_be_related_target,
@@ -6354,28 +6352,6 @@ class GatewayService:
         new_messages.insert(insert_at, detail_message)
         return new_messages
 
-    async def _update_persona_after_response(
-        self,
-        session_id: str,
-        user_message: str,
-        upstream_response: httpx.Response,
-        recalled_ids: list[str],
-    ) -> None:
-        try:
-            body = upstream_response.json()
-        except ValueError:
-            logger.info(
-                "Persona post-reply update skipped | session=%s reason=non_json_response",
-                session_id,
-            )
-            return
-        assistant_message = self._extract_assistant_message_from_response_body(body)
-        await self._update_persona_after_assistant_message(
-            session_id,
-            user_message,
-            assistant_message,
-            recalled_ids,
-        )
 
     async def _update_persona_after_assistant_message(
         self,
@@ -8463,14 +8439,6 @@ class GatewayService:
             "sessionstart",
         }
 
-    @staticmethod
-    def _query_has_handoff_transition_marker(query_text: str) -> bool:
-        compact = re.sub(r"[\s!！?？。.,，、:：;；~～…_\-]+", "", str(query_text or "").strip().lower())
-        if not compact:
-            return False
-        if GatewayService._query_is_handoff_trigger(query_text):
-            return True
-        return any(marker in compact for marker in ("换窗", "开新窗"))
 
     def _query_prefers_session_start_handoff(self, query_text: str) -> bool:
         text = str(query_text or "").strip()
@@ -9021,97 +8989,10 @@ class GatewayService:
             "generated_portrait_version": "",
         }
 
-    async def _build_recent_context_block(
-        self,
-        all_buckets: list[dict],
-        query_text: str = "",
-        *,
-        allow_vague: bool = False,
-    ) -> str:
-        if self._auto_query_too_vague(query_text) and not allow_vague:
-            return ""
-        cutoff = datetime.now() - timedelta(hours=self.head_recent_hours)
-        enforce_topic = (
-            self._recent_context_requires_topic_evidence(query_text)
-            and not self._query_wants_body_chain(query_text)
-        )
-        recent_buckets = []
-        explicit_recent_query = self._query_requests_recent_context(query_text)
-        for bucket in all_buckets:
-            if self._is_self_anchor_recall_excluded_bucket(bucket):
-                continue
-            meta = bucket.get("metadata", {})
-            if not can_bucket_be_recent_context(bucket, explicit_lookup=explicit_recent_query):
-                continue
-            if enforce_topic and not self._bucket_has_query_topic_evidence(query_text, bucket):
-                continue
-            created = self._parse_iso(meta.get("created") or meta.get("last_active"))
-            if created and created >= cutoff:
-                recent_buckets.append(bucket)
 
-        recent_buckets.sort(
-            key=lambda bucket: bucket.get("metadata", {}).get("created", ""),
-            reverse=True,
-        )
-        return await self._summarize_buckets(recent_buckets[:6], self.recent_budget)
 
-    def _should_inject_recent_context(
-        self,
-        session_id: str,
-        query_text: str,
-        *,
-        has_reliable_dynamic_context: bool = False,
-        has_handoff_context: bool = False,
-    ) -> bool:
-        if self.recent_budget <= 0 or self.head_recent_hours <= 0:
-            return False
-        if self._query_requests_recent_context(query_text):
-            return True
-        if has_handoff_context:
-            return False
-        if self._auto_recall_low_signal_query(query_text):
-            return False
-        if self._auto_query_too_vague(query_text):
-            return False
-        if self._recent_context_in_cooldown(session_id):
-            return False
-        return bool(self._recent_context_reason(session_id, query_text, has_reliable_dynamic_context))
 
-    def _recent_context_reason(
-        self,
-        session_id: str,
-        query_text: str,
-        has_reliable_dynamic_context: bool = False,
-    ) -> str:
-        if self._query_requests_recent_context(query_text):
-            return "explicit_recent_query"
-        if has_reliable_dynamic_context:
-            return "reliable_dynamic_context"
-        if self.state_store.get_current_round(session_id) <= 0:
-            return "new_session"
-        idle_hours = self._session_idle_hours(session_id)
-        if (
-            idle_hours is not None
-            and self.recent_context_reentry_idle_hours > 0
-            and idle_hours >= self.recent_context_reentry_idle_hours
-        ):
-            return "session_reentry"
-        return ""
 
-    def _recent_context_in_cooldown(self, session_id: str) -> bool:
-        if self.recent_context_cooldown_hours <= 0:
-            return False
-        last_injected = self.state_store.get_last_recent_context_at(session_id)
-        if not last_injected:
-            return False
-        elapsed_hours = max(0.0, (datetime.now() - last_injected).total_seconds() / 3600)
-        return elapsed_hours < self.recent_context_cooldown_hours
-
-    def _session_idle_hours(self, session_id: str) -> float | None:
-        last_success = self.state_store.get_last_success_at(session_id)
-        if not last_success:
-            return None
-        return max(0.0, (datetime.now() - last_success).total_seconds() / 3600)
 
     def _date_persona_trace_debug_base(self, query: str = "") -> dict[str, Any]:
         return {
@@ -9561,163 +9442,9 @@ class GatewayService:
     def _local_date_key(self, value: Any) -> str:
         return local_date_key(value, tz=self.gateway_tz)
 
-    def _build_just_now_chat_context(self, query_text: str) -> tuple[str, dict[str, Any]]:
-        debug = self._just_now_context_debug_base(query_text)
-        debug["triggered"] = True
-        if not self.just_now_context_enabled:
-            debug["skip_reason"] = "disabled"
-            return "", debug
-        if self.just_now_context_budget <= 0 or self.just_now_context_hours <= 0:
-            debug["skip_reason"] = "budget_disabled"
-            return "", debug
 
-        if self._query_requests_bridge_just_now_context(query_text):
-            return self._build_bridge_just_now_raw_context(debug)
 
-        profile_id = str(getattr(self.persona_engine, "profile_id", "") or "default")
-        limit = max(self.just_now_context_max_turns * 4, self.just_now_context_max_turns)
-        turns = self.state_store.list_recent_conversation_turns(
-            profile_id=profile_id,
-            limit=limit,
-            hours=self.just_now_context_hours,
-        )
-        selected = self._select_just_now_turns(query_text, turns)
-        selected = selected[: self.just_now_context_max_turns]
-        debug["turn_count"] = len(selected)
-        debug["selected_turn_ids"] = [int(turn.get("id") or 0) for turn in selected]
-        if not selected:
-            debug["skip_reason"] = "no_recent_turns"
-            return "", debug
 
-        lines = [
-            "Recent cross-window chat snippets for just-now references. "
-            "Use this for 刚刚/刚才/上一句; it is short-term chat context, not long-term memory."
-        ]
-        for turn in reversed(selected):
-            created = self._format_conversation_turn_time(turn.get("created_at"))
-            session_label = self._clip_text(str(turn.get("session_id") or ""), 18)
-            header_bits = [created] if created else []
-            if session_label:
-                header_bits.append(f"session:{session_label}")
-            header = f"- [{' '.join(header_bits)}]" if header_bits else "-"
-            user_text = self._clean_conversation_turn_text(turn.get("user_text", ""))
-            assistant_text = self._clean_conversation_turn_text(turn.get("assistant_text", ""))
-            if user_text:
-                lines.append(f"{header} {self.identity['user_display_name']}: {self._clip_text(user_text, 180)}")
-            if assistant_text:
-                lines.append(f"  {self.identity['ai_name']}: {self._clip_text(assistant_text, 180)}")
-
-        text = self._trim_text("\n".join(lines), self.just_now_context_budget)
-        if not text.strip():
-            debug["skip_reason"] = "empty_context"
-            return "", debug
-        debug["status"] = "injected"
-        debug["source"] = "conversation_turns"
-        return text, debug
-
-    def _build_bridge_just_now_raw_context(
-        self,
-        debug: dict[str, Any],
-    ) -> tuple[str, dict[str, Any]]:
-        end_at = datetime.now(timezone.utc) + timedelta(seconds=1)
-        start_at = end_at - timedelta(hours=self.just_now_context_hours)
-        limit = max(self.just_now_context_max_turns * 2, self.just_now_context_max_turns)
-        try:
-            events = self.raw_event_store.list_events_between(
-                start_at=start_at,
-                end_at=end_at,
-                limit=limit,
-                source="haven_bridge_codex",
-            )
-        except Exception as exc:
-            logger.warning("Gateway Bridge just-now raw lookup failed | error=%s", exc)
-            debug["skip_reason"] = "bridge_raw_lookup_failed"
-            debug["source"] = "raw_events:haven_bridge_codex"
-            return "", debug
-
-        selected = [
-            event
-            for event in events
-            if str(event.get("role") or "").strip().lower() in {"user", "assistant"}
-            and self._clean_conversation_turn_text(event.get("text", ""))
-        ][:limit]
-        debug["turn_count"] = len(selected)
-        debug["selected_turn_ids"] = [int(event.get("id") or 0) for event in selected]
-        debug["source"] = "raw_events:haven_bridge_codex"
-        if not selected:
-            debug["skip_reason"] = "no_recent_bridge_raw_events"
-            return "", debug
-
-        lines = [
-            "Recent Haven Bridge raw chat snippets for an explicit Codex/Bridge/room just-now reference. "
-            "These are original mirrored messages; do not substitute current API-session turns."
-        ]
-        for event in reversed(selected):
-            created = self._format_conversation_turn_time(event.get("created_at"))
-            session_label = self._clip_text(
-                str(event.get("session_id") or event.get("conversation_id") or ""),
-                18,
-            )
-            header_bits = [created] if created else []
-            if session_label:
-                header_bits.append(f"session:{session_label}")
-            header = f"- [{' '.join(header_bits)}]" if header_bits else "-"
-            role = str(event.get("role") or "").strip().lower()
-            speaker = (
-                self.identity["user_display_name"]
-                if role == "user"
-                else self.identity["ai_name"]
-            )
-            text = self._clean_conversation_turn_text(event.get("text", ""))
-            lines.append(f"{header} {speaker}: {self._clip_text(text, 180)}")
-
-        text = self._trim_text("\n".join(lines), self.just_now_context_budget)
-        if not text.strip():
-            debug["skip_reason"] = "empty_context"
-            return "", debug
-        debug["status"] = "injected"
-        return text, debug
-
-    def _select_just_now_turns(self, query_text: str, turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if not turns:
-            return []
-        terms = self._just_now_query_terms(query_text)
-        if terms:
-            matched = [
-                turn for turn in turns
-                if any(
-                    term in (
-                        str(turn.get("user_text") or "")
-                        + "\n"
-                        + str(turn.get("assistant_text") or "")
-                    )
-                    for term in terms
-                )
-            ]
-            if matched:
-                return matched
-        return turns
-
-    def _just_now_query_terms(self, query_text: str) -> list[str]:
-        text = str(query_text or "")
-        stop_terms = set(query_intent_terms("just_now.stop_terms"))
-        stop_terms.update(DEFAULT_AI_ADDRESS_TERMS)
-        stop_terms.update(self._identity_match_terms())
-        raw_terms = re.findall(r"[\u4e00-\u9fffA-Za-z0-9_]{2,}", text)
-        terms: list[str] = []
-        for term in raw_terms:
-            if term in stop_terms:
-                continue
-            if term.startswith("刚才") and len(term) > 2:
-                term = term[2:]
-            if term.startswith("刚刚") and len(term) > 2:
-                term = term[2:]
-            if term and term not in stop_terms and len(term) >= 2:
-                terms.append(term)
-        for force_term in query_intent_terms("just_now.force_terms"):
-            if force_term in text and force_term not in terms:
-                terms.append(force_term)
-        return list(dict.fromkeys(terms))[:5]
 
     def _format_conversation_turn_time(self, value: Any) -> str:
         try:
@@ -9947,22 +9674,6 @@ class GatewayService:
             return False
         return True
 
-    @classmethod
-    def _query_requests_bridge_just_now_context(cls, query: str) -> bool:
-        text = " ".join(str(query or "").lower().split())
-        if not cls._query_requests_just_now_context(text):
-            return False
-        bridge_markers = (
-            "codex",
-            "haven bridge",
-            "bridge",
-            "pwa",
-            "room",
-            "房间",
-            "网页版",
-            "网页端",
-        )
-        return any(marker in text for marker in bridge_markers)
 
     async def _build_relationship_weather_block(self, all_buckets: list[dict]) -> str:
         if self.relationship_weather_budget <= 0:
@@ -12233,29 +11944,6 @@ class GatewayService:
             return compact_without_year_rings
         return self._trim_text(compact_without_year_rings, budget)
 
-    def _format_direct_moment(
-        self,
-        moment: dict,
-        grouped_moments: dict[str, list[dict]],
-        *,
-        body_max_chars: int = 260,
-        context_max_chars: int = 120,
-        context_limit: int = 2,
-    ) -> str:
-        line = self._format_moment_line(moment, max_chars=body_max_chars, note="")
-        if context_limit <= 0:
-            return line
-        contexts = [
-            item for item in self._context_moments_for_seed(moment, grouped_moments)
-            if item.get("section") in MOMENT_TEMPERATURE_SECTIONS
-        ][:context_limit]
-        if not contexts:
-            return line
-        context_lines = [
-            self._format_moment_line(context, max_chars=context_max_chars, note="")
-            for context in contexts
-        ]
-        return line + "\n  context: " + " | ".join(context_lines)
 
     def _append_attached_year_rings(
         self,
@@ -12669,27 +12357,6 @@ class GatewayService:
         tags.update(str(tag) for tag in meta.get("bucket_tags", []) or [])
         return "profile_fact" in tags or bool(meta.get("profile_kind"))
 
-    def _build_moment_diffused_memory_block(
-        self,
-        seed_moments: list[dict],
-        moment_candidates: list[dict],
-        moments: list[dict],
-        edges: list[dict],
-        query_text: str = "",
-        *,
-        session_id: str = "",
-        context_mode: str = "",
-    ) -> str:
-        text, _debug_rows = self._build_moment_diffused_memory_with_debug(
-            seed_moments,
-            moment_candidates,
-            moments,
-            edges,
-            query_text,
-            session_id=session_id,
-            context_mode=context_mode,
-        )
-        return text
 
     def _build_moment_diffused_memory_with_debug(
         self,
@@ -13001,29 +12668,7 @@ class GatewayService:
             return True
         return False
 
-    def _moment_has_reliable_topic_evidence_for_diffusion_seed(self, query: str, moment: dict) -> bool:
-        terms = [
-            str(term).strip()
-            for term in self._specific_query_terms(query)
-            if self._diffusion_seed_topic_term_has_specific_residue(term)
-        ]
-        if not terms:
-            return False
-        meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
-        fields = " ".join(
-            [
-                str(moment.get("text") or ""),
-                str(moment.get("content") or ""),
-                str(meta.get("annotation_summary") or ""),
-                str(meta.get("bucket_name") or ""),
-                " ".join(str(tag) for tag in meta.get("bucket_tags", []) or []),
-                " ".join(str(item) for item in meta.get("bucket_domain", []) or []),
-            ]
-        ).lower()
-        return any(term.lower() in fields for term in terms)
 
-    def _diffusion_seed_topic_term_has_specific_residue(self, term: object) -> bool:
-        return diffusion_seed_topic_term_has_specific_residue(term)
 
     def _diffusion_candidate_injection_decision(
         self,
@@ -13299,13 +12944,6 @@ class GatewayService:
                 return "date_neighbor"
         return "explicit_edge" if steps else "semantic_neighbor"
 
-    @staticmethod
-    def _diffusion_path_has_source_record_topic_evidence(path: Any) -> bool:
-        for step in tuple(getattr(path, "steps", ()) or ()):
-            reason = str(getattr(step, "reason", "") or "").lower()
-            if "source_record_fragment_topic_evidence" in reason:
-                return True
-        return False
 
     def _diffusion_path_source_record_evidence_extends_axis(self, path: Any, query_plan: Any) -> bool:
         terms: list[str] = []
@@ -13357,15 +12995,6 @@ class GatewayService:
             return self._clamp(float(default or 0.65), 0.0, 1.0)
         return self._clamp(min(values), 0.0, 1.0)
 
-    def _moment_candidate_confidence(self, moment: dict, *, default: float = 0.72) -> float:
-        for key in ("score", "rerank_score", "semantic_score"):
-            value = moment.get(key)
-            if value is None:
-                continue
-            confidence = self._safe_float(value, -1.0)
-            if confidence > 0:
-                return self._clamp(confidence, 0.0, 1.0)
-        return self._clamp(default, 0.0, 1.0)
 
     def _secondary_direct_candidate_confidence(
         self,
@@ -13382,29 +13011,7 @@ class GatewayService:
                 return self._clamp(confidence, 0.0, 1.0), key
         return self._clamp(default, 0.0, 1.0), "default"
 
-    def _diffusion_path_has_date_neighbor(
-        self,
-        path: Any,
-        target: dict,
-        moment_map: dict[str, dict],
-    ) -> bool:
-        target_date = self._moment_created_date_key(target)
-        if not target_date:
-            return False
-        for node_id in tuple(str(node) for node in (getattr(path, "nodes", ()) or ()))[:-1]:
-            if self._moment_created_date_key(moment_map.get(node_id)) == target_date:
-                return True
-        return False
 
-    def _moment_created_date_key(self, moment: dict | None) -> str:
-        if not isinstance(moment, dict):
-            return ""
-        meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
-        return self._date_yyyy_mm_dd(
-            meta.get("created")
-            or meta.get("bucket_created")
-            or moment.get("created_at")
-        )
 
     def _diffused_display_note(self, row: dict[str, Any]) -> str:
         why = str(row.get("why") or "explicit_edge")
@@ -13602,8 +13209,6 @@ class GatewayService:
         default_limit = max(0, min(2, self.inject_max_cards))
         return hidden[: max(0, limit if limit is not None else default_limit)]
 
-    def _query_requires_topic_evidence(self, query: str) -> bool:
-        return self._recall_query_plan(query).requires_topic_evidence
 
     def _auto_query_too_vague(self, query: str) -> bool:
         return self._recall_query_plan(query).skip_long_term_recall
@@ -13652,8 +13257,6 @@ class GatewayService:
                 return True
         return False
 
-    def _recent_context_requires_topic_evidence(self, query: str) -> bool:
-        return self._recall_query_plan(query).recent_context_requires_topic_evidence
 
     def _moment_has_query_topic_evidence(self, query: str, moment: dict) -> bool:
         return self.recall_policy.moment_has_topic_evidence(query, moment)
@@ -13715,8 +13318,6 @@ class GatewayService:
     def _recall_query_plan(self, query: str, *, context_mode: str = ""):
         return self.recall_policy.plan_query(query, context_mode=context_mode)
 
-    def _allows_caution_diffusion(self, query: str, context_mode: str) -> bool:
-        return self._recall_query_plan(query, context_mode=context_mode).allow_caution_diffusion
 
     def _query_explicitly_requests_caution_memory(self, query: str) -> bool:
         return self._recall_query_plan(query).explicit_old_memory
@@ -14038,8 +13639,6 @@ class GatewayService:
             ]
         ).lower()
 
-    def _query_wants_body_chain(self, query: str) -> bool:
-        return self._recall_query_plan(query).wants_body_chain
 
     def _query_has_relevance_facet(self, query: str) -> bool:
         return bool(active_facets(facets_for_text(query, self.relevance_options)))
@@ -14069,152 +13668,11 @@ class GatewayService:
             filtered.sort(key=lambda item: self._recall_rank(query, item))
         return filtered
 
-    async def _build_diffused_memory_block(
-        self,
-        recalled_buckets: list[dict],
-        all_buckets: list[dict],
-        query_text: str = "",
-    ) -> str:
-        recalled_buckets = [bucket for bucket in recalled_buckets if not self._is_self_anchor_recall_excluded_bucket(bucket)]
-        if (
-            self.related_memory_budget <= 0
-            or not recalled_buckets
-            or not self.diffusion_options.enabled
-            or self.diffusion_options.top_k <= 0
-        ):
-            return ""
-        recalled_ids = [bucket["id"] for bucket in recalled_buckets if bucket.get("id")]
-        bucket_map = {
-            bucket["id"]: bucket
-            for bucket in all_buckets
-            if bucket.get("id") and not self._is_self_anchor_recall_excluded_bucket(bucket)
-        }
-        recalled_set = set(recalled_ids)
-        node_salience = None
-        node_resonance = None
-        if self._node_facets_enabled():
-            try:
-                self.memory_node_store.bulk_upsert(list(bucket_map.values()))
-                query_facets = self.memory_node_store.facets_for_text(query_text)
-                node_salience = self.memory_node_store.node_salience
-                node_resonance = self._node_resonance_lookup(query_facets)
-            except Exception as exc:
-                logger.warning("Gateway memory node refresh failed: %s", exc)
 
-        edges = [
-            edge
-            for edge in self.memory_edge_store.list_edges()
-            if float(edge.get("confidence", 0.0)) >= self.edge_min_confidence
-        ]
-        hits = diffuse_memory(
-            seed_scores_for_buckets(recalled_buckets),
-            edges,
-            bucket_map,
-            options=self.diffusion_options,
-            exclude_ids=recalled_set,
-            node_salience=node_salience,
-            node_resonance=node_resonance,
-            query_text=query_text,
-        )
-        if not hits:
-            return ""
-        query_plan = self._recall_query_plan(query_text)
-        remaining = self.related_memory_budget
-        parts = []
-        allow_archive_targets = query_plan.allow_archive_targets
-        for hit in hits:
-            target_id = hit.bucket_id
-            target = bucket_map.get(target_id)
-            if not target:
-                continue
-            if not can_bucket_be_related_target(target, explicit_lookup=allow_archive_targets):
-                continue
-            if (
-                query_plan.enforce_topic_evidence
-                and not self._bucket_has_query_topic_evidence(query_text, target)
-            ):
-                continue
-            raw_summary = await self._summarize_bucket(target)
-            summary = self._compact_diffused_summary(target, raw_summary)
-            context = self._bucket_temperature_context(target)
-            caution = (
-                "conflict_or_blocking_path"
-                if path_has_caution(hit.best_path)
-                else "background_association_not_current_fact"
-            )
-            context_part = f"; context: {context}" if context else ""
-            line = f"- [bucket_id:{target_id}] {summary}{context_part} ({caution})"
-            tokens = count_tokens_approx(line)
-            if tokens > remaining and parts:
-                break
-            if tokens > remaining:
-                line = self._trim_text(line, remaining)
-                tokens = count_tokens_approx(line)
-            parts.append(line)
-            remaining -= tokens
-            if remaining <= 0:
-                break
-        return "\n".join(parts)
 
-    def _bucket_temperature_context(
-        self,
-        bucket: dict,
-        max_items: int = 2,
-        max_chars: int = 90,
-    ) -> str:
-        try:
-            moments = parse_bucket_moments(bucket, self.relevance_options)
-        except Exception:
-            return ""
-        contexts = [
-            moment
-            for moment in moments
-            if moment.get("section") in MOMENT_TEMPERATURE_SECTIONS and self._moment_text(moment, max_chars)
-        ][:max_items]
-        return " / ".join(
-            f"[{MOMENT_SECTION_LABELS.get(str(moment.get('section') or ''), str(moment.get('section') or 'moment'))}] "
-            f"{self._moment_text(moment, max_chars)}"
-            for moment in contexts
-        )
 
-    def _node_facets_enabled(self) -> bool:
-        cfg = self.config.get("node_facets", {}) or {}
-        if not isinstance(cfg, dict):
-            return True
-        value = cfg.get("enabled", True)
-        if isinstance(value, str):
-            return value.strip().lower() not in {"0", "false", "no", "off"}
-        return bool(value)
 
-    def _node_resonance_lookup(self, query_facets: dict):
-        if not self._has_active_facets(query_facets):
-            return None
 
-        def lookup(bucket_id: str, bucket: dict) -> float:
-            return self.memory_node_store.node_resonance(bucket_id, query_facets, bucket)
-
-        return lookup
-
-    @staticmethod
-    def _has_active_facets(facets: dict | None) -> bool:
-        for value in (facets or {}).values():
-            if isinstance(value, dict):
-                if any(float(item or 0) > 0 for item in value.values()):
-                    return True
-            else:
-                try:
-                    if float(value) > 0:
-                        return True
-                except (TypeError, ValueError):
-                    continue
-        return False
-
-    async def _build_related_memory_block(
-        self,
-        recalled_buckets: list[dict],
-        all_buckets: list[dict],
-    ) -> str:
-        return await self._build_diffused_memory_block(recalled_buckets, all_buckets)
 
     def _memory_sentinel_debug_base(self, query: str) -> dict[str, Any]:
         return {
@@ -15037,8 +14495,6 @@ class GatewayService:
             "ignored_topic_terms": ignored_topic_terms,
         }
 
-    def _shadow_specific_topic_terms(self, query: str) -> list[str]:
-        return self._shadow_topic_term_plan(query)["topic_terms"]
 
     def _shadow_candidate_relevance(
         self,
@@ -16064,11 +15520,6 @@ class GatewayService:
             ],
         }
 
-    def _emotional_reason_lookup_terms(self, query: str) -> list[str]:
-        plan = emotional_recall_plan(query, self.relevance_options)
-        if not plan.triggered:
-            return []
-        return list(plan.search_terms[:4])
 
     def _query_looks_multi_topic(self, query: str) -> bool:
         text = str(query or "").strip()
@@ -17949,146 +17400,10 @@ class GatewayService:
         )
         return key not in generic_keys
 
-    def _bucket_title_anchor_terms(self, query: str, bucket: dict) -> list[str]:
-        if not query or not isinstance(bucket, dict):
-            return []
-        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-        title_key = self._compact_lookup_key(meta.get("name") or bucket.get("name") or "")
-        if not title_key:
-            return []
-        output: list[str] = []
-        for term in self._dynamic_anchor_query_terms(query):
-            key = self._compact_lookup_key(term)
-            if not key or len(key) < 3 or self._dynamic_anchor_term_is_category(term):
-                continue
-            if key in title_key and term not in output:
-                output.append(term)
-        query_key = self._compact_lookup_key(query)
-        title = str(meta.get("name") or bucket.get("name") or "").strip()
-        for fragment in re.split(r"[与和及、/|：:—-]+", title):
-            cleaned = fragment.strip()
-            key = self._compact_lookup_key(cleaned)
-            if (
-                len(key) >= 4
-                and key in query_key
-                and not self._dynamic_anchor_term_is_category(cleaned)
-                and cleaned not in output
-            ):
-                output.append(cleaned)
-        return output
 
-    @staticmethod
-    def _dedupe_evidence_labels(labels: list[str]) -> list[str]:
-        output: list[str] = []
-        seen: set[str] = set()
-        for label in labels or []:
-            text = str(label or "").strip()
-            if not text or text in seen:
-                continue
-            seen.add(text)
-            output.append(text)
-        return output
 
-    def _bucket_evidence_labels(self, query: str, item: dict) -> list[str]:
-        if not isinstance(item, dict):
-            return []
-        bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
-        labels: list[str] = []
-        title_anchor_terms = self._bucket_title_anchor_terms(query, bucket)
-        if title_anchor_terms:
-            item["title_anchor_terms"] = title_anchor_terms
-            labels.append("title_anchor")
-        if item.get("exact_anchor_match") or self._safe_float(item.get("exact_anchor_score"), 0.0) > 0:
-            labels.append("exact_anchor")
-        protected_phrases = extract_protected_phrases(query)
-        if protected_phrases and isinstance(bucket, dict):
-            bucket_text_key = self._compact_lookup_key(self._date_recall_bucket_text(bucket))
-            if any(self._compact_lookup_key(phrase) in bucket_text_key for phrase in protected_phrases):
-                labels.append("protected_phrase")
-        if self._planner_lexical_direct_signal(item):
-            labels.append("entity_match")
-        if item.get("explicit_relation_edge_match") or self._entity_edge_direct_signal(item):
-            labels.append("entity_match")
-        if isinstance(bucket, dict) and self._is_identity_name_candidate_bucket(query, bucket):
-            labels.append("identity_name_match")
-        if isinstance(bucket, dict) and self._source_record_explicit_bucket_match_reason(query, bucket):
-            labels.append("source_record_exact")
-        if (
-            isinstance(bucket, dict)
-            and self.recall_policy._short_taste_query_terms(query)
-            and self._bucket_has_query_topic_evidence(query, bucket)
-        ):
-            labels.append("taste_evidence")
-        if item.get("distinctive_anchor_match"):
-            labels.append("distinctive_anchor")
-        if item.get("category_overview_item"):
-            labels.append("category_overview_item")
-        if item.get("retrieval_alias_match"):
-            labels.append("retrieval_alias")
-        if item.get("semantic_rescue_direct_span"):
-            labels.append("semantic_rescue_direct_span")
-        if item.get("word_map_category_seed_terms") or self._word_map_category_seed_terms(
-            list(item.get("word_map_terms") or []) + list(item.get("low_frequency_terms") or [])
-        ):
-            labels.append("category_seed")
-        if (
-            isinstance(bucket, dict)
-            and self._safe_float(item.get("keyword_score"), 0.0) > 0
-            and item.get("distinctive_anchor_match")
-            and self._bucket_has_query_topic_evidence(query, bucket)
-            and self._matched_query_terms_have_specific_evidence(item)
-        ):
-            labels.append("keyword_match")
-        if self._safe_float(item.get("semantic_score"), 0.0) > 0:
-            labels.append("semantic_hit")
-        if not self._is_source_record_bucket(bucket):
-            if self._safe_float(item.get("semantic_score"), 0.0) >= self.recall_policy.semantic_threshold:
-                labels.append("strong_semantic")
-            if self._safe_float(item.get("rerank_score"), 0.0) >= self.recall_policy.rerank_threshold:
-                labels.append("strong_rerank")
-        if (
-            item.get("word_map_hint")
-            or self._safe_float(item.get("word_map_score"), 0.0) > 0
-            or item.get("entity_edge_match")
-        ):
-            labels.append("graph_related")
-        return self._dedupe_evidence_labels(labels)
 
-    @staticmethod
-    def _hard_bucket_evidence_labels(labels: list[str]) -> list[str]:
-        hard = {
-            "raw_transcript_exact",
-            "protected_phrase",
-            "same_day_metadata",
-            "exact_anchor",
-            "entity_match",
-            "keyword_match",
-            "distinctive_anchor",
-            "category_overview_item",
-            "identity_name_match",
-            "source_record_exact",
-            "taste_evidence",
-            "title_anchor",
-            "semantic_rescue_direct_span",
-            "strong_semantic",
-            "strong_rerank",
-        }
-        return [label for label in labels or [] if label in hard]
 
-    @staticmethod
-    def _weak_bucket_evidence_block_reason(labels: list[str]) -> str:
-        label_set = {str(label or "").strip() for label in labels or [] if str(label or "").strip()}
-        if not label_set:
-            return "no_hard_evidence"
-        if label_set == {"semantic_hit"}:
-            return "semantic_only"
-        if label_set.issubset({"retrieval_alias", "semantic_hit", "graph_related"}):
-            return "retrieval_alias_only"
-        if "category_seed" in label_set and label_set.issubset({"category_seed", "semantic_hit", "graph_related"}):
-            return "generic_category_only"
-        if label_set.issubset({"semantic_hit", "graph_related"}):
-            return "weak_evidence_only"
-        return "no_hard_evidence"
 
     def _suppressed_bucket_moment_search_boost(self, query: str, item: dict) -> float:
         if not isinstance(item, dict):
@@ -18799,9 +18114,6 @@ class GatewayService:
             semantic_scores[bucket_id] = self._clamp(similarity)
         return semantic_scores, search_status
 
-    async def _get_semantic_candidates(self, query: str, eligible_ids: set[str]) -> dict[str, float]:
-        scores, _status = await self._get_semantic_candidates_with_status(query, eligible_ids)
-        return scores
 
     def _word_map_hint_available(self) -> bool:
         return (
@@ -19087,48 +18399,7 @@ class GatewayService:
             return text
         return text[:max_chars].rstrip() + "..."
 
-    def _compact_diffused_summary(self, bucket: dict, dehydrated: str, max_chars: int = 180) -> str:
-        raw = str(dehydrated or "").strip()
-        extracted = self._summary_from_jsonish_text(raw)
-        if extracted:
-            return self._clip_text(extracted, max_chars)
-        if raw:
-            return self._clip_text(raw, max_chars)
 
-        meta = bucket.get("metadata", {}) or {}
-        title = str(meta.get("name") or bucket.get("id") or "memory").strip()
-        return self._clip_text(title, max_chars)
-
-    @staticmethod
-    def _summary_from_jsonish_text(text: str) -> str:
-        if not text:
-            return ""
-        candidates = [text]
-        start = text.find("{")
-        end = text.rfind("}")
-        if 0 <= start < end:
-            candidates.append(text[start:end + 1])
-
-        for candidate in candidates:
-            try:
-                data = json.loads(candidate)
-            except Exception:
-                continue
-            if isinstance(data, dict):
-                for key in ("summary", "memory_summary", "gist"):
-                    value = data.get(key)
-                    if isinstance(value, str) and value.strip():
-                        return " ".join(strip_wikilinks(value).split())
-                core_facts = data.get("core_facts")
-                if isinstance(core_facts, list) and core_facts:
-                    facts = [
-                        " ".join(strip_wikilinks(str(item)).split())
-                        for item in core_facts[:2]
-                        if str(item).strip()
-                    ]
-                    if facts:
-                        return "; ".join(facts)
-        return ""
 
     @staticmethod
     def _clip_text(text: str, max_chars: int) -> str:
@@ -20905,62 +20176,6 @@ class GatewayService:
             if isinstance(bucket, dict) and str(bucket.get("id") or "") not in excluded
         ]
 
-    def _hook_recall_cards_from_debug(
-        self,
-        debug_payload: dict[str, Any],
-        *,
-        max_cards: int,
-        max_chars: int,
-        include_diffused: bool,
-    ) -> list[dict[str, Any]]:
-        if max_cards <= 0 or not isinstance(debug_payload, dict):
-            return []
-        exact_rows, bucket_rows = self._hook_recall_debug_row_indexes(debug_payload)
-        cards: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
-
-        def add_card(card: dict[str, Any] | None) -> None:
-            if not card or len(cards) >= max_cards:
-                return
-            if not str(card.get("text") or "").strip():
-                return
-            key = (str(card.get("bucket_id") or ""), str(card.get("moment_id") or ""))
-            if key in seen:
-                return
-            seen.add(key)
-            cards.append(card)
-
-        for card in self._hook_recall_cards_from_context_block(
-            str(debug_payload.get("recalled_memory") or ""),
-            source="direct",
-            exact_rows=exact_rows,
-            bucket_rows=bucket_rows,
-            max_chars=max_chars,
-        ):
-            add_card(card)
-        if include_diffused:
-            for card in self._hook_recall_cards_from_context_block(
-                str(debug_payload.get("diffused_memory") or ""),
-                source="diffused",
-                exact_rows=exact_rows,
-                bucket_rows=bucket_rows,
-                max_chars=max_chars,
-            ):
-                add_card(card)
-
-        if len(cards) < max_cards:
-            for row in debug_payload.get("recalled_moment_debug") or []:
-                add_card(self._hook_recall_card_from_debug_row(row, source="direct", max_chars=max_chars))
-                if len(cards) >= max_cards:
-                    break
-        if include_diffused and len(cards) < max_cards:
-            for row in debug_payload.get("diffused_moment_debug") or []:
-                if not isinstance(row, dict) or not row.get("injected"):
-                    continue
-                add_card(self._hook_recall_card_from_debug_row(row, source="diffused", max_chars=max_chars))
-                if len(cards) >= max_cards:
-                    break
-        return cards
 
     def _hook_recall_confidence(self, note: dict[str, Any], row: dict[str, Any] | None) -> str:
         reliability = str(note.get("reliability") or "")
@@ -20973,175 +20188,13 @@ class GatewayService:
             return "medium" if score >= 0.72 else "low"
         return "low"
 
-    @staticmethod
-    def _hook_recall_how_to_apply() -> str:
-        return (
-            "Use only if directly helpful; ignore if irrelevant or conflicting. "
-            "Do not mechanically repeat or mention retrieval."
-        )
 
-    def _hook_recall_debug_row_indexes(
-        self,
-        debug_payload: dict[str, Any],
-    ) -> tuple[dict[tuple[str, str, str], dict[str, Any]], dict[tuple[str, str], dict[str, Any]]]:
-        exact_rows: dict[tuple[str, str, str], dict[str, Any]] = {}
-        bucket_rows: dict[tuple[str, str], dict[str, Any]] = {}
 
-        def add(source: str, row: Any) -> None:
-            if not isinstance(row, dict):
-                return
-            bucket_id = str(row.get("bucket_id") or "")
-            moment_id = str(row.get("moment_id") or "")
-            if bucket_id:
-                bucket_rows.setdefault((source, bucket_id), row)
-            if bucket_id and moment_id:
-                exact_rows[(source, bucket_id, moment_id)] = row
 
-        for row in debug_payload.get("recalled_moment_debug") or []:
-            add("direct", row)
-        for row in debug_payload.get("diffused_moment_debug") or []:
-            add("diffused", row)
-        return exact_rows, bucket_rows
 
-    def _hook_recall_row_for_ids(
-        self,
-        *,
-        source: str,
-        bucket_id: str,
-        moment_id: str,
-        exact_rows: dict[tuple[str, str, str], dict[str, Any]],
-        bucket_rows: dict[tuple[str, str], dict[str, Any]],
-    ) -> dict[str, Any]:
-        return (
-            exact_rows.get((source, bucket_id, moment_id))
-            or bucket_rows.get((source, bucket_id))
-            or exact_rows.get(("direct", bucket_id, moment_id))
-            or bucket_rows.get(("direct", bucket_id))
-            or {}
-        )
 
-    def _hook_recall_cards_from_context_block(
-        self,
-        block: str,
-        *,
-        source: str,
-        exact_rows: dict[tuple[str, str, str], dict[str, Any]],
-        bucket_rows: dict[tuple[str, str], dict[str, Any]],
-        max_chars: int,
-    ) -> list[dict[str, Any]]:
-        text = str(block or "").strip()
-        if not text:
-            return []
-        cards = []
-        for chunk in re.split(r"(?m)(?=^\s*-?\s*\[bucket_id:)", text):
-            chunk = chunk.strip()
-            if not chunk or "[bucket_id:" not in chunk:
-                continue
-            card = self._hook_recall_card_from_context_chunk(
-                chunk,
-                source=source,
-                exact_rows=exact_rows,
-                bucket_rows=bucket_rows,
-                max_chars=max_chars,
-            )
-            if card:
-                cards.append(card)
-        return cards
 
-    def _hook_recall_card_from_context_chunk(
-        self,
-        chunk: str,
-        *,
-        source: str,
-        exact_rows: dict[tuple[str, str, str], dict[str, Any]],
-        bucket_rows: dict[tuple[str, str], dict[str, Any]],
-        max_chars: int,
-    ) -> dict[str, Any] | None:
-        lines = [line.rstrip() for line in str(chunk or "").splitlines() if line.strip()]
-        if not lines:
-            return None
-        first_line = lines[0].strip()
-        bucket_match = re.search(r"\[bucket_id:([^\]\s]+)\]", first_line)
-        if not bucket_match:
-            return None
-        moment_match = re.search(r"\[moment_id:([^\]\s]+)\]", first_line)
-        bucket_id = bucket_match.group(1)
-        moment_id = moment_match.group(1) if moment_match else ""
-        row = self._hook_recall_row_for_ids(
-            source=source,
-            bucket_id=bucket_id,
-            moment_id=moment_id,
-            exact_rows=exact_rows,
-            bucket_rows=bucket_rows,
-        )
-        render_shape = self._hook_recall_render_shape(first_line, row, source)
-        body_lines = []
-        for line in lines[1:]:
-            stripped = line.strip()
-            if stripped.startswith("reading_note:"):
-                continue
-            body_lines.append(stripped)
-        text = "\n".join(body_lines).strip()
-        if source == "diffused" or not text:
-            first_summary = self._hook_recall_first_line_summary(first_line, render_shape)
-            if first_summary:
-                text = first_summary if not text else f"{first_summary}\n{text}"
-        if not text:
-            text = str(row.get("text_preview") or row.get("content_preview") or row.get("note") or "").strip()
-        return self._hook_recall_card(
-            source=source,
-            bucket_id=bucket_id,
-            moment_id=moment_id,
-            title=str(row.get("bucket_name") or "").strip(),
-            text=text,
-            render_shape=render_shape,
-            row=row,
-            max_chars=max_chars,
-        )
 
-    def _hook_recall_card_from_debug_row(
-        self,
-        row: Any,
-        *,
-        source: str,
-        max_chars: int,
-    ) -> dict[str, Any] | None:
-        if not isinstance(row, dict):
-            return None
-        bucket_id = str(row.get("bucket_id") or "")
-        if not bucket_id:
-            return None
-        render_shape = str(((row.get("direct_render") or {}) if isinstance(row.get("direct_render"), dict) else {}).get("shape") or "")
-        if not render_shape:
-            render_shape = "diffused_moment" if source == "diffused" else "direct_moment"
-        return self._hook_recall_card(
-            source=source,
-            bucket_id=bucket_id,
-            moment_id=str(row.get("moment_id") or ""),
-            title=str(row.get("bucket_name") or "").strip(),
-            text=str(row.get("text_preview") or row.get("note") or "").strip(),
-            render_shape=render_shape,
-            row=row,
-            max_chars=max_chars,
-        )
-
-    @staticmethod
-    def _hook_recall_render_shape(first_line: str, row: dict[str, Any], source: str) -> str:
-        direct_render = row.get("direct_render") if isinstance(row, dict) else {}
-        if isinstance(direct_render, dict) and direct_render.get("shape"):
-            return str(direct_render.get("shape"))
-        match = re.search(r"\b(bucket_(?:brief|original|window|capsule)|reading_note)\b", first_line)
-        if match:
-            return match.group(1)
-        return "diffused_moment" if source == "diffused" else "direct_moment"
-
-    @staticmethod
-    def _hook_recall_first_line_summary(first_line: str, render_shape: str) -> str:
-        if str(render_shape or "").startswith("bucket_") or render_shape == "reading_note":
-            return ""
-        text = re.sub(r"^\s*-\s*", "", str(first_line or "")).strip()
-        text = re.sub(r"\[[^\]]+\]\s*", "", text).strip()
-        return text
 
     def _hook_recall_card(
         self,
@@ -21285,26 +20338,6 @@ class GatewayService:
                 return index
         return len(messages)
 
-    def _prepend_dynamic_context_to_user_message(
-        self,
-        message: dict[str, Any],
-        dynamic_context: str,
-    ) -> dict[str, Any]:
-        updated = deepcopy(message)
-        prefix = (
-            "<ombre_live_context>\n"
-            f"{dynamic_context}\n"
-            "</ombre_live_context>\n\n"
-            "Current user message:\n"
-        )
-        content = updated.get("content")
-        if isinstance(content, str):
-            updated["content"] = prefix + content
-        elif isinstance(content, list):
-            updated["content"] = [{"type": "text", "text": prefix}, *deepcopy(content)]
-        else:
-            updated["content"] = prefix
-        return updated
 
     def _operit_context_rewrite_debug_base(self) -> dict[str, Any]:
         return {

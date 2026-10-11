@@ -236,29 +236,6 @@ class DarkroomStore:
                 ],
             }
 
-    def continue_context(self, limit: int = 3) -> dict:
-        with self._lock:
-            entry = self._last_room_unlocked(visibility="active")
-            entries = [entry] if entry else []
-            return {
-                "status": "ok",
-                "count": len(entries),
-                "entries": [
-                    {
-                        "entry_id": entry.get("id", ""),
-                        "room_id": self._entry_room_id(entry),
-                        "revision": entry.get("revision", 1),
-                        "created_at": entry.get("created_at", ""),
-                        "mode": entry.get("mode", "continue"),
-                        "mood": entry.get("mood", ""),
-                        "tags": entry.get("tags", []),
-                        "visibility": entry.get("visibility", "active"),
-                        "locked_until": str(entry.get("locked_until") or ""),
-                        "content": entry.get("note", ""),
-                    }
-                    for entry in entries
-                ],
-            }
 
     def _new_entry_id(self) -> str:
         return f"dr_{_now().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(4)}"

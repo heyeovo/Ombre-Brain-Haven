@@ -332,8 +332,6 @@ class PersonaStateEngine:
         session_state = self._apply_session_decay(session_id, session_state, now)
         return self._snapshot(global_state, session_state, self.fallback_guidance)
 
-    async def update_from_user_message(self, session_id: str, user_message: str) -> dict:
-        return await self.build_pre_reply_guidance(session_id, user_message)
 
     async def update_from_exchange(
         self,

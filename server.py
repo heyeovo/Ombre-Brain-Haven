@@ -88,7 +88,6 @@ from memory_diffusion import (
     format_diffusion_path,
     format_diffusion_trace,
     path_has_caution,
-    path_has_old_version,
     seed_scores_for_buckets,
     should_suppress_context_candidate,
 )
@@ -1925,77 +1924,8 @@ def _format_handoff_darkroom_door() -> str:
         return ""
 
 
-def _format_handoff_profile_facts(all_buckets: list[dict], limit: int = 6) -> str:
-    facts = [bucket for bucket in all_buckets if _is_profile_fact_bucket(bucket)]
-    facts.sort(
-        key=lambda bucket: str(
-            bucket.get("metadata", {}).get("updated_at")
-            or bucket.get("metadata", {}).get("last_active")
-            or bucket.get("metadata", {}).get("created")
-            or ""
-        ),
-        reverse=True,
-    )
-    lines = []
-    for bucket in facts[: max(0, limit)]:
-        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-        sections = _profile_fact_sections(bucket.get("content", ""))
-        fact = sections.get("fact") or strip_wikilinks(bucket.get("content", "")).strip()
-        fact = _clip_text(fact, 220)
-        if not fact:
-            continue
-        evidence = (
-            meta.get("evidence_bucket_id")
-            or meta.get("evidence_moment_id")
-            or meta.get("source_bucket_id")
-            or meta.get("source_moment_id")
-        )
-        bits = [f"bucket_id:{bucket.get('id', '')}"]
-        if evidence:
-            bits.append(f"evidence:{evidence}")
-        lines.append(f"- [{' '.join(bits)}] {fact}")
-    return "\n".join(lines)
 
 
-def _format_handoff_relationship_weather(all_buckets: list[dict]) -> str:
-    weather = []
-    for bucket in all_buckets:
-        if is_self_anchor_bucket(bucket):
-            continue
-        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-        tags = {str(tag) for tag in meta.get("tags", []) or []}
-        if not ({"relationship_weather", "daily_impression", "weekly_impression"} & tags):
-            continue
-        weather.append(bucket)
-    weather.sort(
-        key=lambda bucket: str(
-            bucket.get("metadata", {}).get("updated_at")
-            or bucket.get("metadata", {}).get("created")
-            or ""
-        ),
-        reverse=True,
-    )
-    lines = []
-    recent_dates = _handoff_recent_date_keys()
-    for index, bucket in enumerate(weather[:3]):
-        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
-        date_key = _bucket_handoff_date(bucket)
-        bucket_id = str(bucket.get("id") or "")
-        is_recent = bool(date_key and date_key in recent_dates)
-        if is_recent or index == 0:
-            text = _clip_text(_handoff_clean_summary_text(bucket.get("content", "")), 220)
-            if text:
-                prefix = f"{date_key}: " if date_key else ""
-                lines.append(f"- [relationship_weather bucket_id:{bucket_id}] {prefix}{text}")
-        else:
-            text = _handoff_short_summary(bucket.get("content", ""), max_chars=72)
-            if text:
-                date_part = f"{date_key}: " if date_key else ""
-                query = f"{date_key} 关系天气" if date_key else str(meta.get("name") or "关系天气")
-                hint = _handoff_query_hint(query)
-                suffix = f"；{hint}" if hint else ""
-                lines.append(f"- [relationship_weather bucket_id:{bucket_id}] {date_part}{text}{suffix}")
-    return "\n".join(lines)
 
 
 def _format_handoff_recent_continuity(all_buckets: list[dict], limit: int = 3) -> str:
@@ -2325,13 +2255,6 @@ def _normalize_memory_sections_for_write(content: str) -> str:
     return raw
 
 
-def _has_memory_section(content: str, section: str) -> bool:
-    target = _normalize_section_heading(section)
-    text = strip_wikilinks(str(content or ""))
-    for match in re.finditer(r"(?m)^\s{0,3}#{2,6}\s+(.+?)\s*$", text):
-        if _normalize_section_heading(match.group(1)) == target:
-            return True
-    return False
 
 
 _GROW_DIRECT_SECTION_HEADINGS = {
@@ -2374,72 +2297,14 @@ def _leading_body_text(content: str) -> str:
     return (raw[: match.start()] if match else raw).strip()
 
 
-def _fallback_moment_from_body(body_text: str) -> str:
-    text = re.sub(r"\s+", " ", str(body_text or "").strip())
-    if not text:
-        return ""
-    match = re.search(r"^(.{12,60}?[。！？!?])", text)
-    return (match.group(1) if match else text[:40]).strip()
 
 
-def _insert_moment_after_leading_body(content: str, moment: str) -> str:
-    raw = str(content or "").strip()
-    text = str(moment or "").strip()
-    if not raw or not text:
-        return raw
-    moment_block = f"### moment\n{text}"
-    match = re.search(r"(?m)^\s{0,3}#{2,6}\s+\S.*$", raw)
-    if not match:
-        return f"{raw}\n\n{moment_block}"
-    body = raw[: match.start()].strip()
-    rest = raw[match.start():].lstrip()
-    if body:
-        return f"{body}\n\n{moment_block}\n\n{rest}"
-    return f"{moment_block}\n\n{rest}"
 
 
-def _section_text_for_auto_moment(content: str) -> str:
-    sections = _profile_fact_sections(content)
-    for key in (
-        SELF_ANCHOR_TAG,
-        "self_anchor",
-        "first_person_anchor",
-        "anchor",
-        "fact",
-    ):
-        text = str(sections.get(_profile_key(key, ""), "") or "").strip()
-        if text:
-            return text
-    return ""
 
 
-async def _auto_generate_moment_if_missing(content: str, *, section_fallback: bool = False) -> str:
-    raw = str(content or "").strip()
-    if not raw or _has_memory_section(raw, "moment"):
-        return raw
-    body_text = _leading_body_text(raw)
-    if (not body_text or len(body_text) < 10) and section_fallback:
-        body_text = _section_text_for_auto_moment(raw)
-    if not body_text or len(body_text) < 10:
-        return raw
-
-    generated_moment = ""
-    generator = getattr(dehydrator, "generate_moment", None)
-    if callable(generator):
-        try:
-            generated_moment = await generator(body_text)
-        except Exception as e:
-            logger.warning("Auto moment generation failed / 自动 moment 生成失败: %s", e)
-
-    generated_moment = str(generated_moment or "").strip() or _fallback_moment_from_body(body_text)
-    return _insert_moment_after_leading_body(raw, generated_moment) if generated_moment else raw
 
 
-def _is_self_anchor_write_content(
-    self_anchor: object = False,
-    domain: list | tuple | set | str | None = None,
-) -> bool:
-    return is_self_anchor_metadata({"self_anchor": self_anchor, "domain": domain or []})
 
 
 async def _auto_generate_write_moment_if_needed(
@@ -4616,39 +4481,8 @@ def _bucket_edges_as_moment_edges(bucket_edges: list[dict], grouped: dict[str, l
     return edges
 
 
-def _moment_diffusion_map(moments: list[dict]) -> dict[str, dict]:
-    mapped = {}
-    for moment in moments:
-        moment_id = moment.get("moment_id")
-        if not moment_id:
-            continue
-        item = dict(moment)
-        meta = dict(item.get("metadata", {}) or {})
-        meta["importance"] = meta.get("bucket_importance", 5)
-        meta["type"] = meta.get("bucket_type", "")
-        meta["anchor"] = meta.get("bucket_anchor", False)
-        meta["pinned"] = meta.get("bucket_pinned", False)
-        meta["protected"] = meta.get("bucket_protected", False)
-        meta["name"] = meta.get("bucket_name", "")
-        meta["resolved"] = meta.get("bucket_resolved", False)
-        meta["digested"] = meta.get("bucket_digested", False)
-        item["metadata"] = meta
-        mapped[str(moment_id)] = item
-    return mapped
 
 
-def _seed_scores_for_moments(moments: list[dict]) -> dict[str, float]:
-    scores = {}
-    for moment in moments:
-        moment_id = str(moment.get("moment_id") or "")
-        if not moment_id:
-            continue
-        try:
-            score = float(moment.get("score", 0.65))
-        except (TypeError, ValueError):
-            score = 0.65
-        scores[moment_id] = max(0.15, min(1.0, score))
-    return scores
 
 
 def _context_moments_for_seed(seed: dict, grouped: dict[str, list[dict]]) -> list[dict]:
@@ -4693,23 +4527,6 @@ def _is_profile_fact_moment(moment: dict) -> bool:
     return "profile_fact" in tags or bool(meta.get("profile_kind"))
 
 
-def _format_direct_moment(seed: dict, grouped: dict[str, list[dict]], token_budget: int) -> str:
-    title = _moment_bucket_title(seed)
-    head = f"[bucket_id:{seed['bucket_id']}] [moment_id:{seed['moment_id']}] {_moment_label(seed)}"
-    if title and title != seed["bucket_id"]:
-        head += f" {title}"
-    parts = [head, _moment_text(seed, 520)]
-    context_lines = [
-        f"- [{_moment_label(moment)}] [moment_id:{moment['moment_id']}] {_moment_text(moment, 260)}"
-        for moment in _context_moments_for_seed(seed, grouped)
-    ]
-    if context_lines:
-        parts.append("语境:\n" + "\n".join(context_lines))
-    block = "\n".join(parts)
-    if count_tokens_approx(block) <= token_budget:
-        return block
-    compact = f"{head}\n{_moment_text(seed, 260)}"
-    return compact if count_tokens_approx(compact) <= token_budget else ""
 
 
 async def _format_direct_bucket(
@@ -5392,53 +5209,8 @@ def _original_window_around_moment(original: str, moment: dict, max_chars: int =
     return window
 
 
-def _format_related_moment(
-    moment: dict,
-    caution: bool = False,
-    path=None,
-    moment_map: dict[str, dict] | None = None,
-    chain_bundle: bool = False,
-) -> str:
-    moment_map = moment_map or {}
-    if caution:
-        note = "路径含冲突/阻断，仅作边界背景。"
-    elif path is not None and path_has_old_version(path):
-        note = "旧路径/旧版本背景，不代表当前事实。"
-    else:
-        note = "背景联想，不代表当前事实。"
-    if chain_bundle and path is not None and len(getattr(path, "steps", ()) or ()) >= 2:
-        return _format_related_chain_bundle(moment, note, path, moment_map)
-    summary = _diffused_moment_summary(moment, path=path, moment_map=moment_map)
-    context = _diffused_temperature_context(moment, path=path, moment_map=moment_map)
-    path_part = ""
-    if path is not None:
-        path_summary = _moment_path_summary(path, moment_map)
-        if path_summary:
-            path_part = f"路径: {path_summary}；"
-    context_part = f"；语境: {context}" if context else ""
-    return (
-        f"- [bucket_id:{moment['bucket_id']}] [moment_id:{moment['moment_id']}] "
-        f"{path_part}摘要: {summary}{context_part}（{note}）"
-    )
 
 
-def _format_related_chain_bundle(
-    moment: dict,
-    note: str,
-    path,
-    moment_map: dict[str, dict],
-) -> str:
-    nodes = tuple(str(node_id) for node_id in (getattr(path, "nodes", ()) or ()))
-    seed_id = nodes[0] if nodes else ""
-    seed_label = _moment_node_label(moment_map.get(seed_id), seed_id)
-    chain = _moment_path_summary(path, moment_map)
-    target = _diffused_moment_summary(moment, path=None, moment_map=moment_map)
-    temperature = _diffused_temperature_context(moment, path=path, moment_map=moment_map)
-    temperature_part = f"；temperature: {temperature}" if temperature else ""
-    return (
-        f"- Chain Bundle: seed {seed_label}；chain: {chain}；"
-        f"target: {target}{temperature_part}（{note}）"
-    )
 
 
 def _format_secondary_direct_moment(moment: dict) -> str:
@@ -5468,48 +5240,6 @@ def _diffused_moment_summary(
     return _clip_text("；".join(parts), max_chars)
 
 
-def _diffused_temperature_context(
-    moment: dict,
-    *,
-    path=None,
-    moment_map: dict[str, dict] | None = None,
-    max_items: int = 2,
-    max_chars: int = 90,
-) -> str:
-    moment_map = moment_map or {}
-    bucket_id = str(moment.get("bucket_id") or "")
-    if not bucket_id:
-        return ""
-    contexts: list[dict] = []
-    seen: set[str] = set()
-
-    def add_context(candidate: dict | None) -> None:
-        if len(contexts) >= max_items or not isinstance(candidate, dict):
-            return
-        if str(candidate.get("bucket_id") or "") != bucket_id:
-            return
-        if candidate.get("section") not in MOMENT_TEMPERATURE_SECTIONS:
-            return
-        moment_id = str(candidate.get("moment_id") or "")
-        if not moment_id or moment_id == str(moment.get("moment_id") or "") or moment_id in seen:
-            return
-        text = _moment_text(candidate, max_chars)
-        if not text:
-            return
-        seen.add(moment_id)
-        contexts.append(candidate)
-
-    for node_id in getattr(path, "nodes", ()) or ():
-        add_context(moment_map.get(str(node_id)))
-    for candidate in sorted(
-        moment_map.values(),
-        key=lambda item: int(item.get("ordinal") or 0) if isinstance(item, dict) else 0,
-    ):
-        add_context(candidate)
-        if len(contexts) >= max_items:
-            break
-
-    return " / ".join(f"[{_moment_label(item)}] {_moment_text(item, max_chars)}" for item in contexts)
 
 
 def _moment_status_label(moment: dict) -> str:
@@ -6213,12 +5943,8 @@ def _query_is_vague_recall(query: str) -> bool:
     return len(terms) <= 2 and not _query_has_explicit_entity_marker(text)
 
 
-def _query_wants_body_chain(query: str) -> bool:
-    return _recall_query_plan(query).wants_body_chain
 
 
-def _query_requires_direct_topic_evidence(query: str) -> bool:
-    return _recall_query_plan(query).requires_topic_evidence
 
 
 def _recall_rank(query: str, moment: dict) -> tuple[int, float]:
@@ -6558,8 +6284,6 @@ async def _build_breath_debug_rerank_payload(
     return payload
 
 
-def _secondary_direct_limit(query: str, related_per_memory: int) -> int:
-    return _recall_query_plan(query).secondary_direct_limit(related_per_memory)
 
 
 def _secondary_direct_moments(
@@ -6615,18 +6339,6 @@ def _query_explicitly_requests_archive_memory(query: str) -> bool:
     return _recall_query_plan(query).explicit_old_memory
 
 
-def _representative_moments_by_bucket(
-    moments: list[dict],
-    *,
-    explicit_lookup: bool = False,
-) -> dict[str, dict]:
-    grouped = _moments_by_bucket(moments)
-    representatives = {}
-    for bucket_id, bucket_moments in grouped.items():
-        representative = _related_representative_moment(bucket_moments, explicit_lookup=explicit_lookup)
-        if representative:
-            representatives[bucket_id] = representative
-    return representatives
 
 
 async def _refresh_moment_graph(all_buckets: list[dict] | None = None) -> tuple[list[dict], dict[str, list[dict]], list[dict]]:
@@ -6661,78 +6373,6 @@ async def _refresh_moment_graph(all_buckets: list[dict] | None = None) -> tuple[
     return moments, grouped, edges
 
 
-async def _build_mcp_moment_diffused_memory_block(
-    seed_moments: list[dict],
-    moments: list[dict],
-    edges: list[dict],
-    token_budget: int,
-    limit_per_source: int,
-    min_confidence: float,
-    exclude_bucket_ids: set[str] | None = None,
-    query_text: str = "",
-) -> str:
-    if token_budget <= 0 or not seed_moments:
-        return ""
-    limit_per_source = _int_between(limit_per_source, 1, 0, 5)
-    if limit_per_source <= 0:
-        return ""
-    min_confidence = _float_between(min_confidence, 0.55, 0.0, 1.0)
-    edges = [
-        edge for edge in edges
-        if float(edge.get("confidence", 0.0)) >= min_confidence
-    ]
-    allow_archive_targets = _recall_query_plan(query_text).allow_archive_targets
-    moment_map = _moment_diffusion_map(moments)
-    representatives = _representative_moments_by_bucket(
-        moments,
-        explicit_lookup=allow_archive_targets,
-    )
-    exclude_bucket_ids = set(exclude_bucket_ids or set())
-    diffusion_options = _breath_related_diffusion_options(len(seed_moments) * limit_per_source)
-    hits = diffuse_memory(
-        _seed_scores_for_moments(seed_moments),
-        edges,
-        moment_map,
-        options=diffusion_options,
-        exclude_ids={moment["moment_id"] for moment in seed_moments if moment.get("moment_id")},
-        query_text=query_text,
-    )
-
-    parts = []
-    seen = set()
-    remaining = token_budget
-    for hit in hits:
-        moment = moment_map.get(hit.bucket_id)
-        if not moment or hit.bucket_id in seen:
-            continue
-        bucket_id = str(moment.get("bucket_id") or "")
-        if bucket_id in exclude_bucket_ids:
-            continue
-        if not can_moment_be_related_target(moment, explicit_lookup=allow_archive_targets):
-            replacement = representatives.get(bucket_id)
-            if not replacement:
-                continue
-            moment = replacement
-            if moment.get("moment_id") in seen:
-                continue
-            if not can_moment_be_related_target(moment, explicit_lookup=allow_archive_targets):
-                continue
-        block = _format_related_moment(
-            moment,
-            path_has_caution(hit.best_path),
-            path=hit.best_path,
-            moment_map=moment_map,
-            chain_bundle=diffusion_options.chain_walk_enabled,
-        )
-        block_tokens = count_tokens_approx(block)
-        if block_tokens > remaining:
-            break
-        parts.append(block)
-        seen.add(hit.bucket_id)
-        remaining -= block_tokens
-        if remaining <= 0:
-            break
-    return "\n---\n".join(parts)
 
 
 async def _collect_diffusion_seed_buckets(query: str, max_seeds: int) -> tuple[list[dict], list[str]]:
@@ -10536,14 +10176,6 @@ async def reflect(period: str = "daily", force: bool = False) -> dict:
     )
 
 
-async def portrait_maintain(force: bool = False) -> dict:
-    """维护每日 portrait state。只写 state/portrait_state.json，不写 profile_fact、anchor、pinned、protected 或 Core Memory。"""
-    await decay_engine.ensure_started()
-    return await portrait_engine.maintain_daily(
-        bucket_mgr,
-        persona_engine,
-        force=force,
-    )
 
 
 async def _self_anchor_entry_payload() -> dict:
@@ -10592,9 +10224,6 @@ async def _portrait_state_payload() -> dict:
     }
 
 
-async def portrait_state() -> dict:
-    """读取当前 portrait state，供检查 handoff 画像来源。"""
-    return await _portrait_state_payload()
 
 
 

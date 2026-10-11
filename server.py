@@ -3923,6 +3923,7 @@ async def _backfill_memory_enrichment(
     return {"processed": len(processed), "ids": processed, "errors": errors}
 
 
+# 留作回退：自动 enrich_on_write 已接替日常处理，超时或曾关闭自动补写时用于人工维修。
 async def enrich_backfill(limit: int = 10) -> dict:
     """后台补跑缺失的 tags/confidence/memory_edges；主要用于 enrich_on_write 曾经超时或关闭后的修复。"""
     return await _backfill_memory_enrichment(limit=limit)
@@ -4178,6 +4179,7 @@ async def _backfill_entity_edges(
     }
 
 
+# 留作回退：自动关系边补写已接替日常处理，需要按 bucket_id/query 定向维修时可复用。
 async def edge_backfill(
     limit: int = 10,
     bucket_id: str = "",
@@ -9428,6 +9430,7 @@ async def room(action: str, room_id: str = "", title: str = "", content: str = "
         return f"房间操作失败：{exc}"
 
 
+# 留作回退：房间 REST 接口已接替此入口，旧 Dashboard 兼容调用需要恢复时可复用。
 async def darkroom_status() -> dict:
     """兼容旧 Dashboard 的房间门口状态。"""
     return darkroom_store.status()
@@ -10509,6 +10512,7 @@ def _literal_arg(value: str) -> str:
     return _json_lib.dumps(str(value or ""), ensure_ascii=False)
 
 
+# 留作回退：当前使用 introspection，旧客户端需要 dream 兼容入口时可复用。
 async def dream() -> str:
     """兼容旧客户端。旧 dream() 已改名为 introspection(); 夜梦由后台小模型自动生成。"""
     result = await introspection()

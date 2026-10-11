@@ -10,7 +10,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from identity import generic_identity_names, identity_names, render_identity_template
+from identity import identity_names, render_identity_template
 from persona_event_selection import trim_persona_excerpt
 
 logger = logging.getLogger("ombre_brain.persona")
@@ -46,11 +46,6 @@ POST_REPLY_EVALUATION_PROMPT_TEMPLATE = """你是 {ai_name} 的私密 Persona �
 客户端自动附带的时间、时间戳、电量、battery 状态只能作为背景，不能成为 perceived_intent、surface_trigger、inner_thought 或 residue 的重点。event_type 和 mood_label 保持短英文标签。数值变化要小。Affect 反映 {ai_name} 回复后的状态。affinity 为正表示更亲近温暖；dominance 为正表示更主动、更保护；defensiveness 为正表示更防备。只有明确的关系时刻才把 relationship_event 设为 true。只有重复出现或强度很高的证据才把 personality_signal 设为 true。"""
 
 
-POST_REPLY_EVALUATION_PROMPT = render_identity_template(
-    POST_REPLY_EVALUATION_PROMPT_TEMPLATE,
-    generic_identity_names(),
-)
-FALLBACK_GUIDANCE = "根据当前状态自然回应，不解释隐藏状态。"
 OPERIT_EXTRA_ATTACHMENT_RE = re.compile(
     r"<attachment\b[^>]*(?:message_insert_extra_bundle|filename=[\"']?Time:)[^>]*>[\s\S]*?</attachment>",
     re.IGNORECASE,

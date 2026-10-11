@@ -46,8 +46,9 @@ def _now_iso() -> str:
 
 def initialize_conversation_slice_schema(conn: sqlite3.Connection) -> None:
     """Add the slice table group without rebuilding or deleting existing data."""
-    conn.executescript(
-        """
+    # executescript() implicitly commits, which would release the caller's
+    # initialization write lock before the remaining migrations run.
+    schema = """
         CREATE TABLE IF NOT EXISTS conversation_slice_revisions (
             profile_id TEXT NOT NULL,
             persona_id TEXT NOT NULL,
@@ -181,7 +182,12 @@ def initialize_conversation_slice_schema(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (slice_id, embedding_version)
         );
         """
-    )
+    statement = ""
+    for line in schema.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            conn.execute(statement)
+            statement = ""
     task_columns = {
         str(row[1]) for row in conn.execute("PRAGMA table_info(conversation_slice_tasks)").fetchall()
     }

@@ -16356,7 +16356,7 @@ if __name__ == "__main__":
 
         async def _automation_schedule_loop():
             await asyncio.sleep(30)
-            local_store = GatewayStateStore(os.path.join(config["buckets_dir"], "gateway_state.db"))
+            local_store = gateway_state_store
             owner = f"automation-scheduler:{os.getpid()}:{threading.get_ident()}"
             while True:
                 now = datetime.now(ZoneInfo(AUTOMATION_TIMEZONE))

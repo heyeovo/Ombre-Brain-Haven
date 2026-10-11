@@ -534,6 +534,19 @@ class GatewayStateStore:
 
     def _init_db(self) -> None:
         conn = self._connect()
+        try:
+            # Acquire the writer before schema reads: concurrent initializers must
+            # wait here rather than compete to upgrade their read transactions.
+            conn.execute("BEGIN IMMEDIATE")
+            self._initialize_schema(conn)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _initialize_schema(self, conn: sqlite3.Connection) -> None:
         initialize_conversation_slice_schema(conn)
         conn.execute(
             """
@@ -1178,8 +1191,6 @@ class GatewayStateStore:
                     "SELECT id, user_text, assistant_text, session_id FROM conversation_turns"
                 )
         self._backfill_conversation_bucket_exclusions(conn)
-        conn.commit()
-        conn.close()
 
     @staticmethod
     def _saved_tool_bucket_ids(value: Any) -> set[str]:

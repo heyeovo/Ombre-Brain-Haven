@@ -437,6 +437,16 @@ class TrpgStore:
             c.execute('INSERT OR IGNORE INTO trpg_reveals VALUES(?,?,?,?)', (self.profile_id, game, clue_id, to))
         return {'ok': True}
 
+    def roll_dice(self, game, expr, reason, owner=None, secret=False):
+        if not isinstance(reason, str) or (owner is not None and not isinstance(owner, str)) or type(secret) is not bool:
+            raise ValueError('invalid dice metadata')
+        with self.db() as c:
+            self._dm_turn(c, game)
+            kwargs = {'randbelow': self.randbelow} if self.randbelow else {}
+            result = dict(type='dice', **trpg_dice.roll_dice(expr, **kwargs), reason=reason, owner=owner)
+            self._log(c, game, 'roll', 'dm' if secret else 'all', 'dm', json.dumps(result))
+        return result
+
     def request_check(self, game, owner, type, skill=None, difficulty='regular', bonus=0, penalty=0, san_loss=None, reason='', secret=False):
         if not secret and owner not in PLAYERS:
             raise ValueError('public checks require a player owner')

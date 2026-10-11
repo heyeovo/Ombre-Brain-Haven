@@ -38,7 +38,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `gateway.py` | **Gateway** 入口（约 1MB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线（透镜调试区分检索前排除与相关性拒绝）+ cc 持久化路由（`Route()` 注册） |
 | `gateway_state.py` | Gateway/cc SQLite 状态：带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式、固定 handoff、版本化按天滚动配置及 turn watermark、每协作者唯一主窗标记、软删除防复活、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision 成对指针及上一检查点、显式 Haven 正文恢复的原子 lane 切换记录、Context GC 配置/历史、带 `created/recalled/breath` 原因与 context revision 生命周期的召回隔离账本；日期清单按日汇总正文、工具、附件视觉/文件正文、召回、thinking、运行时时间戳、消息框架和 agent wake 的 token 预估；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox，正式主动消息（含 quiet，`delivery` 原样保存在 raw）还会在该事务内解除缓存保活的临时暂停，no-op 不解除；初始化事务约束见下方「cc 持久化（Haven 侧）」节 |
 | `trpg_store.py` | 独立 `state/trpg.sqlite`；profile 隔离、phase/CAS、角色/检定/日志事务、公开与 DM 前情提要（recap）、每局设置与言之续接运行态、结束只读档案与模组软删除；`view_for` 是玩家可见性与字段白名单的唯一查询边界 |
-| `trpg_dice.py` | CoC 7 d100、三档难度、奖励/惩罚骰和 SAN 损失式；生产用 `secrets`，测试可注入随机源 |
+| `trpg_dice.py` | 通用表达式掷骰、CoC 7 d100、三档难度、奖励/惩罚骰和 SAN 损失式；生产用 `secrets`，测试可注入随机源 |
 | `trpg_mcp.py` | Brain HTTP 端口上的两个独立 FastMCP + 小羊 REST；独立 Bearer 鉴权，组合主/子 lifespan 启动 session manager |
 | `appearance_config.py` | Dashboard 外观配置的服务端白名单 normalize，背景图 MIME/体积/尺寸校验、EXIF 方向修正与压缩；不接受客户端直接指定任意图片路径 |
 | `conversation_slice_store.py` | CC 自动聊天切片的独立 SQLite 契约：在 `gateway_state.db` 中维护版本化批次、切片、任务状态、CAS 重切 revision 与独立 embedding 元数据；负责永久消息规范化 hash、source/coverage 校验、幂等创建、原子激活、source 变化失效及窗口永久删除级联。本模块不调用模型、不做召回或 Context 注入；初始化事务约束见下方「cc 持久化（Haven 侧）」节 |
@@ -145,6 +145,8 @@ OMBRE_SCORING_WARMTH_BOOST= # 温暖偏置初始值
 ### 跑团（Brain，独立于记忆系统）
 
 路由由 `trpg_mcp.py` 注册，挂载在 Brain 的 `/trpg`；独立 Gateway 端口不提供这些路由。REST 只接受 `OMBRE_GATEWAY_TOKEN` Bearer，页面桌面视角固定为 `xiaoyang`，服务端 yanzhi-view 固定为 `yanzhi`，不接受 Cookie、OAuth 或 MCP token。所有局/模组/角色/日志/线索/检定查询均按启动时的 profile 隔离。
+
+DM MCP 的 `roll_dice(expr, reason, owner=None, secret=False)` 仅在 dm 回合服务端掷骰，不改 phase 或角色卡；支持显式 `NdM`（也接受 `D`）与常数用 `+`/`-` 连接，不接受空白、括号或一元符号，至少一项骰子。整式累计 1–20 个骰子、面数 2–100、最多 6 项、常数 0–100，总和不夹底。返回及 `roll` 日志的 JSON text 为 `{type: "dice", expr, terms: [{sign: 1|-1, count, sides, rolls: [...]} 或 {sign, constant}], total, reason, owner}`；author 为 dm，secret 时 visible_to 为 dm，否则 all。玩家 MCP 不提供此工具；结束局拒绝写入。
 
 DM MCP 的 `write_recap(public?, keeper?)` 写入独立的 `recap` 日志（至少一份非空），不改变 phase。`latest_recap(game, viewer)` 返回 `{public?: string}`，DM 另含 `{keeper?: string}`；每份各取最新一条，沿用 `view_for` 的可见性过滤。预设调查员查询只返回 pregens 字段，sheet 沿用角色卡白名单。
 

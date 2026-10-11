@@ -9,7 +9,7 @@ import httpx
 import pytest
 import uvicorn
 from starlette.applications import Starlette
-from trpg_dice import roll, loss
+from trpg_dice import roll, loss, roll_dice
 from trpg_mcp import mount_trpg
 from trpg_store import Conflict, TrpgStore
 
@@ -180,7 +180,7 @@ def test_real_http_isolation_and_tools(http_server):
     assert initialized.status_code == 200
     assert rpc(client, 'dm', 'dm-secret', 'initialize', {'protocolVersion':'2025-03-26', 'capabilities':{}, 'clientInfo':{'name':'test','version':'1'}}).status_code == 200
     dm_tools = rpc(client, 'dm', 'dm-secret', 'tools/list').json()['result']['tools']
-    assert {tool['name'] for tool in dm_tools} == {'get_state','get_log','search_module','read_module','narrate','request_check','secret_roll','reveal_clue','update_character','set_scene','create_character','write_recap'}
+    assert {tool['name'] for tool in dm_tools} == {'get_state','get_log','search_module','read_module','narrate','request_check','secret_roll','reveal_clue','update_character','set_scene','create_character','write_recap','roll_dice'}
     tools = rpc(client, 'player', 'player-secret', 'tools/list').json()['result']['tools']
     assert {t['name'] for t in tools} == {'get_table','get_my_character','get_clues','submit_action','roll_check'}
     assert call(client,'player','player-secret','submit_action',{'text':'wrong turn'})['isError']
@@ -189,7 +189,11 @@ def test_real_http_isolation_and_tools(http_server):
     for clue, to in [('c1','all'),('c2','xiaoyang')]:
         call(client,'dm','dm-secret','reveal_clue',{'clue_id':clue,'to':to})
     call(client,'dm','dm-secret','secret_roll',{'owner':'yanzhi','type':'luck','reason':'SECRET_ROLL_SENTINEL'})
+    assert call(client, 'player', 'player-secret', 'roll_dice', {'expr': '1d6', 'reason': 'forbidden'})['isError']
+    assert not call(client, 'dm', 'dm-secret', 'roll_dice', {'expr': '1d6', 'reason': 'PUBLIC_DICE'}).get('isError')
+    assert not call(client, 'dm', 'dm-secret', 'roll_dice', {'expr': '1d6', 'reason': 'HIDDEN_DICE', 'secret': True}).get('isError')
     player = call(client,'player','player-secret','get_table')
+    assert 'PUBLIC_DICE' in json.dumps(player) and 'HIDDEN_DICE' not in json.dumps(player)
     rest = client.get(prefix+'/table', headers=headers)
     for data, own, other in [(json.dumps(player),'Y_PRIVATE','X_PRIVATE'), (rest.text,'X_PRIVATE','Y_PRIVATE')]:
         assert own in data and other not in data
@@ -568,3 +572,63 @@ def test_inflight_result_cannot_restore_reset_session(store, game):
     assert runtime['last_seen_seq'] == 4
     runtime = store.yanzhi_runtime(game, {'session_id': 'new', 'session_tokens': 1, 'expected_settings': store.game_settings(game)})
     assert runtime['session_id'] == 'new'
+
+
+@pytest.mark.parametrize('expr,total', [('1d6+1d4', 2), ('2d6+3', 5), ('1d10', 1),
+    ('1d3-1', 0), ('1d2-100', -99), ('2D6-1d4+100-0+1d2', 102), ('20d100', 20)])
+def test_dice_expressions(expr, total):
+    assert roll_dice(expr, lambda n: 0)['total'] == total
+
+
+@pytest.mark.parametrize('expr', ['', '乱码', 'd0', 'd6', '0d6', '21d6', '1d0', '1d1',
+    '1d101', '1d6+101', '1d6-101', '1d6++1', '1d6--1', '-1d6', '+1d6', '1d6+',
+    '1d6*2', '(1d6)', '1 d6', '1d6\n', '１d6', '1d6+0+0+0+0+0+0', '20d6+1d6',
+    '100', '0', None, 6, '9' * 5000 + 'd6'])
+def test_invalid_dice_expressions(expr):
+    def unexpected(n):
+        pytest.fail('invalid expression consumed randomness')
+    with pytest.raises(ValueError):
+        roll_dice(expr, unexpected)
+
+
+def test_dice_raw_results_and_signed_total():
+    values = iter([5, 2, 3])
+    bounds = []
+    def random(n):
+        bounds.append(n)
+        return next(values)
+    assert roll_dice('2d6-1d4+3', random) == {
+        'expr': '2d6-1d4+3', 'terms': [
+            {'sign': 1, 'count': 2, 'sides': 6, 'rolls': [6, 3]},
+            {'sign': -1, 'count': 1, 'sides': 4, 'rolls': [4]},
+            {'sign': 1, 'constant': 3}], 'total': 8}
+    assert bounds == [6, 6, 4]
+
+
+def test_general_dice_log_and_boundaries(store, game):
+    with pytest.raises(Conflict):
+        store.roll_dice(game, '1d6', 'wrong turn')
+    store.advance(game, 'players', 'dm')
+    before = store.view_for(game, 'dm')
+    result = store.roll_dice(game, '1d3-100', 'damage', 'npc:monster')
+    secret = store.roll_dice(game, '2d6', 'HIDDEN_DICE', secret=True)
+    after = store.view_for(game, 'dm')
+    assert result['total'] == -99 and secret['total'] == 2
+    assert after['phase'] == before['phase'] and after['characters'] == before['characters']
+    logs = after['log'][-2:]
+    assert [(r['kind'], r['visible_to'], r['author']) for r in logs] == [('roll', 'all', 'dm'), ('roll', 'dm', 'dm')]
+    assert json.loads(logs[0]['text']) == result
+    assert json.loads(logs[1]['text']) == secret
+    for viewer in ('xiaoyang', 'yanzhi'):
+        visible = json.dumps(store.view_for(game, viewer))
+        assert 'damage' in visible and 'HIDDEN_DICE' not in visible
+    with pytest.raises(ValueError):
+        TrpgStore(store.path, 'other').roll_dice(game, '1d6', 'cross profile')
+    with pytest.raises(ValueError):
+        store.roll_dice(game, '1d0', 'invalid')
+    assert store.view_for(game, 'dm')['log'] == after['log']
+    restored = TrpgStore(store.path, 'test')
+    assert restored.view_for(game, 'dm')['log'] == after['log']
+    store.end_game(game)
+    with pytest.raises(Conflict, match='game ended'):
+        store.roll_dice(game, '1d6', 'ended')

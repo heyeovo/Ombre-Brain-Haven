@@ -41,3 +41,40 @@ def roll(target, difficulty='regular', bonus=0, penalty=0, randbelow=secrets.ran
     ranks = {'fumble': -1, 'failure': 0, 'regular': 1, 'hard': 2, 'extreme': 3, 'critical': 4}
     return dict(value=value, units=units, tens=tens, candidates=candidates, target=target,
                 difficulty=difficulty, grade=grade, success=ranks[grade] >= ranks[difficulty])
+
+
+def roll_dice(expression, randbelow=secrets.randbelow):
+    """Roll signed terms, retaining raw dice without clamping the total."""
+    if not isinstance(expression, str) or not re.fullmatch(
+            r'[0-9]+(?:[dD][0-9]+)?(?:[+-][0-9]+(?:[dD][0-9]+)?)*', expression):
+        raise ValueError('invalid dice expression')
+    terms = re.findall(r'([+-]?)([0-9]+)(?:[dD]([0-9]+))?', expression)
+    if len(terms) > 6:
+        raise ValueError('too many dice terms')
+    parsed, count_total = [], 0
+    for operator, number, faces in terms:
+        if len(number) > 3 or len(faces) > 3:
+            raise ValueError('dice term out of range')
+        number = int(number)
+        sign = -1 if operator == '-' else 1
+        if faces:
+            sides = int(faces)
+            count_total += number
+            if not 1 <= number <= 20 or not 2 <= sides <= 100 or count_total > 20:
+                raise ValueError('dice out of range')
+            parsed.append(dict(sign=sign, count=number, sides=sides))
+        else:
+            if not 0 <= number <= 100:
+                raise ValueError('constant out of range')
+            parsed.append(dict(sign=sign, constant=number))
+    if not count_total:
+        raise ValueError('expression requires dice')
+    total = 0
+    for term in parsed:
+        if 'count' in term:
+            term['rolls'] = [randbelow(term['sides']) + 1 for _ in range(term['count'])]
+            subtotal = sum(term['rolls'])
+        else:
+            subtotal = term['constant']
+        total += term['sign'] * subtotal
+    return dict(expr=expression, terms=parsed, total=total)

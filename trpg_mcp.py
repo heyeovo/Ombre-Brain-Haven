@@ -87,6 +87,10 @@ def create_trpg_app(store):
         return store.request_check(store.active_game(), owner, type, skill, difficulty, bonus, penalty, san_loss, reason)
 
     @dm.tool()
+    def roll_dice(expr: str, reason: str, owner: str | None = None, secret: bool = False):
+        return store.roll_dice(store.active_game(), expr, reason, owner, secret)
+
+    @dm.tool()
     def secret_roll(type: str, reason: str, owner: str = 'yanzhi', skill: str | None = None,
                     difficulty: str = 'regular', bonus: int = 0, penalty: int = 0, san_loss: str | None = None):
         return store.request_check(store.active_game(), owner, type, skill, difficulty, bonus, penalty, san_loss, reason, secret=True)

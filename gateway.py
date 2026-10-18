@@ -4052,6 +4052,26 @@ class GatewayService:
     # cc 跨设备外观配置。图片与 JSON 同在 gateway_state.db 中，部署后仍可读取。
     # ------------------------------------------------------------------
 
+    async def handle_cc_agent_wake_prompt(self, request: Request) -> JSONResponse:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        if request.method == "DELETE":
+            self.state_store.delete_cc_agent_wake_prompt()
+        elif request.method == "PUT":
+            try:
+                body = await request.json()
+            except Exception:
+                return JSONResponse({"error": "invalid JSON"}, status_code=400)
+            if not isinstance(body, dict) or any(
+                not isinstance(body.get(key), str) or not body[key].strip()
+                for key in ("instructions", "tool_description")
+            ):
+                return JSONResponse({"error": "instructions and tool_description are required"}, status_code=400)
+            value = self.state_store.save_cc_agent_wake_prompt(body["instructions"], body["tool_description"])
+            return JSONResponse({"ok": True, "config": value})
+        return JSONResponse({"ok": True, "config": self.state_store.load_cc_agent_wake_prompt()})
+
     async def handle_cc_appearance_get(self, request: Request) -> JSONResponse:
         auth_result = self._authorize(request.headers.get("Authorization", ""))
         if auth_result is not None:
@@ -21697,6 +21717,9 @@ def create_gateway_app(
             return await service.handle_cc_permissions_save(request)
         return await service.handle_cc_permissions_get(request)
 
+    async def cc_agent_wake_prompt(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_cc_agent_wake_prompt(request)
+
     async def cc_appearance(request: Request) -> Response:
         service = request.app.state.gateway_service
         if request.method == "POST":
@@ -21734,6 +21757,7 @@ def create_gateway_app(
             Route("/api/daily-reviews", daily_reviews, methods=["GET", "PATCH"]),
             Route("/api/persona/exchange", persona_exchange, methods=["POST"]),
             Route("/api/cc/personas", cc_personas, methods=["GET", "POST", "DELETE"]),
+            Route("/api/cc/agent-wake-prompt", cc_agent_wake_prompt, methods=["GET", "PUT", "DELETE"]),
             Route("/api/cc/appearance", cc_appearance, methods=["GET", "POST"]),
             Route("/api/cc/appearance/background", cc_appearance_background, methods=["GET", "POST", "DELETE"]),
             Route("/api/cc/upstream", cc_upstream, methods=["GET", "POST"]),

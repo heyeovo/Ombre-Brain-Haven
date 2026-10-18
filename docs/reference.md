@@ -36,7 +36,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 |------|------|
 | `server.py` | **Brain** 入口（约 700KB）。MCP 工具注册（`@mcp.tool`）+ REST API（`@mcp.custom_route`）+ 记忆核心 |
 | `gateway.py` | **Gateway** 入口（约 1MB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线（透镜调试区分检索前排除与相关性拒绝）+ cc 持久化路由（`Route()` 注册） |
-| `gateway_state.py` | Gateway/cc SQLite 状态：带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式、固定 handoff、版本化按天滚动配置及 turn watermark、每协作者唯一主窗标记、软删除防复活、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision 成对指针及上一检查点、显式 Haven 正文恢复的原子 lane 切换记录、Context GC 配置/历史、带 `created/recalled/breath` 原因与 context revision 生命周期的召回隔离账本；日期清单按日汇总正文、工具、附件视觉/文件正文、召回、thinking、运行时时间戳、消息框架和 agent wake 的 token 预估；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox，正式主动消息（含 quiet，`delivery` 原样保存在 raw）还会在该事务内解除缓存保活的临时暂停，no-op 不解除；初始化事务约束见下方「cc 持久化（Haven 侧）」节 |
+| `gateway_state.py` | Gateway/cc SQLite 状态：单行唤醒提示词自定义（`cc_agent_wake_prompt`，含更新时间）、带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式、固定 handoff、版本化按天滚动配置及 turn watermark、每协作者唯一主窗标记、软删除防复活、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision 成对指针及上一检查点、显式 Haven 正文恢复的原子 lane 切换记录、Context GC 配置/历史、带 `created/recalled/breath` 原因与 context revision 生命周期的召回隔离账本；日期清单按日汇总正文、工具、附件视觉/文件正文、召回、thinking、运行时时间戳、消息框架和 agent wake 的 token 预估；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox，正式主动消息（含 quiet，`delivery` 原样保存在 raw）还会在该事务内解除缓存保活的临时暂停，no-op 不解除；初始化事务约束见下方「cc 持久化（Haven 侧）」节 |
 | `trpg_store.py` | 独立 `state/trpg.sqlite`；profile 隔离、phase/CAS、角色/检定/日志事务、公开与 DM 前情提要（recap）、每局设置与言之续接运行态、结束只读档案与模组软删除；`view_for` 是玩家可见性与字段白名单的唯一查询边界 |
 | `trpg_dice.py` | 通用表达式掷骰、CoC 7 d100、三档难度、奖励/惩罚骰和 SAN 损失式；生产用 `secrets`，测试可注入随机源 |
 | `trpg_mcp.py` | Brain HTTP 端口上的两个独立 FastMCP + 小羊 REST；独立 Bearer 鉴权，组合主/子 lifespan 启动 session manager |
@@ -249,6 +249,7 @@ POST /api/bucket/{bucket_id}/merge-commit?into={id}      # 确认合并（更新
 
 ### Gateway / cc 会话持久化
 ```
+GET|PUT|DELETE /gateway/api/cc/agent-wake-prompt
 GET|POST /gateway/api/cc/appearance
        # 跨设备外观配置（theme / background{kind,assetId,intensity,accentMode,accent{h,s}} / glass / font / effects）；未知字段和越界值由 Haven normalize
 GET|POST|DELETE /gateway/api/cc/appearance/background
@@ -405,6 +406,7 @@ GET /api/debug/injections             # 注入调试；含检索前排除桶及 
 cc 配置/用户数据由 **Gateway** 持久化到 Haven 数据库，路由注册在 `gateway.py`（~21441 行 `Route()` 列表）：
 ```
 /api/cc/personas      # 协作者（含 dirs/write_dirs 与 selfhost_defaults；密钥硬拦）
+/api/cc/agent-wake-prompt # 唤醒提示词（cc_agent_wake_prompt 单行表）
 /api/cc/appearance    # 跨设备外观 JSON（cc_appearance_config 表）
 /api/cc/appearance/background  # 当前单张背景图（cc_appearance_background 表）
 /api/cc/upstream      # 上游模型配置（cc_upstream_config 表）
@@ -414,6 +416,8 @@ cc 配置/用户数据由 **Gateway** 持久化到 Haven 数据库，路由注�
 /api/notifications/bark     # Bark 掩码配置、最近状态与测试推送；GET / PATCH / POST
 ```
 Dashboard 的 cc 代理通过服务端 Bearer 访问这些路由；外观使用专用 `/api/appearance` 代理，其他通用 Gateway 请求可走 `/api/gateway/[...path]`。
+
+唤醒提示词的 `instructions`、`tool_description`、`updated_at` 存 `gateway_state.db` 的 `cc_agent_wake_prompt` 单行表；GET 无自定义时返回 `config: null`，PUT 覆盖，DELETE 删除该行以恢复 Dashboard 默认文本；使用相同 cc Bearer 鉴权，旧库建表可重复执行。
 
 外观配置与当前单张背景图存 `gateway_state.db`，不是 Dashboard 本地文件。配置接受 `apricot`（默认）、`sakura`、`mist`、`dusk`、`pearl`、`canopy`、`rain`、`silver` 八主题；旧 `linen` 归一化为 `apricot`。背景接受 gradient/upload/none，另有玻璃参数、标题字体与字号、雨痕模式与强度；upload 只能引用库中当前 asset ID。`font` 保留整体 `scale`（0.85–1.3），并有独立的 `titleScale`、`bodyScale`、`metaScale`（各 0.85–1.4，默认 1）；旧配置缺少三项时自动补默认值。上传限 JPEG/PNG/WebP、5 MB 与 3000 万像素，服务端修正 EXIF 方向并压到最长边 1920px 的 JPEG。删除图片时上传背景配置回到 gradient；旧库建表迁移可重复执行。
 

@@ -117,6 +117,6 @@
 
 历史资料：
 
-- [2026-08-27 recall rebuild handoff](2026-08-27-recall-rebuild-handoff.md)
-- [recall rebuild 总体方案](recall-rebuild-plan.md)
+- [2026-08-27 recall rebuild handoff](handoff/2026-08-27-recall-rebuild-handoff.md)
+- [recall rebuild 总体方案](handoff/recall-rebuild-plan.md)
 

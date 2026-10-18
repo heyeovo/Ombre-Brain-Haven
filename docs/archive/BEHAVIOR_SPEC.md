@@ -1,3 +1,5 @@
+已归档（2026-10-18），现行内容见 docs/reference.md
+
 # Ombre Brain 用户全流程行为规格书
 
 > 版本：基于 server.py / bucket_manager.py / decay_engine.py / dehydrator.py / embedding_engine.py / CLAUDE_PROMPT.md / config.example.yaml

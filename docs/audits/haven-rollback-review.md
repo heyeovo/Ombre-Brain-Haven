@@ -127,8 +127,8 @@
 
 引用（修改前，文档/注释命中不代表调用）：
 ```text
-./BEHAVIOR_SPEC.md:150:3. **日记拆分**（正常路径）：`dehydrator.digest(content)` → `_api_digest()` → LLM 调用 `DIGEST_PROMPT`
-./BEHAVIOR_SPEC.md:471:     │                    DIGEST_PROMPT → LLM API
+./docs/archive/BEHAVIOR_SPEC.md:150:3. **日记拆分**（正常路径）：`dehydrator.digest(content)` → `_api_digest()` → LLM 调用 `DIGEST_PROMPT`
+./docs/archive/BEHAVIOR_SPEC.md:471:     │                    DIGEST_PROMPT → LLM API
 ./dehydrator.py:182:DIGEST_PROMPT = _render_dehydrator_template(DIGEST_PROMPT_TEMPLATE, generic_identity_names())
 ./server.py:9554:    # it sends the full DIGEST_PROMPT (~800 tokens) to DeepSeek for nothing.
 ```
@@ -139,7 +139,7 @@
 
 引用（修改前，文档/注释命中不代表调用）：
 ```text
-./BEHAVIOR_SPEC.md:492:             MERGE_PROMPT → LLM             importance, domain,
+./docs/archive/BEHAVIOR_SPEC.md:492:             MERGE_PROMPT → LLM             importance, domain,
 ./dehydrator.py:207:MERGE_PROMPT = render_identity_template(MERGE_PROMPT_TEMPLATE, generic_identity_names())
 ```
 
@@ -706,7 +706,7 @@
 ./dashboard.html:3116:        <select id="cfg-query-resurface-enabled">
 ./dashboard.html:8265:    document.getElementById('cfg-query-resurface-enabled').value =
 ./dashboard.html:8515:      query_resurface_enabled: document.getElementById('cfg-query-resurface-enabled').value === 'true',
-./INTERNALS.md:86:| `resurface` | max_results, include_archive, max_tokens | 只读浮现久未触碰的旧记忆 |
+./docs/archive/INTERNALS.md:86:| `resurface` | max_results, include_archive, max_tokens | 只读浮现久未触碰的旧记忆 |
 ./CLAUDE_PROMPT.md:75:普通查询默认不会随机漂旧桶。若部署显式开启 `recall.query_resurface_enabled`，低命中且没有相关联想时可能追加 `[surface_type: resurface]` 的久未触碰旧记忆；把它当可忽略的回响，不当直接命中。
 ./recall_policy.py:239:        "resurface",
 ./recall_policy.py:291:        "resurface",
@@ -732,18 +732,18 @@
 
 引用（修改前，文档/注释命中不代表调用）：
 ```text
-./BEHAVIOR_SPEC.md:26:| `server.py` | 注册 MCP 工具（`breath/hold/grow/trace/pulse/dream`）；路由 Dashboard HTTP 请求；`_merge_or_create()` 合并逻辑中枢 |
-./BEHAVIOR_SPEC.md:78:2. dream()                — 消化最近记忆，有沉淀写 feel
-./BEHAVIOR_SPEC.md:319:### 场景 9：用户使用 dream 工具进行记忆沉淀
-./BEHAVIOR_SPEC.md:321:**触发**：Claude 在对话启动时，`breath()` 之后调用 `dream()`
-./BEHAVIOR_SPEC.md:323:**OB 工具调用**：`dream()`（无参数）
-./BEHAVIOR_SPEC.md:348:**触发**：Claude 在 dream 后决定记录某段记忆带来的感受
-./BEHAVIOR_SPEC.md:360:4. `embedding_engine.generate_and_store(bucket_id, content)` — feel 桶同样有向量（供 dream 结晶检测使用）
-./BEHAVIOR_SPEC.md:450:| `dream()` | embedding 未开启 | 跳过连接提示和结晶提示，仅返回记忆列表 |
-./BEHAVIOR_SPEC.md:451:| `dream()` | 桶列表为空 | 返回 `"没有需要消化的新记忆。"` |
-./BEHAVIOR_SPEC.md:523:          │  被 dream() 消化:                                        │
-./BEHAVIOR_SPEC.md:559:         ├─→ embedding_engine.generate_and_store()（供 dream 结晶检测）
-./BEHAVIOR_SPEC.md:616:- `dream()` 连接提示（best_sim > 0.5）+ 结晶提示（feel 相似度 > 0.7 × ≥2 个）
+./docs/archive/BEHAVIOR_SPEC.md:26:| `server.py` | 注册 MCP 工具（`breath/hold/grow/trace/pulse/dream`）；路由 Dashboard HTTP 请求；`_merge_or_create()` 合并逻辑中枢 |
+./docs/archive/BEHAVIOR_SPEC.md:78:2. dream()                — 消化最近记忆，有沉淀写 feel
+./docs/archive/BEHAVIOR_SPEC.md:319:### 场景 9：用户使用 dream 工具进行记忆沉淀
+./docs/archive/BEHAVIOR_SPEC.md:321:**触发**：Claude 在对话启动时，`breath()` 之后调用 `dream()`
+./docs/archive/BEHAVIOR_SPEC.md:323:**OB 工具调用**：`dream()`（无参数）
+./docs/archive/BEHAVIOR_SPEC.md:348:**触发**：Claude 在 dream 后决定记录某段记忆带来的感受
+./docs/archive/BEHAVIOR_SPEC.md:360:4. `embedding_engine.generate_and_store(bucket_id, content)` — feel 桶同样有向量（供 dream 结晶检测使用）
+./docs/archive/BEHAVIOR_SPEC.md:450:| `dream()` | embedding 未开启 | 跳过连接提示和结晶提示，仅返回记忆列表 |
+./docs/archive/BEHAVIOR_SPEC.md:451:| `dream()` | 桶列表为空 | 返回 `"没有需要消化的新记忆。"` |
+./docs/archive/BEHAVIOR_SPEC.md:523:          │  被 dream() 消化:                                        │
+./docs/archive/BEHAVIOR_SPEC.md:559:         ├─→ embedding_engine.generate_and_store()（供 dream 结晶检测）
+./docs/archive/BEHAVIOR_SPEC.md:616:- `dream()` 连接提示（best_sim > 0.5）+ 结晶提示（feel 相似度 > 0.7 × ≥2 个）
 ./utils.py:502:        "dream": {
 ./utils.py:782:        config.setdefault("dream", {})["api_key"] = env_dream_api_key
 ./utils.py:786:        config.setdefault("dream", {})["base_url"] = env_dream_base_url
@@ -834,17 +834,17 @@
 ./dashboard.html:8598:  var dreamKeyVal = document.getElementById('cfg-dream-key').value;
 ./dashboard.html:8600:    if (!body.dream) body.dream = {};
 ./dashboard.html:8601:    body.dream.api_key = dreamKeyVal;
-./INTERNALS.md:62:- **Dream 做梦**（`dream()`）：返回最近 10 条 + 自省引导 + 连接提示 + 结晶化提示
-./INTERNALS.md:63:- **对话启动流程**：breath() → dream() → breath(domain="feel") → 开始对话
-./INTERNALS.md:85:| `dream` | （无） | 做梦自省 |
-./INTERNALS.md:107:**`dream`** — 做梦/自省触发器：
-./INTERNALS.md:125:- `digested=0/1`：隐藏/取消隐藏记忆（控制是否在 dream 中出现）
-./INTERNALS.md:141:| `/dream-hook` | GET | Dream 钩子 |
-./INTERNALS.md:169:- `/health`, `/breath-hook`, `/dream-hook`, `/mcp*` 路径不受保护（公开）
-./INTERNALS.md:287:| `0.7` | `server.py` dream | feel 结晶相似度阈值 |
-./INTERNALS.md:336:| `10` | `server.py` dream | 取最近 N 个桶 |
-./INTERNALS.md:452:### 5.8 为什么 dream 设计成对话开头自动执行？
-./INTERNALS.md:454:**决策**：每次新对话启动时，Claude 执行 `dream()` 消化最近记忆，有沉淀写 feel，能放下的 resolve。
+./docs/archive/INTERNALS.md:62:- **Dream 做梦**（`dream()`）：返回最近 10 条 + 自省引导 + 连接提示 + 结晶化提示
+./docs/archive/INTERNALS.md:63:- **对话启动流程**：breath() → dream() → breath(domain="feel") → 开始对话
+./docs/archive/INTERNALS.md:85:| `dream` | （无） | 做梦自省 |
+./docs/archive/INTERNALS.md:107:**`dream`** — 做梦/自省触发器：
+./docs/archive/INTERNALS.md:125:- `digested=0/1`：隐藏/取消隐藏记忆（控制是否在 dream 中出现）
+./docs/archive/INTERNALS.md:141:| `/dream-hook` | GET | Dream 钩子 |
+./docs/archive/INTERNALS.md:169:- `/health`, `/breath-hook`, `/dream-hook`, `/mcp*` 路径不受保护（公开）
+./docs/archive/INTERNALS.md:287:| `0.7` | `server.py` dream | feel 结晶相似度阈值 |
+./docs/archive/INTERNALS.md:336:| `10` | `server.py` dream | 取最近 N 个桶 |
+./docs/archive/INTERNALS.md:452:### 5.8 为什么 dream 设计成对话开头自动执行？
+./docs/archive/INTERNALS.md:454:**决策**：每次新对话启动时，Claude 执行 `dream()` 消化最近记忆，有沉淀写 feel，能放下的 resolve。
 ./README.md:156:- `dream.surface_enabled`：允许 `breath()` 在共振或新会话条件下浮现梦。
 ./README.md:157:- `dream.inject_enabled`：允许 Gateway 静默加入一条 Dream Context；默认关闭。
 ./README.md:405:| `word_map` / `dream` | 默认可关闭的派生能力 |
@@ -887,9 +887,9 @@
 ./ENV_VARS.md:83:| `OMBRE_DREAM_MODEL` | `dream.model` | Dream 模型名 |
 ./ENV_VARS.md:84:| `OMBRE_DREAM_ENABLED` | `dream.enabled` | 启用/关闭夜梦 |
 ./ENV_VARS.md:162:  "event": "breath|dream|breath_hook|dream_hook",
-./haven-merge-rules.md:162:但会做 mark_surfaced()（出自MV）— dream 去重用
-./haven-merge-rules.md:216:## dream/introspection 结构
-./haven-merge-rules.md:218:`dream()` 已改名 `introspection()`（`dream()` 保留为兼容旧名，内部转发）。
+./docs/archive/haven-merge-rules.md:162:但会做 mark_surfaced()（出自MV）— dream 去重用
+./docs/archive/haven-merge-rules.md:216:## dream/introspection 结构
+./docs/archive/haven-merge-rules.md:218:`dream()` 已改名 `introspection()`（`dream()` 保留为兼容旧名，内部转发）。
 ./gateway.py:543:        self.dream_cfg = config.get("dream", {}) if isinstance(config.get("dream", {}), dict) else {}
 ./gateway.py:1741:        dream_cfg = self.config.setdefault("dream", {})
 ./gateway.py:1762:                updated.append(f"dream.{key}")
@@ -909,9 +909,9 @@
 ./docs/memory-layer-contract.md:45:| Dream | dream engine latent/surfaced item | Not normal recall seed | Original dream text | Surfaces once when dream resonance passes | Dream-level surface rules | Can later create edges/rings | Do not truncate in memory layer |
 ./docs/reference.md:71:| `dream_engine.py` | 自动 dream |
 ./docs/reference.md:348:GET /dream-hook                       # /introspection-hook 的旧兼容路径（清醒自省），不是夜梦生成
-./docs/deploy-zeabur.md:14:- `/state`：`gateway_state.db`、`memory_moments.sqlite`、`memory_nodes.sqlite`、`memory_edges.jsonl`、persona/portrait/dream 等运行态文件
-./docs/deploy-zeabur.md:15:- `config.yaml`：私有身份、上游模型、召回、persona、dream、reflection 等配置
-./docs/deploy-zeabur.md:189:   - `dream`
+./docs/archive/deploy-zeabur.md:14:- `/state`：`gateway_state.db`、`memory_moments.sqlite`、`memory_nodes.sqlite`、`memory_edges.jsonl`、persona/portrait/dream 等运行态文件
+./docs/archive/deploy-zeabur.md:15:- `config.yaml`：私有身份、上游模型、召回、persona、dream、reflection 等配置
+./docs/archive/deploy-zeabur.md:189:   - `dream`
 ./bucket_manager.py:1513:        Used by dream() to skip buckets already shown in the same open-window
 ./bucket_manager.py:1516:        标记一个桶刚被 breath() 浮现过。用于 dream() 去重——同一次开窗序列里
 ./bucket_manager.py:1517:        breath 已经浮现的桶，dream 不再重复返回全文。不动 last_active/

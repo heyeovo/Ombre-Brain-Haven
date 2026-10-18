@@ -1,3 +1,5 @@
+已归档（2026-10-18），现行内容见 docs/reference.md
+
 # Ombre Brain — 内部开发文档 / INTERNALS
 
 > 本文档面向开发者和维护者。记录功能总览、环境变量、模块依赖、硬编码值和核心设计决策。
@@ -189,7 +191,7 @@
 **迁移/批处理工具**：`migrate_to_domains.py`、`reclassify_domains.py`、`reclassify_api.py`、`backfill_embeddings.py`、`write_memory.py`、`check_buckets.py`、`import_memory.py`（历史对话导入引擎）
 
 **降级策略**
-- 脱水 API 不可用 → 直接抛 RuntimeError（设计决策，详见 BEHAVIOR_SPEC.md 三、降级行为表）
+- 脱水 API 不可用 → 直接抛 RuntimeError（设计决策，详见 docs/archive/BEHAVIOR_SPEC.md 三、降级行为表）
 - 向量搜索不可用 → 纯 fuzzy match
 - 逐条错误隔离（grow 中单条失败不影响其他）
 
@@ -415,7 +417,7 @@
 **理由**：
 - MCP 上下文有 token 限制，原始对话冗长，需要压缩
 - LLM 压缩能保留语义和情感色彩，纯截断会丢信息
-- 本地关键词提取质量不足以替代语义打标与合并，静默降级会产生错误分类记忆，比报错更危险。详见 BEHAVIOR_SPEC.md 三、降级行为表。
+- 本地关键词提取质量不足以替代语义打标与合并，静默降级会产生错误分类记忆，比报错更危险。详见 docs/archive/BEHAVIOR_SPEC.md 三、降级行为表。
 
 **放弃方案**：只做截断。信息损失太大。
 

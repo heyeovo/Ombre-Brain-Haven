@@ -1,3 +1,5 @@
+已归档（2026-10-18），现行内容见 docs/reference.md
+
 ---
 name: haven-merge-rules
 description: Ombre-Brain-Haven merge rules and key design decisions
@@ -19,7 +21,7 @@ metadata:
 | 文件 | 策略 |
 |------|------|
 | `.gitignore` | 两边都保留（互补） |
-| `INTERNALS.md` | 合并：HEAD 7 Tab + 自用版认证文档段 + 设置 Tab |
+| `docs/archive/INTERNALS.md` | 合并：HEAD 7 Tab + 自用版认证文档段 + 设置 Tab |
 | `README.md` | 全部 HEAD（全新的 Haven 文档） |
 | `dashboard.html` | 全部 HEAD |
 | `dehydrator.py` | 全部 HEAD |

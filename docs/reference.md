@@ -14,7 +14,7 @@ Ombre Brain 是 AI 长期情绪记忆系统后端。当前为 Haven/Rain Fork：
 
 - **语言**：Python 3.10+
 - **框架**：FastMCP + Starlette（HTTP 模式）
-- **关键依赖**：jieba（中文分词）、httpx（LLM API 调用）、PyYAML、mcp（钉死 1.27.2，防 Zeabur ModuleNotFoundError）
+- **关键依赖**：jieba（中文分词）、httpx（LLM API 调用）、PyYAML、mcp（版本约束见 requirements.txt）
 - **LLM**：通过 OpenAI 兼容 API 调用（`OMBRE_API_KEY` + `OMBRE_BASE_URL` 配置）
 
 ## 启动方式
@@ -53,7 +53,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `automation_executor.py` | 人工批准候选的白名单执行器；当前只注册 `weekly_journey`，负责冲突校验、批准稿 hash、派生 operation ID、重复确认回放、两步切换恢复及确认完成时原子推进轨迹游标 |
 | `journey_weekly_engine.py` | 每周触发的 journey 只读输入聚合与严格三类候选生成；从已确认截止日下一天连续读取到最近完整 OB 日，积压单次最多 31 天，读取开放阶段、日回顾、新桶/独立 feel/旧桶 feel 年轮并排除旧日印象/关系天气 feel |
 | `bucket_manager.py` | 桶 CRUD、搜索、评分、回收站、命中统计、分词 |
-| `dehydrator.py` | LLM 脱水、合并、打标；三类调用共用可热更新的 dehydration token、temperature、thinking 参数（含 `_last_merge_usage` 成本追踪） |
+| `dehydrator.py` | 原文加元数据头的输出格式化、LLM 合并、打标与摘记；模型调用共用可热更新的 dehydration token、temperature、thinking 参数（含 `_last_merge_usage` 成本追踪） |
 | `decay_engine.py` | 衰减引擎，只计算排序 score；不自动 resolved、digested 或 archive |
 | `embedding_engine.py` | 向量嵌入 + 相似度搜索；可区分当前模型可用、缺失、损坏及模型/维度过期的桶向量状态；每个事件循环各用一个 API 客户端（Brain 调度线程各有循环）；记录运行态健康快照（最近成功/失败、错误类型、连续失败数） |
 | `embedding_maintenance.py` | 单桶向量刷新重试（2s/10s/30s）+ 缺失/过期向量巡检：Brain 启动约 40 秒后自检一次向量接口，之后按 `embedding.sweep_interval_minutes`（默认 30）巡检、每次最多补 `sweep_limit` 张；`POST /admin/backfill` 用同一个巡检器不限量补齐。结果见 `GET /api/status` 的 `embedding` 字段 |
@@ -362,6 +362,26 @@ GET /api/debug/injections             # 注入调试；含检索前排除桶及 
 
 普通召回一旦可靠命中桶，输出正文后会按 `read_bucket` 的标签格式附带该桶年轮；年轮仍不能独立成为召回 seed。大桶进入局部窗口模式时优先保留受 token 预算约束的年轮文本，再压缩正文窗口。
 
+### 桶存储与激活边界
+
+`bucket_manager.py` 将长期记忆保存为 Markdown + YAML frontmatter，embedding 派生索引独立存于 `buckets_dir/embeddings.db`，可重新生成。Journal 是独立目录与读取通道，不进入普通 `list_all()` / `search()`。
+
+新桶 `activation_count=0`；普通 `update()` 编辑正文或元数据不自动刷新 `last_active` 或激活次数。`touch()` 更新激活时间并增加次数，`mark_surfaced()` 仅记录 `last_breath_surfaced`，不影响衰减计时。`resolved=True` 不自动搬入 archive；生命周期变更须显式操作。
+
+### 衰减分与生命周期
+
+`decay_engine.calculate_score()` 使用浮点激活次数（至少按 1 计），短期（距激活不超过 3 天）时间/情感权重为 0.7/0.3，长期对调。`resolved` 降权为 0.05，兼有 `digested` 时为 0.02；未解决且 arousal > 0.7 时乘 1.5。pinned/protected/permanent 返回 999，feel 返回 50。后台周期只计算分数和统计，不自动结案、消化或归档；此分数也不替代 Gateway 的统一召回决策。
+
+### 输出格式化与摘记失败边界
+
+`Dehydrator.dehydrate()` 直接返回元数据头与原文，不调用 LLM 压缩。不能把旧规格的“所有公开方法均要求 API”应用到此方法。模型打标、合并、长内容摘记仍走各自模型调用；失败是否回退由调用入口决定。`grow()` 非直接结构化内容的短输入（少于 30 字）跳过 digest，analyze 失败用默认打标；长输入 digest 失败返回错误，成功拆分后的单条写入异常隔离，不阻止其他条目。
+
+### 自省与显式关联
+
+`introspection()` 支持创建日期过滤和分页（limit 1–30），排除 permanent/feel/journey、resolved/digested、pinned/protected 与最近 10 分钟 breath 已浮现的桶。`dream()` 仅兼容转发到 `introspection()`，不是另一套固定开窗流程。
+
+frontmatter 的 `related` 是手工关联字段，`state/memory_edges.jsonl` 是显式关系边，两者不等同；关系边参与召回时仍受统一审核与单卡上限约束，见「重构召回正式决策」。
+
 ### 噪声系统
 噪声 = `resolved=true AND importance=1`。标记时写入 `importance_before_noise` 备份；撤销时自动恢复。`search()` 默认排除，`include_noise=true` 可包含。各 API 响应含 `"noise": bool` 字段。
 
@@ -413,7 +433,7 @@ cc 配置/用户数据由 **Gateway** 持久化到 Haven 数据库，路由注�
 /api/cc/pro-usage-snapshot  # 当前 profile 最近一次 Pro 额度快照；GET / POST 单条覆盖
 /api/notifications/bark     # Bark 掩码配置、最近状态与测试推送；GET / PATCH / POST
 ```
-Dashboard 的 cc 代理通过服务端 Bearer 访问这些路由；外观使用专用 `/api/appearance` 代理，其他通用 Gateway 请求可走 `/api/gateway/[...path]`。
+这些 Gateway 路由要求服务端 Bearer；Dashboard 代理路径见 dashboard `docs/reference.md`「文件结构速查」的 `app/api` 行。
 
 外观配置与当前单张背景图存 `gateway_state.db`，不是 Dashboard 本地文件。配置接受 `apricot`（默认）、`sakura`、`mist`、`dusk`、`pearl`、`canopy`、`rain`、`silver` 八主题；旧 `linen` 归一化为 `apricot`。背景接受 gradient/upload/none，另有玻璃参数、标题字体与字号、雨痕模式与强度；upload 只能引用库中当前 asset ID。`font` 保留整体 `scale`（0.85–1.3），并有独立的 `titleScale`、`bodyScale`、`metaScale`（各 0.85–1.4，默认 1）；旧配置缺少三项时自动补默认值。上传限 JPEG/PNG/WebP、5 MB 与 3000 万像素，服务端修正 EXIF 方向并压到最长边 1920px 的 JPEG。删除图片时上传背景配置回到 gradient；旧库建表迁移可重复执行。
 
@@ -423,25 +443,25 @@ Dashboard 的 cc 代理通过服务端 Bearer 访问这些路由；外观使用�
 
 正式日回顾的定时与手动入口直接调用 `DailyReviewEngine.generate()`，不经过切片联合 JSON。`ConversationSliceEngine.generate_daily_bundle()` 作为未完成能力保留，但不接入正式日界任务；从原文态退出仍只排 `raw_exit`，切片失败仍可排 `slice_recovery`，后台暂不自动消费这两类队列，只有 `/api/conversation-slices` 的人工任务控制会显式运行。历史任务先返回消息数、估算输入 token、预计调用次数及签名，确认签名后只创建 queued 任务，首批最多 14 个真实聊天日。当前仍没有切片关键词/向量召回、召回透镜线路或正式 Context 注入。
 
-Dashboard 从窗口状态恢复最后活跃 CC lane、Persona、冻结 prompt 与 resume id，通过统一协调器串行进入同一个 Agent SDK iterator；成功用户/wake turn 在 Haven 单事务提交消息、活动/cache 时间、turn-local wake 决定和 silence timer。Haven Brain 每 30 秒按持久 `due_at` 领取任务，Dashboard 取得后台协调器门禁后再原子 begin；旧 version、无效 silence 来源、重复 callback、过期 lease、失败退避、24 小时无用户活动和滚动后台 turn 上限均由持久状态恢复与约束。
+Haven Brain 每 30 秒按持久 `due_at` 领取 wake 任务；成功用户/wake turn 在 Haven 单事务提交消息、活动/cache 时间、turn-local wake 决定和 silence timer。版本、lease 与失败退避由持久状态约束；Dashboard 的协调器、SDK iterator 与恢复流程见 dashboard `docs/reference.md`「cc 数据持久化契约」。
 
 其余会话持久化契约：
 
-- 订阅、API 中转站和 selfhost 共用的协作者基础提示词存 `cc_personas.base_prompt`，默认值为原 cc 闲聊模式提示词；短暂使用过的旧 selfhost 三句默认文案在读取时迁成该统一默认。提示词模块存 `cc_personas.prompt_modules`，每条包含 id、名称、正文和默认启停，组装时以 `【模块名称】` 标明边界。旧 `prompt` 在读取时兼容成一个默认开启模块。当前窗口的差异化启停存 `conversation_sessions.prompt_module_overrides_json`，未覆盖的模块继续跟随协作者默认。
-- 新建提示词模块可以先保存空正文，再进入独立编辑页；空正文模块保留在 `cc_personas.prompt_modules`，组装系统提示词时跳过，不改变新窗口已有提示词。
+- 订阅、API 中转站和 selfhost 共用的协作者基础提示词存 `cc_personas.base_prompt`，默认值为原 cc 闲聊模式提示词；短暂使用过的旧 selfhost 三句默认文案在读取时迁成该统一默认。提示词模块存 `cc_personas.prompt_modules`，每条包含 id、名称、正文和默认启停，Dashboard 的提示词组装见 dashboard `docs/reference.md`「cc 数据持久化契约」。旧 `prompt` 在读取时兼容成一个默认开启模块。当前窗口的差异化启停存 `conversation_sessions.prompt_module_overrides_json`，未覆盖的模块继续跟随协作者默认。
+- 空正文提示词模块可保存在 `cc_personas.prompt_modules`；Dashboard 的编辑与组装行为见 dashboard `docs/reference.md`「cc 数据持久化契约」。
 - 一个 `session_id` 永久绑定一个 `persona_id`；旧窗口从首轮 `client="ob2-chat/<persona>"` 回填，无主历史归 `ombre`。
 - `conversation_sessions.recall_mode` 保存单窗口召回覆盖：`''` 跟随窗口模式（CHAT 开、WORK 关），`on` 强制开，`off` 强制关。旧库补列默认 `''`，状态 PATCH 使用版本冲突检查并按 profile/session 隔离；它不存入会在追加 turn 时重建的 `cc_overrides_json`。
-- `local_engine_preference` 只保存用户的本地首选；Vercel 的 `effective_engine=selfhost` 不得写回。
-- `handoff_snapshot_json` 按 `profile_id + session_id` 保存 Dashboard 已完成统一预算裁剪的换窗正文与统计；只接受首次写入，后续轮次和幂等重试不得覆盖。CC 每条原生线路启动时与无状态 selfhost 每轮读取同一快照，避免切引擎、重启或换设备后丢失钉选桶、最近记忆、feel、journal、日回顾或旧聊天原文。
+- `local_engine_preference` 保存用户首选；Dashboard 的有效引擎选择见 dashboard `docs/reference.md`「cc 数据持久化契约」。
+- `handoff_snapshot_json` 按 `profile_id + session_id` 保存 Dashboard 已完成统一预算裁剪的换窗正文与统计；只接受首次写入，后续轮次和幂等重试不得覆盖。调用端的选择、预算裁剪与注入规则见 dashboard `docs/reference.md`「cc 数据持久化契约」。
 - `GatewayStateStore` 初始化先用 `BEGIN IMMEDIATE` 取得写事务，再执行幂等迁移；成功提交、异常回滚，所有出口都关闭连接，避免并发初始化读锁升级冲突及失败后的锁泄漏。Brain 自动任务定时器复用启动时已初始化的 `gateway_state_store`，不重复迁移。
 - `frozen_persona_append` 按 `profile_id + session_id` 首次写入后冻结，保存 CC 实际系统提示词追加前缀；Dashboard 重部署或换设备后继续读取原值，窗口永久删除时随 `conversation_sessions` 一起删除。`frozen_persona_append_initialized` 区分“尚未写入”和“已冻结为空串”，旧库迁移可重复执行。
-- `cc_pro_usage_snapshot` 每个 profile 只保留最近一条 Claude Pro 额度快照，新读取覆盖旧值，不按窗口累积；Dashboard 无在线 Pro 子进程时把它作为带时间戳的上次值显示。
+- `cc_pro_usage_snapshot` 每个 profile 只保留最近一条 Claude Pro 额度快照，新读取覆盖旧值，不按窗口累积；Dashboard 的展示规则见 dashboard `docs/reference.md`「cc 数据持久化契约」。
 - 严格写入用 `request_id` 防重复，用 `expected_last_round_id` 拒绝基于旧历史的跨设备追加；SQLite `BEGIN IMMEDIATE` 内统一分配下一轮。
 - 正常用户 turn 成功写入时在同一事务按窗口配置只采样一次 `conversation_silence_check_at`，并绑定 `silence_source_turn_id` / `silence_policy_version`；幂等重放不重采样。下一条用户消息进入模型前通过独立原子操作取消仍在未来的 timer。Wake turn 不更新 `last_user_activity_at`，只更新 heartbeat/model 活动；cache deadline 仅随调用端已确认 cache read/write 的请求开始时间刷新。
 - 附件先按窗口暂存，严格写入把有序 ID + SHA-256 纳入幂等指纹并在同一事务绑定轮次；图片接受 JPEG/PNG/WebP（压缩后单张不超过 2MB），上传时从文件头保存宽高并按 Anthropic 视觉缩放规则估算 token；文件接受 PDF/DOCX/MD/TXT/CSV（单个不超过 4MB，并保存浏览器提取的受限正文及其完整注入包装估算），每轮两类合计不超过 4 个。私有读取必须经 Bearer 网关，未绑定附件 24 小时后在后续上传时清理；按 `kind=image/file` 分类清除互不影响，文件清除同时擦除解析正文，但已保存 token 估算保留供历史统计。
-- `/api/conversation/turn?request_id=` 可在进程重启或换设备后读回严格写入结果；调用端校验 session/persona/user 原文后重放已保存过程，不再请求上游。
-- `cc_overrides_json` 保存当前 CC Pro/API 路由及各自模型、力度、thinking 和 API provider 选择；`cc_lanes_json` 按 `subscription` / `api:<provider_id>` 分别保存 Claude 原生 `cc_session_id`、同一恢复指针的 `context_revision` 与 `seen_round_id`。新 CC 会话编号只能和它对应的 revision 成对更新；本轮未取得编号时只推进游标，不得让新 revision 继续指向旧 transcript。编号真实切换时同时保留 `previous_cc_session_id` / `previous_context_revision` / `previous_seen_round_id` 作为上一已知检查点。人工正文恢复必须由 Dashboard 先持久化新 transcript，再以旧 ID、当前 revision 和 `state_version` 三重 CAS 调用 `rolling_recovery_commit`；成功后在 lane 写入 `last_body_recovery` 计数，不修改或复制 `conversation_turns`。只有该线路的 CC 轮次严格写入成功才推进自身游标；旧 `cc_seen_round_id` 仅保留兼容。
-- `rolling_context_json` 保存固定窗口/按天滚动策略、时区、日界小时、逐日 `raw/review/omit` 三态，以及钉选桶、日记、最近普通桶、feel、随机高重要度桶的已选 ID；钉选桶另存 `pinned_snapshot`（ID、标题、正文、顺序，空数组有效），CC 前台、后台 wake、selfhost 与审计复用，桶修改/取消钉选/删除不刷新。Dashboard 显式保存滚动配置时捕获新快照；相同选择但快照变化也递增 revision。其余背景层仍每轮按 ID 读取最新正文，并再次排除已归档、噪音、已解决或已消化的非钉选桶。旧 revision 缺快照时首次模型请求先通过 `rolling_pinned_snapshot` 原子补齐 session 和当前 context_versions JSON：按 profile/session/persona + expected_context_revision 校验、拒绝软删除窗口、首次写入胜出，revision/state_version 不变；这是一次性版本补齐，其后快照冻结。审计仅预览不补齐。旧客户端真实修改配置但不提供快照时使快照失效，在下一请求重新初始化；新客户端保存时提供完整新快照，无数据库新列。每次真实修改递增 `context_revision`，记录当时 `context_turn_watermark`，并以 `previous_strategy`、`previous_day_modes` 标明紧邻上一 revision 的策略和日期模式。首次 fixed→rolling 可同时保存用户明确确认的 `allow_fixed_body_restore`：Dashboard 仍优先迁移 SDK 默认 transcript，只有旧 transcript 缺失或部分 raw 轮次无法对齐时才可正文恢复。CC lane 写入同轮 revision，调用端不得用旧 revision 的 `cc_session_id` 直接恢复新配置；Dashboard 据此强制保真迁移 raw→raw 日期，只允许 review/omit→raw 日期恢复 Haven 正文，迁移类型未知或持久 transcript 缺失时不得静默降级。滚动模式的桶排除集合同步当前 Context：`created` / `breath` 覆盖所有当前 raw 日，`recalled` 覆盖最新 raw 日与当前 revision 重建后的注入；旧召回被剥离或日期退出 raw 后，若无其他原因则允许再次召回。
+- `/api/conversation/turn?request_id=` 可在进程重启或换设备后读回严格写入结果；调用端的校验与结果重放见 dashboard `docs/reference.md`「cc 数据持久化契约」。
+- `cc_overrides_json` 保存当前 CC Pro/API 路由及各自模型、力度、thinking 和 API provider 选择；`cc_lanes_json` 按 `subscription` / `api:<provider_id>` 分别保存 Claude 原生 `cc_session_id`、同一恢复指针的 `context_revision` 与 `seen_round_id`。新 CC 会话编号只能和它对应的 revision 成对更新；本轮未取得编号时只推进游标，不得让新 revision 继续指向旧 transcript。编号真实切换时同时保留 `previous_cc_session_id` / `previous_context_revision` / `previous_seen_round_id` 作为上一已知检查点。`rolling_recovery_commit` 以旧 ID、当前 revision 和 `state_version` 三重 CAS 提交人工恢复指针；Dashboard 的 transcript 写入前置条件见 dashboard `docs/reference.md`「cc 数据持久化契约」。成功后在 lane 写入 `last_body_recovery` 计数，不修改或复制 `conversation_turns`。只有该线路的 CC 轮次严格写入成功才推进自身游标；旧 `cc_seen_round_id` 仅保留兼容。
+- `rolling_context_json` 保存固定窗口/按天滚动策略、时区、日界小时、逐日 `raw/review/omit` 三态，以及钉选桶、日记、最近普通桶、feel、随机高重要度桶的已选 ID；钉选桶另存 `pinned_snapshot`（ID、标题、正文、顺序，空数组有效），桶修改/取消钉选/删除不刷新已保存快照；相同选择但快照变化也递增 revision。Dashboard 的快照捕获、背景层读取与各引擎注入见 dashboard `docs/reference.md`「cc 数据持久化契约」。旧 revision 缺快照时首次模型请求先通过 `rolling_pinned_snapshot` 原子补齐 session 和当前 context_versions JSON：按 profile/session/persona + expected_context_revision 校验、拒绝软删除窗口、首次写入胜出，revision/state_version 不变；这是一次性版本补齐，其后快照冻结。审计仅预览不补齐。旧客户端真实修改配置但不提供快照时使快照失效，在下一请求重新初始化；新客户端保存时提供完整新快照，无数据库新列。每次真实修改递增 `context_revision`，记录当时 `context_turn_watermark`，并以 `previous_strategy`、`previous_day_modes` 标明紧邻上一 revision 的策略和日期模式。首次 fixed→rolling 可同时保存 `allow_fixed_body_restore`。CC lane 写入同轮 revision；Dashboard 的 transcript 迁移与正文恢复规则见 dashboard `docs/reference.md`「cc 数据持久化契约」。滚动模式的桶排除集合同步当前 Context：`created` / `breath` 覆盖所有当前 raw 日，`recalled` 覆盖最新 raw 日与当前 revision 重建后的注入；旧召回被剥离或日期退出 raw 后，若无其他原因则允许再次召回。
 - `context_gc_json` 按窗口保存默认关闭的 05:30 自动开关、始终保留 key、最近 20 次释放估算和旧/新 Claude session 指针。减负只更新 `cc_lanes_json` 指针与 GC 日志，不复制或改写 `conversation_turns`；提交必须同时命中 `state_version` 和旧 `cc_session_id`，否则冲突失败。
 - 兼容冷却的已召回桶继续落 `injected_buckets`，本窗口写入桶继续落 `session_created_buckets`；新的 `conversation_bucket_exclusions` 在同事务记录 `created/recalled/breath`、round、context revision 和观测时间，作为滚动 Context 隔离原因的事实源。`gateway_schema_migrations` 保证升级时只扫描一次历史 `raw_json.tools`，回填旧 `hold/breath` 结果中可识别的 bucket ID。召回冷却读取 `injected_at` 时把旧无时区值与新 UTC-aware 值统一按 UTC 计算，避免混合时间格式导致 hook recall 500。
 - 永久删除会先删除该窗口附件文件，再清理带 `profile_id` 的窗口数据，不删除长期记忆桶；旧的无 profile 诊断/冷却表暂不清理。

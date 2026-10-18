@@ -19,9 +19,11 @@ Ombre Brain 记忆系统后端（Python FastMCP + Starlette，Brain `server.py` 
 - `AGENTS.md`：入口、必读清单、硬规矩。
 - `docs/reference.md`：当前已经成立的模块、路由和实现契约，不记录阶段进度或后续窗口任务。
 - 系统级总览、部署和客户端接入以 `README.md` 为准；环境变量以 `ENV_VARS.md` 为准。
+- `docs/handoff/README.md`：Haven 历史交接与方案状态索引，正文默认不读。
+- `docs/archive/`：已停用部署指南及旧内部规格 / 合并记录，仅供追溯，不作为现行契约。
 - 给外部模型的行为指引：`CLAUDE_PROMPT.md`、`docs/Tool Guide.md`。
 - 跨仓库改动完成后，按相邻 dashboard 仓库的 `MAINTENANCE_CONTRACT.md` 判断需要同步的文档。
-- 待办分流见 dashboard 仓库 `MAINTENANCE_CONTRACT.md` 铁律 4：想做的活 → OB Todo，代码债和技术卡 → dashboard `TECH_DEBT.md`，handoff 是历史档案（状态看 dashboard `docs/handoff/README.md`）。
+- 待办分流见 dashboard 仓库 `MAINTENANCE_CONTRACT.md` 铁律 4：想做的活 → OB Todo，代码债和技术卡 → dashboard `TECH_DEBT.md`，handoff 是历史档案（Haven 状态看 `docs/handoff/README.md`，dashboard 状态看该仓库同名索引）。
 
 ## 持久化与迁移
 

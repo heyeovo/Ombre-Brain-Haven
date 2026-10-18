@@ -4694,6 +4694,44 @@ class GatewayStateStore:
         conn.close()
         return [{"day": row["chat_day"], "turn_count": int(row["turn_count"])} for row in rows]
 
+    def conversation_word_stats(self, *, profile_id: str) -> list[dict[str, Any]]:
+        """Per-day, per-mode character counts across the profile's live sessions.
+
+        Counts characters with spaces/newlines/tabs stripped; soft-deleted sessions
+        are left out. Never returns message bodies.
+        """
+        safe_profile_id = str(profile_id or "default").strip() or "default"
+        strip = "REPLACE(REPLACE(REPLACE(REPLACE({col}, ' ', ''), char(10), ''), char(13), ''), char(9), '')"
+        conn = self._connect()
+        rows = conn.execute(
+            f"""
+            SELECT turns.chat_day AS chat_day,
+                   COALESCE(NULLIF(sessions.mode, ''), 'chat') AS mode,
+                   COUNT(*) AS turn_count,
+                   SUM(LENGTH({strip.format(col='turns.user_text')})) AS user_chars,
+                   SUM(LENGTH({strip.format(col='turns.assistant_text')})) AS assistant_chars
+            FROM conversation_turns AS turns
+            LEFT JOIN conversation_sessions AS sessions
+              ON sessions.profile_id = turns.profile_id AND sessions.session_id = turns.session_id
+            WHERE turns.profile_id = ? AND turns.chat_day != ''
+              AND (sessions.deleted_at IS NULL OR sessions.deleted_at = '')
+            GROUP BY turns.chat_day, mode
+            ORDER BY turns.chat_day, mode
+            """,
+            (safe_profile_id,),
+        ).fetchall()
+        conn.close()
+        return [
+            {
+                "day": row["chat_day"],
+                "mode": row["mode"] if row["mode"] in {"chat", "work"} else "chat",
+                "turn_count": int(row["turn_count"] or 0),
+                "user_chars": int(row["user_chars"] or 0),
+                "assistant_chars": int(row["assistant_chars"] or 0),
+            }
+            for row in rows
+        ]
+
     def list_conversation_context_days(
         self,
         *,

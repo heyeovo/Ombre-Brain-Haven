@@ -89,6 +89,34 @@ class GatewayStateContractsTest(unittest.TestCase):
         self.assertNotIn("private body", str(days))
         self.assertEqual(store.list_conversation_chat_days(profile_id="one", session_id="other"), [])
 
+    def test_word_stats_count_chars_by_day_and_mode_without_deleted_or_other_profiles(self):
+        store = self.make_store()
+        turns = (
+            ("one", "chat-s", 20, "你好 呀\n", "嗯，在"),
+            ("one", "chat-s", 20, "ab", ""),
+            ("one", "work-s", 20, "查一下", "SELECT 1"),
+            ("one", "gone-s", 20, "删掉的", "不算"),
+            ("two", "chat-s", 20, "别的人", "不算"),
+        )
+        for round_id, (profile, session, day, user, assistant) in enumerate(turns, 1):
+            store.record_conversation_turn(
+                profile_id=profile, session_id=session, round_id=round_id,
+                user_text=user, assistant_text=assistant,
+                created_at=datetime(2026, 9, day, 12, 0, tzinfo=timezone.utc),
+            )
+        store.patch_conversation_session_state(
+            profile_id="one", session_id="work-s", persona_id="ombre", updates={"mode": "work"},
+        )
+        store.soft_delete_conversation_session(profile_id="one", session_id="gone-s")
+
+        stats = store.conversation_word_stats(profile_id="one")
+
+        self.assertEqual(stats, [
+            {"day": "2026-09-20", "mode": "chat", "turn_count": 2, "user_chars": 5, "assistant_chars": 3},
+            {"day": "2026-09-20", "mode": "work", "turn_count": 1, "user_chars": 3, "assistant_chars": 7},
+        ])
+        self.assertNotIn("你好", str(stats))
+
     def test_session_list_exposes_mode_and_engine_preference(self):
         store = self.make_store()
         self.commit(store, request_id="request-mode", expected=0, persona_id="ombre")

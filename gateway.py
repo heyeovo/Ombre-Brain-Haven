@@ -3502,6 +3502,12 @@ class GatewayService:
             if not state:
                 return JSONResponse({"error": "session not found"}, status_code=404)
             payload: dict[str, Any] = {"ok": True, "session": state}
+            if self._truthy_header(request.query_params.get("include_rolling_seed")):
+                payload["rolling_seed"] = self.state_store.find_conversation_rolling_seed(
+                    profile_id=profile_id, session_id=session_id,
+                    context_revision=int(state.get("context_revision") or 0),
+                    native_session_id=str(request.query_params.get("native_session_id") or ""),
+                )
             if self._truthy_header(request.query_params.get("include_context_days")):
                 payload["context_days"] = self.state_store.list_conversation_context_days(
                     profile_id=profile_id,

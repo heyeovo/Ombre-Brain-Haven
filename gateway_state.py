@@ -4599,7 +4599,10 @@ class GatewayStateStore:
             }
             if "pinned_snapshot" in config and "pinned_snapshot" in current:
                 comparable_current["pinned_snapshot"] = current["pinned_snapshot"]
-            if next_config == comparable_current:
+            rebuild_revision = config.get("rebuild_revision", False)
+            if not isinstance(rebuild_revision, bool):
+                raise ValueError("rolling_context.rebuild_revision must be boolean")
+            if next_config == comparable_current and not rebuild_revision:
                 conn.rollback()
                 return self.get_conversation_session_state(
                     profile_id=safe_profile_id, session_id=safe_session_id,
@@ -4694,6 +4697,27 @@ class GatewayStateStore:
         conn.close()
         return [{"day": row["chat_day"], "turn_count": int(row["turn_count"])} for row in rows]
 
+    def find_conversation_rolling_seed(
+        self, *, profile_id: str, session_id: str, context_revision: int, native_session_id: str,
+    ) -> dict[str, Any] | None:
+        """Exact persisted receipt, independent of the recent-turn pagination window."""
+        if not native_session_id:
+            return None
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """SELECT json_extract(raw_json, '$.rolling_seed') AS seed
+                   FROM conversation_turns
+                   WHERE profile_id = ? AND session_id = ? AND json_valid(raw_json)
+                     AND json_extract(raw_json, '$.rolling_seed.contextRevision') = ?
+                     AND json_extract(raw_json, '$.rolling_seed.newSessionId') = ?
+                   ORDER BY id DESC LIMIT 1""",
+                (str(profile_id or "default"), session_id, context_revision, native_session_id),
+            ).fetchone()
+            return json.loads(row["seed"]) if row else None
+        finally:
+            conn.close()
+
     def list_conversation_context_days(
         self,
         *,
@@ -4745,7 +4769,7 @@ class GatewayStateStore:
                 "token_estimate": {
                     "conversation": 0,
                     "tools": 0,
-                    "attachments": 0,
+                    "attachments": 0, "attachment_image_tokens": 0,
                     "recall": 0,
                     "thinking": 0,
                     "timestamps": 0,
@@ -4784,6 +4808,8 @@ class GatewayStateStore:
                 except OSError:
                     tokens = 0
             if tokens > 0:
+                if str(row["kind"] or "image") == "image":
+                    item["token_estimate"]["attachment_image_tokens"] += tokens
                 item["token_estimate"]["attachments"] += tokens
                 item["token_estimate"]["total"] += tokens
             else:
@@ -4794,7 +4820,7 @@ class GatewayStateStore:
                 "day": day, "turn_count": 0, "raw_chars": 0,
                 "first_turn_id": 0, "last_turn_id": 0, "review": None,
                 "token_estimate": {
-                    "conversation": 0, "tools": 0, "attachments": 0,
+                    "conversation": 0, "tools": 0, "attachments": 0, "attachment_image_tokens": 0,
                     "recall": 0, "thinking": 0, "timestamps": 0,
                     "message_overhead": 0, "agent_wake": 0, "total": 0,
                 },

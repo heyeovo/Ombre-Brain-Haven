@@ -60,6 +60,7 @@ class GatewayStateContractsTest(unittest.TestCase):
         self.assertGreater(estimate["conversation"], 0)
         self.assertGreater(estimate["tools"], 0)
         self.assertGreater(estimate["attachments"], 0)
+        self.assertEqual(estimate["attachment_image_tokens"], 0)
         self.assertEqual(estimate["recall"], 42)
         self.assertGreater(estimate["thinking"], 0)
         self.assertGreater(estimate["timestamps"], 0)
@@ -129,6 +130,7 @@ class GatewayStateContractsTest(unittest.TestCase):
         self.assertEqual(attachment["image_height"], 1000)
         self.assertEqual(attachment["estimated_tokens"], 1334)
         self.assertEqual(days[0]["token_estimate"]["attachments"], 1334)
+        self.assertEqual(days[0]["token_estimate"]["attachment_image_tokens"], 1334)
         self.assertEqual(days[0]["attachment_unknown_count"], 0)
 
         # Attachments uploaded before the dimension migration are calculated from
@@ -144,6 +146,104 @@ class GatewayStateContractsTest(unittest.TestCase):
         )
         self.assertEqual(legacy_days[0]["token_estimate"]["attachments"], 1334)
         self.assertEqual(legacy_days[0]["attachment_unknown_count"], 0)
+
+    def test_image_tokens_are_attachment_subset_for_mixed_and_cleared_images(self):
+        store = self.make_store()
+        png = (b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR"
+               + (1000).to_bytes(4, "big") * 2 + b"\x08\x06\x00\x00\x00")
+        image = store.create_conversation_attachment(
+            profile_id="default", session_id="mixed", filename="photo.png", data=png,
+        )
+        file = store.create_conversation_attachment(
+            profile_id="default", session_id="mixed", filename="notes.txt", data=b"file body", kind="file", text_content="file body",
+        )
+        store.commit_conversation_turn(
+            profile_id="default", session_id="mixed", persona_id="ombre", request_id="mixed-turn",
+            expected_last_round_id=0, user_text="look", assistant_text="ok", source="cc",
+            attachment_ids=[image["id"], file["id"]],
+        )
+        def estimate():
+            return store.list_conversation_context_days(
+                profile_id="default", session_id="mixed", persona_id="ombre",
+            )[0]["token_estimate"]
+        before = estimate()
+        self.assertEqual(before["attachment_image_tokens"], 1334)
+        self.assertGreater(before["attachments"], before["attachment_image_tokens"])
+        self.assertEqual(before["total"], sum(v for k, v in before.items() if k not in {"total", "attachment_image_tokens"}))
+        store.clear_conversation_attachment(profile_id="default", attachment_id=image["id"], session_id="mixed")
+        self.assertEqual(estimate(), before)  # retained estimate follows existing cleared_at semantics
+        conn = store._connect()
+        conn.execute("UPDATE conversation_attachments SET estimated_tokens = 0 WHERE attachment_id = ?", (image["id"],))
+        conn.commit()
+        conn.close()
+        after = estimate()
+        self.assertEqual(after["attachment_image_tokens"], 0)  # no disk fallback for a cleared image
+        self.assertEqual(after["attachments"], file["estimated_tokens"])
+
+    def test_file_only_attachment_has_no_image_token_subset(self):
+        store = self.make_store()
+        file = store.create_conversation_attachment(
+            profile_id="default", session_id="file-only", filename="notes.txt", data=b"body",
+            kind="file", text_content="file body",
+        )
+        store.commit_conversation_turn(
+            profile_id="default", session_id="file-only", persona_id="ombre", request_id="file-turn",
+            expected_last_round_id=0, user_text="read", assistant_text="ok", source="cc", attachment_ids=[file["id"]],
+        )
+        estimate = store.list_conversation_context_days(
+            profile_id="default", session_id="file-only", persona_id="ombre",
+        )[0]["token_estimate"]
+        self.assertEqual(estimate["attachment_image_tokens"], 0)
+        self.assertEqual(estimate["attachments"], file["estimated_tokens"])
+
+    def test_exact_rolling_receipt_ignores_recent_window_and_isolates_profile_session_revision(self):
+        store = self.make_store()
+        receipt = {"contextRevision": 3, "newSessionId": "native", "days": [{"day": "2026-10-01", "treatment": "full"}]}
+        for profile, session, raw in [("one", "shared", {"rolling_seed": receipt}),
+                                      ("two", "shared", {"rolling_seed": {**receipt, "secret": True}}),
+                                      ("one", "other", {"rolling_seed": {**receipt, "secret": True}})]:
+            store.record_conversation_turn(profile_id=profile, session_id=session, round_id=1,
+                                           user_text="a", assistant_text="b", raw_json=json.dumps(raw))
+        for index in range(2, 62):
+            store.record_conversation_turn(profile_id="one", session_id="shared", round_id=index,
+                                           user_text="a", assistant_text="b", raw_json="{}")
+        def find(**changes):
+            return store.find_conversation_rolling_seed(**{
+                "profile_id": "one", "session_id": "shared", "context_revision": 3,
+                "native_session_id": "native", **changes,
+            })
+        self.assertEqual(find(), receipt)
+        self.assertIsNone(find(context_revision=4))
+        self.assertIsNone(find(native_session_id="different"))
+        self.assertIsNone(find(profile_id="missing"))
+        self.assertIsNone(find(session_id="missing"))
+
+    def test_explicit_rebuild_creates_revision_and_preserves_cas_isolation(self):
+        store = self.make_store()
+        self.commit(store, request_id="rebuild", expected=0, persona_id="ombre")
+        saved = store.patch_conversation_rolling_context(
+            profile_id="default", session_id="session-1", persona_id="ombre",
+            config={"strategy": "daily_rolling", "day_modes": {}},
+        )
+        rebuilt = store.patch_conversation_rolling_context(
+            profile_id="default", session_id="session-1", persona_id="ombre",
+            config={**saved["rolling_context"], "rebuild_revision": True}, expected_state_version=saved["state_version"],
+        )
+        self.assertEqual(rebuilt["context_revision"], saved["context_revision"] + 1)
+        self.assertNotIn("rebuild_revision", rebuilt["rolling_context"])
+        with self.assertRaises(SessionStateConflictError):
+            store.patch_conversation_rolling_context(
+                profile_id="default", session_id="session-1", persona_id="ombre",
+                config={"rebuild_revision": True}, expected_state_version=saved["state_version"],
+            )
+        with self.assertRaises(ValueError):
+            store.patch_conversation_rolling_context(
+                profile_id="other", session_id="session-1", persona_id="ombre", config={"rebuild_revision": True},
+            )
+        unchanged = store.patch_conversation_rolling_context(
+            profile_id="default", session_id="session-1", persona_id="ombre", config=rebuilt["rolling_context"],
+        )
+        self.assertEqual(unchanged["context_revision"], rebuilt["context_revision"])
 
     def test_context_days_include_hidden_agent_wake_runtime_cost(self):
         store = self.make_store()

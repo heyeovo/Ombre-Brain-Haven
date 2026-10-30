@@ -48,3 +48,19 @@ class RollingPinnedSnapshotRouteTest(unittest.IsolatedAsyncioTestCase):
             response = await service.handle_conversation_session(self.request(expected_context_revision=revision))
             self.assertEqual(response.status_code, 400)
             service.state_store.initialize_conversation_pinned_snapshot.assert_not_called()
+
+    async def test_receipt_query_uses_current_revision_and_authenticated_profile(self):
+        service = self.service()
+        service.state_store.get_conversation_session_state.return_value = {"context_revision": 7}
+        receipt = {"contextRevision": 7, "newSessionId": "native-7", "days": []}
+        service.state_store.find_conversation_rolling_seed.return_value = receipt
+        request = SimpleNamespace(method="GET", headers={}, query_params={
+            "session_id": "session-1", "include_rolling_seed": "1", "native_session_id": "native-7",
+            "profile_id": "untrusted-profile", "context_revision": "1",
+        })
+        response = await service.handle_conversation_session(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.body)["rolling_seed"], receipt)
+        service.state_store.find_conversation_rolling_seed.assert_called_once_with(
+            profile_id="trusted-profile", session_id="session-1", context_revision=7, native_session_id="native-7",
+        )

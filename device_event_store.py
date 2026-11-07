@@ -29,10 +29,16 @@ def parse_event(raw, now=None):
         battery = float(battery)
         if not math.isfinite(battery) or not 0 <= battery <= 100:
             raise ValueError('电量无效')
-        battery = int(battery * 100 + .5) if battery <= 1 else int(battery + .5)
+        # iOS「获取电池状态」给 0–100；只有小于 1 的小数才按比例理解，1 就是 1%。
+        battery = int(battery * 100 + .5) if battery < 1 else int(battery + .5)
+    try:
+        occurred = timestamp(raw.get('occurred_at'), now)
+    except ValueError:
+        # 快捷指令日期格式没配成 ISO 时（如「2026年11月8日 05:58」）不丢事件，按接收时间记。
+        occurred = timestamp(now=now)
     return dict(event_id=str(raw.get('event_id') or uuid.uuid4()), app_id=app,
                 app_name=str(raw.get('app_name') or app), event=raw['event'],
-                occurred_at=timestamp(raw.get('occurred_at'), now).isoformat(),
+                occurred_at=occurred.isoformat(),
                 received_at=timestamp(now=now).isoformat(), battery_pct=battery, source=source)
 
 

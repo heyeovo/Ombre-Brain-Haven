@@ -111,3 +111,9 @@ async def test_routes_write_read_digest(tmp_path, monkeypatch):
     assert len(json.loads((await ns['api_device_events'](req)).body)['events']) == 1
     assert '手机' in json.loads((await ns['api_device_events_digest'](req)).body)['digest']
     assert '关闭事件可能漏记' in store.activity()
+
+
+def test_battery_one_is_one_percent_and_bad_time_falls_back():
+    e = parse_event(dict(app_id='a', event='closed', battery_pct=1, occurred_at='2026年11月8日 05:58'), NOW)
+    assert e['battery_pct'] == 1
+    assert e['occurred_at'] == e['received_at']

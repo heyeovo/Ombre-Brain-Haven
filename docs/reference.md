@@ -66,6 +66,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `daily_review_engine.py` | 默认每日 04:30 按协作者生成第一人称日回顾；D 日材料固定为 D 日 04:00–D+1 日 04:00，安全字符预算内直接使用全部可见正文，超预算才按工作窗口压缩较早轮次并保留每窗最近原文；连续性参考仍为 D-2、D-1 两条日回顾，可由逐任务 router 选择 API 或 Pro，结果不进记忆桶 |
 | `persona_engine.py` / `portrait_engine.py` | 用户画像（persona 状态 + 画像生成） |
 | `memory_*.py` | 记忆分层：layers/nodes/edges/metadata/moments/diffusion/relevance/write_gate |
+| `device_event_store.py` | 手机 App 原始事件 SQLite（14 天保留、event_id 去重）、纯函数会话推导与单行 digest；MCP `device_activity` 查询 |
 | `todo_store.py` / `reminder_store.py` | 待办 / 照顾备忘持久化 |
 | `room_store.py` / `darkroom.py` | 房间索引、旧条目迁移、锁、私密便条与幂等来访；复用旧 JSONL IO |
 | `dream_engine.py` | 自动 dream |
@@ -326,6 +327,18 @@ POST /api/import/pause                                   # 暂停
 GET  /api/import/patterns                                # 模式检测
 ```
 
+### 手机使用记录
+
+仅 dashboard 服务端以 gateway bearer 调用（与房间 `_require_room_bearer` 相同），无凭据返回 401。单条事件上限 4KB、批量上限 50 条；缺少 event_id 自动生成且不去重，无时区按北京时间。
+
+```
+POST /api/device-events              # 单条/批量写入，accepted / duplicates
+GET /api/device-events               # hours=24、limit=200，原始 events 与推导 sessions
+GET /api/device-events/digest        # JSON digest，一行北京时间摘要；无记录为空串
+```
+
+`state_dir/device_events.sqlite` 使用 WAL、busy_timeout=5000，初始化可重复、与既有状态库隔离。写入事务顺带清理 14 天前事件；全局手机数据不关联聊天 session/profile。关闭可能漏记，同 App 重复打开前段未知、缺关闭可按别的 App 打开估算结束，超过 4 小时时长未知。
+
 ### 配置 & 记忆
 ```
 GET  /api/config                      # 读取模型、自动打标运行参数、召回等 Dashboard 安全配置
@@ -402,6 +415,8 @@ GET /api/debug/injections             # 注入调试；含检索前排除桶及 
 依赖 embedding 引擎（`config.yaml` 中 `embedding.enabled`）。返回 `{items, embedding_enabled, total_scanned}`。
 
 ### cc 持久化（Haven 侧）
+
+手机原始使用事件独立存于 `state_dir/device_events.sqlite`，与聊天库、profile/session 隔离；属于家庭全局设备数据。详见上方「手机使用记录」。
 cc 配置/用户数据由 **Gateway** 持久化到 Haven 数据库，路由注册在 `gateway.py`（~21441 行 `Route()` 列表）：
 ```
 /api/cc/personas      # 协作者（含 dirs/write_dirs 与 selfhost_defaults；密钥硬拦）

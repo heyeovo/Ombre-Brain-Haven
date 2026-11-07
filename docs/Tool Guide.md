@@ -69,3 +69,5 @@
 - self_anchor 独立于普通 anchor / pinned / profile_fact；只有 handoff 或显式 self_anchor 读取会带出，Gateway 普通自动注入不会带它。
 
 ```
+
+手机记录：用 `device_activity(hours=6)` 查小羊最近在手机上用了哪些 App；关闭事件可能漏记，时长是估算，不能据此断言持续使用。

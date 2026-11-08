@@ -3399,6 +3399,9 @@ class GatewayService:
             "1", "true", "yes"
         }
         profile_id = self._conversation_profile_id
+        if self._truthy_header(request.query_params.get("word_stats")):
+            days = self.state_store.conversation_word_stats(profile_id=profile_id)
+            return JSONResponse({"profile_id": profile_id, "days": days})
         sessions = self.state_store.list_conversation_sessions(
             profile_id=profile_id,
             limit=limit,

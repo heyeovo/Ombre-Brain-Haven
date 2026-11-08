@@ -117,3 +117,24 @@ def test_battery_one_is_one_percent_and_bad_time_falls_back():
     e = parse_event(dict(app_id='a', event='closed', battery_pct=1, occurred_at='2026年11月8日 05:58'), NOW)
     assert e['battery_pct'] == 1
     assert e['occurred_at'] == e['received_at']
+
+
+def test_activity_now_line_merged_details_and_today_totals(tmp_path):
+    from device_event_store import day_start
+    store = DeviceEventStore({'state_dir': str(tmp_path)})
+    now = timestamp('2026-11-08T23:40:00+08:00')
+    rows = [('home', '我们家', 'opened', '23:00:00'), ('home', '我们家', 'closed', '23:10:00'),
+            ('home', '我们家', 'opened', '23:10:20'), ('home', '我们家', 'closed', '23:10:40'),
+            ('home', '我们家', 'opened', '23:11:00'), ('home', '我们家', 'closed', '23:15:00'),
+            ('douyin', '抖音', 'opened', '23:28:00'), ('douyin', '抖音', 'closed', '23:30:00'),
+            ('home', '我们家', 'opened', '23:30:05')]
+    store.write({'events': [dict(app_id=a, app_name=n, event=e, occurred_at=f'2026-11-08T{t}+08:00', battery_pct=36)
+                            for a, n, e, t in rows]}, now)
+    store.write(dict(app_id='douyin', app_name='抖音', event='opened', occurred_at='2026-11-08T03:30:00+08:00'), now)
+    text = store.activity(1, now)
+    lines = text.splitlines()
+    assert lines[0] == '现在：在我们家（23:30 打开，已经 10 分）'
+    assert [l for l in lines if '关了我们家' in l] == ['- 23:15 关了我们家（约 14 分钟）']  # 三段碎记录并成一段
+    assert '今天（4 点起）：我们家 14 分 · 抖音 2 分' in text
+    assert '电量：36%' in text
+    assert day_start(timestamp('2026-11-09T03:59:00+08:00')).day == 8

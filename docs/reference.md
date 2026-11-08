@@ -66,7 +66,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `daily_review_engine.py` | 默认每日 04:30 按协作者生成第一人称日回顾；D 日材料固定为 D 日 04:00–D+1 日 04:00，安全字符预算内直接使用全部可见正文，超预算才按工作窗口压缩较早轮次并保留每窗最近原文；连续性参考仍为 D-2、D-1 两条日回顾，可由逐任务 router 选择 API 或 Pro，结果不进记忆桶 |
 | `persona_engine.py` / `portrait_engine.py` | 用户画像（persona 状态 + 画像生成） |
 | `memory_*.py` | 记忆分层：layers/nodes/edges/metadata/moments/diffusion/relevance/write_gate |
-| `device_event_store.py` | 手机 App 原始事件 SQLite（14 天保留、event_id 去重）、纯函数会话推导与单行 digest；MCP `device_activity` 查询 |
+| `device_event_store.py` | 手机 App 原始事件 SQLite（14 天保留、event_id 去重）、纯函数会话推导与单行 digest；MCP `device_activity` 查询（「现在」一行 + 相邻同 App 碎段合并后最多 8 段明细 + 凌晨 4 点日界线的今日合计） |
 | `todo_store.py` / `reminder_store.py` | 待办 / 照顾备忘持久化 |
 | `room_store.py` / `darkroom.py` | 房间索引、旧条目迁移、锁、私密便条与幂等来访；复用旧 JSONL IO |
 | `dream_engine.py` | 自动 dream |

@@ -100,6 +100,58 @@ def digest(events, now=None):
     return '[手机 ' + ' · '.join(parts) + ']'
 
 
+# 和聊天日、日回顾同一条日界线：凌晨 4 点前算前一天。
+DAY_START_HOUR = 4
+DETAIL_LIMIT = 8
+
+
+def day_start(now):
+    start = now.replace(hour=DAY_START_HOUR, minute=0, second=0, microsecond=0)
+    return start if now >= start else start - timedelta(days=1)
+
+
+def minutes_text(seconds):
+    minutes = round(seconds / 60)
+    return f'{minutes // 60} 小时 {minutes % 60} 分' if minutes >= 60 else f'{minutes} 分'
+
+
+def now_line(event, now):
+    at = timestamp(event['occurred_at'])
+    clock = at.strftime('%H:%M') if at.date() == now.date() else at.strftime('%m-%d %H:%M')
+    name = event['app_name'].replace('\n', ' ')
+    if event['event'] == 'opened' and now - at <= timedelta(hours=4):
+        return f'现在：在{name}（{clock} 打开，已经 {minutes_text((now - at).total_seconds())}）'
+    if event['event'] == 'opened':
+        return f'现在：{clock} 打开{name}后没有记录'
+    return f'现在：{clock} 离开{name}，之后没有记录'
+
+
+def merge_fragments(sessions):
+    """把时间上相邻的同一 App 碎段并成一段（输入输出都是倒序）。"""
+    merged = []
+    for s in sorted(sessions, key=lambda s: timestamp(s['ended_at'] or s['started_at'])):
+        prev = merged[-1] if merged else None
+        if prev and prev['app_id'] == s['app_id'] and prev['ended_at']:
+            known = [d for d in (prev['duration_seconds'], s['duration_seconds']) if d is not None]
+            started = prev['started_at'] or s['started_at']
+            prev.update(ended_at=s['ended_at'], started_at=started,
+                         duration_seconds=sum(known) if known else None,
+                         estimated=prev['estimated'] or s['estimated'],
+                         status='ended' if started and s['ended_at'] and known else s['status'])
+        else:
+            merged.append(dict(s))
+    return merged[::-1]
+
+
+def today_totals(events, today):
+    totals = {}
+    for s in derive_sessions([e for e in events if timestamp(e['occurred_at']) >= today]):
+        if s['duration_seconds']:
+            totals[s['app_name']] = totals.get(s['app_name'], 0) + s['duration_seconds']
+    items = [f'{name} {minutes_text(sec)}' for name, sec in sorted(totals.items(), key=lambda kv: -kv[1]) if sec >= 60]
+    return '今天（4 点起）：' + (' · '.join(items) if items else '还没有超过一分钟的记录')
+
+
 class DeviceEventStore:
     def __init__(self, config=None):
         config = config or {}
@@ -138,19 +190,33 @@ class DeviceEventStore:
             db.execute('DELETE FROM device_events WHERE occurred_at < ?', ((timestamp(now=now) - timedelta(days=14)).isoformat(),))
         return dict(accepted=accepted, duplicates=len(events)-accepted)
 
-    def events(self, hours=None, limit=None):
+    def events(self, hours=None, limit=None, now=None):
         with self._connect() as db:
             rows = [dict(row) for row in db.execute('SELECT * FROM device_events ORDER BY occurred_at DESC, id DESC')]
         if hours is not None:
-            cutoff = timestamp() - timedelta(hours=hours)
+            cutoff = timestamp(now=now) - timedelta(hours=hours)
             rows = [e for e in rows if timestamp(e['occurred_at']) >= cutoff]
         return rows[:limit] if limit else rows
 
-    def activity(self, hours=6):
-        events = self.events(hours)
-        sessions = derive_sessions(events)
-        totals = {}
-        for s in sessions:
-            totals[s['app_name']] = totals.get(s['app_name'], 0) + (s['duration_seconds'] or 0)
+    def activity(self, hours=6, now=None):
+        now = timestamp(now=now)
+        today = day_start(now)
+        span = max(hours, (now - today).total_seconds() / 3600)
+        events = self.events(span, now=now)
+        if not events:
+            last = self.events(limit=1)
+            return now_line(last[0], now) if last else '还没有任何手机记录。'
+        cutoff = now - timedelta(hours=hours)
+        recent = merge_fragments([s for s in derive_sessions(events)
+                                  if timestamp(s['ended_at'] or s['started_at']) >= cutoff])
+        shown = [s for s in recent if not (s['ended_at'] and s['duration_seconds'] is not None and s['duration_seconds'] < 60)]
+        lines = [now_line(events[0], now), f'最近 {hours} 小时：']
+        lines += [f'- {session_text(s)}' for s in shown[:DETAIL_LIMIT]] or ['- 没有超过一分钟的记录']
+        if len(shown) > DETAIL_LIMIT:
+            lines.append(f'（更早还有 {len(shown) - DETAIL_LIMIT} 段）')
+        lines.append(today_totals(events, today))
         battery = next((e['battery_pct'] for e in events if e['battery_pct'] is not None), None)
-        return '\n'.join([*(session_text(s) for s in sessions), '各 App 已知/估算合计：' + '、'.join(f'{k} {round(v/60)} 分钟' for k, v in totals.items()), f'最近电量：{battery if battery is not None else "未知"}', '关闭事件可能漏记，时长是估算。'])
+        if battery is not None:
+            lines.append(f'电量：{battery}%')
+        lines.append('关闭事件可能漏记，时长是估算。')
+        return '\n'.join(lines)

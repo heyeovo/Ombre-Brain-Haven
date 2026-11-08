@@ -2,7 +2,7 @@
 
 > 状态：方案已确认，尚未开始代码实施  
 > 日期：2026-08-27  
-> 关联交接：`docs/2026-08-27-recall-rebuild-handoff.md`  
+> 关联交接：`docs/handoff/2026-08-27-recall-rebuild-handoff.md`
 > 现有实现说明：`docs/recall-pipeline.md`
 
 ## 1. 背景与结论

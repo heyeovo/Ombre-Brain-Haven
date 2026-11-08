@@ -5,7 +5,7 @@
 - 已完成现有召回架构文档阅读和一个真实长窗口的线上只读审计。
 - 已确认当前问题不是单个阈值，而是 query planner 降级、硬 gate 和宽松放行通道共同造成的结构性失衡。
 - 已确认未来计划加入家族聚类；Haven 虽有关系边机制，但桶之间目前基本没有可用于召回的真实关系。
-- 已完成总体方案：`docs/recall-rebuild-plan.md`。
+- 已完成总体方案：`docs/handoff/recall-rebuild-plan.md`。
 - Phase 0 召回透镜最小版已在 Dashboard 实现并通过本地真实数据验收。
 - Phase 1 的召回必要性、候选独立 relevance、planner 降级、utility 和召回透镜线上验收均已完成。
 - 2026-09-09 Phase 2 已发布并完成线上 smoke：候选检索与旧 admission/排序拆开，统一 relevance + utility 是唯一正式桶决策；legacy 切换与旧决策入口已移除，第一版召回进入持续运行观察阶段。
@@ -331,9 +331,9 @@ Dashboard 与 Haven 后续均已发布，并由用户通过召回透镜截图完
 
 后续记忆系统规划与新的工作入口统一迁移到：
 
-- [memory-system-roadmap.md](memory-system-roadmap.md)
+- [memory-system-roadmap.md](../memory-system-roadmap.md)
 
-新窗口先读 roadmap；只有涉及当前召回实现时再读 [recall-pipeline.md](recall-pipeline.md)，无需重新通读本长 handoff。
+新窗口先读 roadmap；只有涉及当前召回实现时再读 [recall-pipeline.md](../recall-pipeline.md)，无需重新通读本长 handoff。
 
 ## 封卷边界
 

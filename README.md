@@ -621,7 +621,7 @@ VPS 的 Backblaze B2 加密备份范围、计划、恢复步骤和验收记录�
 - 派生索引损坏时应从 Markdown / raw source 重建，不要把 SQLite 当唯一真源。
 - 每周 journey 可手动或定时生成候选，但始终没有自动确认或定时自动写入路径。
 
-后续记忆系统工作统一从 [`docs/memory-system-roadmap.md`](docs/memory-system-roadmap.md) 开始；更细的行为边界见 [`docs/memory-layer-contract.md`](docs/memory-layer-contract.md)，当前召回实现见 [`docs/recall-pipeline.md`](docs/recall-pipeline.md)，部署补充见 [`docs/deploy-zeabur.md`](docs/deploy-zeabur.md)。
+后续记忆系统工作统一从 [`docs/memory-system-roadmap.md`](docs/memory-system-roadmap.md) 开始；更细的行为边界见 [`docs/memory-layer-contract.md`](docs/memory-layer-contract.md)，当前召回实现见 [`docs/recall-pipeline.md`](docs/recall-pipeline.md)；正式部署见本文「部署」与 `AGENTS.md`。
 
 ## 测试 / Testing
 

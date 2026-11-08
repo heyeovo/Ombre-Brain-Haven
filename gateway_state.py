@@ -1166,6 +1166,9 @@ class GatewayStateStore:
             )
             """
         )
+        conn.execute("""CREATE TABLE IF NOT EXISTS cc_agent_wake_prompt (
+            id TEXT PRIMARY KEY CHECK (id = 'default'), instructions TEXT NOT NULL,
+            tool_description TEXT NOT NULL, updated_at TEXT NOT NULL)""")
         initialize_agent_wake_schema(conn)
         initialize_bark_notification_schema(conn)
         try:
@@ -1685,6 +1688,34 @@ class GatewayStateStore:
         )
         conn.commit()
         conn.close()
+
+    def load_cc_agent_wake_prompt(self) -> dict[str, Any] | None:
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT instructions, tool_description, updated_at FROM cc_agent_wake_prompt WHERE id = 'default'").fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def save_cc_agent_wake_prompt(self, instructions: str, tool_description: str) -> dict[str, Any]:
+        from utils import now_iso
+        value = {"instructions": instructions, "tool_description": tool_description, "updated_at": now_iso()}
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute("INSERT OR REPLACE INTO cc_agent_wake_prompt VALUES ('default', ?, ?, ?)",
+                             (instructions, tool_description, value["updated_at"]))
+        finally:
+            conn.close()
+        return value
+
+    def delete_cc_agent_wake_prompt(self) -> None:
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute("DELETE FROM cc_agent_wake_prompt WHERE id = 'default'")
+        finally:
+            conn.close()
 
     def load_cc_appearance(self) -> dict[str, Any]:
         from appearance_config import normalize_appearance

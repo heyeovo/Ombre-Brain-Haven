@@ -129,6 +129,36 @@ class GatewayStateContractsTest(unittest.TestCase):
         self.assertEqual(session["mode"], "work")
         self.assertEqual(session["local_engine_preference"], "selfhost")
 
+    def test_staged_cleanup_keeps_assistant_sent_images(self):
+        store = self.make_store()
+        png = (
+            b"\x89PNG\r\n\x1a\n"
+            + (13).to_bytes(4, "big") + b"IHDR"
+            + (10).to_bytes(4, "big") + (10).to_bytes(4, "big")
+            + b"\x08\x06\x00\x00\x00"
+        )
+        staged = store.create_conversation_attachment(
+            profile_id="default", session_id="session-sent", filename="upload.png", data=png,
+        )
+        sent = store.create_conversation_attachment(
+            profile_id="default", session_id="session-sent", filename="send-image.png", data=png,
+            origin="assistant",
+        )
+        self.assertEqual(staged["origin"], "user")
+        self.assertEqual(sent["origin"], "assistant")
+        conn = sqlite3.connect(self.root / "gateway_state.db")
+        conn.execute("UPDATE conversation_attachments SET created_at = '2026-01-01T00:00:00+00:00'")
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(store.cleanup_staged_conversation_attachments(older_than_hours=24), 1)
+        items = {item["id"]: item for item in store.list_conversation_attachments(
+            profile_id="default", session_id="session-sent",
+        )}
+        self.assertTrue(items[staged["id"]]["cleared"])
+        self.assertFalse(items[sent["id"]]["cleared"])
+        self.assertEqual(items[sent["id"]]["origin"], "assistant")
+
     def test_context_days_use_visual_tokens_for_image_attachments(self):
         store = self.make_store()
         png = (

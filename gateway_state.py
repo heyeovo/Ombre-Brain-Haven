@@ -806,6 +806,8 @@ class GatewayStateStore:
                 "image_width": "INTEGER NOT NULL DEFAULT 0",
                 "image_height": "INTEGER NOT NULL DEFAULT 0",
                 "estimated_tokens": "INTEGER NOT NULL DEFAULT 0",
+                # assistant = 言之用 send_image 发的图，不挂在任何 turn 上，不能被暂存清理掉。
+                "origin": "TEXT NOT NULL DEFAULT 'user'",
             },
         )
         conn.execute(
@@ -2172,6 +2174,7 @@ class GatewayStateStore:
             "created_at": str(row["created_at"]),
             "cleared": bool(row["cleared_at"]),
             "cleared_at": str(row["cleared_at"] or ""),
+            "origin": str(row["origin"] or "user") if "origin" in keys else "user",
         }
 
     def create_conversation_attachment(
@@ -2184,11 +2187,13 @@ class GatewayStateStore:
         kind: str = "image",
         text_content: str = "",
         text_truncated: bool = False,
+        origin: str = "user",
     ) -> dict[str, Any]:
         safe_profile_id = str(profile_id or "default").strip() or "default"
         safe_session_id = str(session_id or "").strip()
         if not safe_session_id:
             raise ValueError("session_id is required")
+        safe_origin = "assistant" if str(origin or "").strip().lower() == "assistant" else "user"
         safe_kind = "file" if str(kind or "").strip().lower() == "file" else "image"
         if not data:
             raise ValueError("attachment is empty")
@@ -2230,8 +2235,8 @@ class GatewayStateStore:
                 INSERT INTO conversation_attachments
                 (attachment_id, profile_id, session_id, turn_id, round_id, filename,
                  mime_type, byte_size, sha256, storage_name, kind, text_content,
-                 text_truncated, image_width, image_height, estimated_tokens, created_at, cleared_at)
-                VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                 text_truncated, image_width, image_height, estimated_tokens, created_at, cleared_at, origin)
+                VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
                 """,
                 (
                     attachment_id,
@@ -2249,6 +2254,7 @@ class GatewayStateStore:
                     image_height,
                     estimated_tokens,
                     created_at,
+                    safe_origin,
                 ),
             )
             conn.commit()
@@ -2279,6 +2285,7 @@ class GatewayStateStore:
             "created_at": created_at,
             "cleared": False,
             "cleared_at": "",
+            "origin": safe_origin,
         }
 
     def get_conversation_attachment(
@@ -2438,7 +2445,7 @@ class GatewayStateStore:
             """
             SELECT profile_id, attachment_id, session_id
             FROM conversation_attachments
-            WHERE turn_id IS NULL AND cleared_at IS NULL AND created_at < ?
+            WHERE turn_id IS NULL AND cleared_at IS NULL AND origin != 'assistant' AND created_at < ?
             """,
             (cutoff,),
         ).fetchall()

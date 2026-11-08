@@ -110,6 +110,22 @@ class TodoDeleteTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(payload(await manager.get("memory-1")))
             self.assertEqual(await list_items(), [])
 
+    async def test_list_puts_open_newest_first_before_truncating(self):
+        rows = [
+            {"id": "old", "done": False, "created_at": "2026-10-01T00:00:00+00:00"},
+            {"id": "new", "done": False, "created_at": "2026-11-08T00:00:00+00:00"},
+            {"id": "done-new", "done": True, "created_at": "2026-11-09T00:00:00+00:00"},
+        ]
+        manager = SimpleNamespace(list_all=AsyncMock(return_value=[]))
+        list_items = load_helper("_list_todo_items", {
+            "TODO_DOMAINS": {"tech", "emotional"},
+            "bucket_mgr": manager,
+            "todo_store": SimpleNamespace(list=lambda **kwargs: [dict(row) for row in rows]),
+            "_todo_bucket_payload": lambda bucket: None,
+        })
+        self.assertEqual([item["id"] for item in await list_items()], ["new", "old", "done-new"])
+        self.assertEqual([item["id"] for item in await list_items(limit=1)], ["new"])
+
     async def test_auth_before_mutation(self):
         denied = FakeJSONResponse({"error": "unauthorized"}, status_code=401)
         store = SimpleNamespace(delete=unittest.mock.Mock())

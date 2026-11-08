@@ -6872,7 +6872,9 @@ async def _list_todo_items(
             continue
         attached.append(item)
     rows = standalone + attached
-    rows.sort(key=lambda item: (bool(item.get("done")), str(item.get("created_at") or "")), reverse=False)
+    # 未完成在前，同组内新的在前：截断时先丢最旧的。
+    rows.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    rows.sort(key=lambda item: bool(item.get("done")))
     return rows[:safe_limit]
 
 
@@ -6915,18 +6917,19 @@ async def create_todo(
 
 @mcp.tool()
 async def list_todos(domain: str = "", done: bool | None = None, limit: int = 50) -> str:
-    """主动查询待办，合并独立 Todo 与非归档桶 Todo。domain 可用 tech/emotional/空；done 可传 true/false，省略时返回全部。方括号内是可直接传给 set_todo_done 的 todo_id：独立 Todo 使用自身 ID，桶 Todo 使用 bucket:<桶ID>，不要删掉 bucket: 前缀。"""
+    """主动查询待办，合并独立 Todo 与非归档桶 Todo，未完成在前、新的在前。domain 可用 tech/emotional/空；done 可传 true/false，省略时返回全部。方括号内是可直接传给 set_todo_done 的 todo_id：独立 Todo 使用自身 ID，桶 Todo 使用 bucket:<桶ID>，不要删掉 bucket: 前缀。"""
     try:
-        items = await _list_todo_items(domain=domain, done=done, limit=_int_between(limit, 50, 1, 200))
+        all_items = await _list_todo_items(domain=domain, done=done, limit=500)
     except ValueError as exc:
         return f"查询失败: {exc}"
-    if not items:
+    if not all_items:
         return "没有符合条件的 Todo。"
+    items = all_items[:_int_between(limit, 50, 1, 200)]
     labels = {"tech": "技术", "emotional": "情感", "unclassified": "未分类"}
     groups: dict[str, list[dict]] = {}
     for item in items:
         groups.setdefault(str(item.get("domain") or "unclassified"), []).append(item)
-    lines = [f"Todo 共 {len(items)} 条"]
+    lines = [f"Todo 共 {len(all_items)} 条" + (f"，显示最新 {len(items)} 条" if len(items) < len(all_items) else "")]
     for group in ("tech", "emotional", "unclassified"):
         rows = groups.get(group) or []
         if not rows:

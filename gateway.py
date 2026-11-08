@@ -2998,6 +2998,7 @@ class GatewayService:
                 kind = str(form.get("kind") or "file").strip()
                 text_content = str(form.get("text_content") or "")
                 text_truncated = self._truthy_header(form.get("text_truncated"))
+                origin = "user"
                 data = await upload.read()
             else:
                 session_id = str(
@@ -3006,6 +3007,7 @@ class GatewayService:
                     or ""
                 ).strip()
                 filename = str(request.query_params.get("filename") or "image").strip()
+                origin = str(request.query_params.get("origin") or "user").strip()
                 kind = "image"
                 text_content = ""
                 text_truncated = False
@@ -3021,6 +3023,7 @@ class GatewayService:
                     kind=kind,
                     text_content=text_content,
                     text_truncated=text_truncated,
+                    origin=origin,
                 )
                 self.state_store.cleanup_staged_conversation_attachments(older_than_hours=24)
             except ValueError as exc:

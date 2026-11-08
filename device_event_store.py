@@ -59,6 +59,9 @@ def derive_sessions(events):
                     if following is None or following['event'] != 'closed':
                         finish(active.pop(other), at, True)
             if app in active:
+                # 同一 App 半小时内重复「打开」多半是漏记了中间的离开或页面重复上报，接着算原来那段。
+                if timestamp(at) - timestamp(active[app]['started_at']) <= timedelta(minutes=30):
+                    continue
                 finish(active.pop(app))
             active[app] = dict(app_id=app, app_name=e['app_name'], started_at=at)
         elif app in active:
@@ -117,23 +120,34 @@ def minutes_text(seconds):
     return f'{minutes // 60} 小时 {minutes % 60} 分' if minutes >= 60 else f'{minutes} 分'
 
 
-def now_line(event, now):
+def now_line(events, now):
+    """events 为倒序原始事件。优先看还开着的那段，避免「切回来」和「离开」同一秒到达时说反。"""
+    clock = lambda at: at.strftime('%H:%M') if at >= day_start(now) else at.strftime('%m-%d %H:%M')
+    open_now = [s for s in derive_sessions(events) if not s['ended_at'] and s['started_at']
+                and now - timestamp(s['started_at']) <= timedelta(hours=4)]
+    if open_now:
+        s = max(open_now, key=lambda s: timestamp(s['started_at']))
+        at = timestamp(s['started_at'])
+        return f'现在：在{s["app_name"]}（{clock(at)} 打开，已经 {minutes_text((now - at).total_seconds())}）'
+    event = events[0]
     at = timestamp(event['occurred_at'])
-    clock = at.strftime('%H:%M') if at.date() == now.date() else at.strftime('%m-%d %H:%M')
     name = event['app_name'].replace('\n', ' ')
-    if event['event'] == 'opened' and now - at <= timedelta(hours=4):
-        return f'现在：在{name}（{clock} 打开，已经 {minutes_text((now - at).total_seconds())}）'
     if event['event'] == 'opened':
-        return f'现在：{clock} 打开{name}后没有记录'
-    return f'现在：{clock} 离开{name}，之后没有记录'
+        return f'现在：{clock(at)} 打开{name}后没有记录'
+    return f'现在：{clock(at)} 离开{name}，之后没有记录'
+
+
+def _start_key(s):
+    return timestamp(s['started_at'] or s['ended_at'])
 
 
 def merge_fragments(sessions):
-    """把时间上相邻的同一 App 碎段并成一段（输入输出都是倒序）。"""
+    """把同一 App 前后间隔不到 3 分钟的碎段并成一段（按开始时间，输出倒序）。"""
     merged = []
-    for s in sorted(sessions, key=lambda s: timestamp(s['ended_at'] or s['started_at'])):
+    for s in sorted(sessions, key=_start_key):
         prev = merged[-1] if merged else None
-        if prev and prev['app_id'] == s['app_id'] and prev['ended_at']:
+        if (prev and prev['app_id'] == s['app_id'] and prev['ended_at']
+                and _start_key(s) - timestamp(prev['ended_at']) <= timedelta(minutes=3)):
             known = [d for d in (prev['duration_seconds'], s['duration_seconds']) if d is not None]
             started = prev['started_at'] or s['started_at']
             prev.update(ended_at=s['ended_at'], started_at=started,
@@ -150,7 +164,7 @@ def today_totals(events, today):
     for s in derive_sessions([e for e in events if timestamp(e['occurred_at']) >= today]):
         if s['duration_seconds']:
             totals[s['app_name']] = totals.get(s['app_name'], 0) + s['duration_seconds']
-    items = [f'{name} {minutes_text(sec)}' for name, sec in sorted(totals.items(), key=lambda kv: -kv[1]) if sec >= 60]
+    items = [f'{name} {minutes_text(sec)}' for name, sec in sorted(totals.items(), key=lambda kv: -kv[1]) if sec >= 30]
     return '今天（4 点起）：' + (' · '.join(items) if items else '还没有超过一分钟的记录')
 
 
@@ -207,12 +221,12 @@ class DeviceEventStore:
         events = self.events(span, now=now)
         if not events:
             last = self.events(limit=1)
-            return now_line(last[0], now) if last else '还没有任何手机记录。'
+            return now_line(last, now) if last else '还没有任何手机记录。'
         cutoff = now - timedelta(hours=hours)
         recent = merge_fragments([s for s in derive_sessions(events)
                                   if timestamp(s['ended_at'] or s['started_at']) >= cutoff])
-        shown = [s for s in recent if not (s['ended_at'] and s['duration_seconds'] is not None and s['duration_seconds'] < 60)]
-        lines = [now_line(events[0], now), f'最近 {hours} 小时：']
+        shown = [s for s in recent if not (s['ended_at'] and s['duration_seconds'] is not None and s['duration_seconds'] < 30)]
+        lines = [now_line(events, now), f'最近 {hours} 小时：']
         lines += [f'- {session_text(s)}' for s in shown[:DETAIL_LIMIT]] or ['- 没有超过一分钟的记录']
         if len(shown) > DETAIL_LIMIT:
             lines.append(f'（更早还有 {len(shown) - DETAIL_LIMIT} 段）')

@@ -56,7 +56,9 @@ def test_sessions_pair_and_order():
 
 
 def test_sessions_repeated_open_orphan_unclosed_estimate_cap():
-    s = derive_sessions([event(), event(minute=2)])
+    s = derive_sessions([event(), event(minute=2), event(kind='closed', minute=5)])
+    assert len(s) == 1 and s[0]['duration_seconds'] == 300  # 半小时内重复打开接着算
+    s = derive_sessions([event(), event(minute=31)])
     assert len(s) == 2 and all(x['duration_seconds'] is None for x in s)
     assert derive_sessions([event(kind='closed')])[0]['status'] == 'closed_only'
     assert derive_sessions([event()])[0]['status'] == 'unknown'

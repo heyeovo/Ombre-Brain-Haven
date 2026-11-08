@@ -837,6 +837,7 @@ class GatewayStateStore:
                 "context_turn_watermark": "INTEGER NOT NULL DEFAULT 0",
                 "prompt_module_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
                 "mode": "TEXT NOT NULL DEFAULT 'chat'",
+                "mcp_overrides": "TEXT NOT NULL DEFAULT '{}'",
                 "recall_mode": "TEXT NOT NULL DEFAULT ''",
                 "daily_review_enabled": "INTEGER NOT NULL DEFAULT 1",
                 "daily_review_snapshot_json": "TEXT NOT NULL DEFAULT '[]'",
@@ -4364,7 +4365,7 @@ class GatewayStateStore:
                    cc_lanes_json, context_gc_json, rolling_context_json, context_revision,
                    context_turn_watermark,
                    prompt_module_overrides_json,
-                   mode, recall_mode, daily_review_enabled, daily_review_snapshot_json,
+                   mode, mcp_overrides, recall_mode, daily_review_enabled, daily_review_snapshot_json,
                    daily_review_snapshot_initialized, handoff_snapshot_json,
                    frozen_persona_append, frozen_persona_append_initialized,
                    cc_seen_round_id, state_version, pinned_at, deleted_at, updated_at
@@ -4407,6 +4408,7 @@ class GatewayStateStore:
                 if str(key).strip() and isinstance(value, bool)
             },
             "mode": mode,
+            "mcp_overrides": self._json_object(row["mcp_overrides"]),
             "recall_mode": str(row["recall_mode"] or ""),
             "daily_review_enabled": bool(row["daily_review_enabled"]),
             "daily_review_snapshot": [
@@ -5133,7 +5135,7 @@ class GatewayStateStore:
             raise ValueError("effective_engine is runtime-only and cannot be persisted")
         allowed = {
             "local_engine_preference", "selfhost_overrides", "cc_overrides", "prompt_module_overrides",
-            "mode", "recall_mode", "daily_review_enabled", "initialize_daily_review_snapshot", "handoff_snapshot",
+            "mode", "mcp_overrides", "recall_mode", "daily_review_enabled", "initialize_daily_review_snapshot", "handoff_snapshot",
             "frozen_persona_append",
         }
         unknown = sorted(set(updates) - allowed)
@@ -5185,6 +5187,13 @@ class GatewayStateStore:
                 for key, value in raw_prompt_overrides.items()
                 if str(key).strip() and isinstance(value, bool)
             }
+        mcp_overrides = None
+        if "mcp_overrides" in updates:
+            mcp_overrides = updates["mcp_overrides"]
+            if (not isinstance(mcp_overrides, dict) or len(mcp_overrides) > 64
+                or any(not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", key)
+                       or not isinstance(value, bool) for key, value in mcp_overrides.items())):
+                raise ValueError("mcp_overrides must contain at most 64 valid server names and boolean values")
         mode: str | None = None
         if "mode" in updates:
             mode = str(updates.get("mode") or "").strip()
@@ -5347,6 +5356,11 @@ class GatewayStateStore:
                     updated_at,
                 ),
             )
+            if mcp_overrides is not None:
+                conn.execute(
+                    "UPDATE conversation_sessions SET mcp_overrides = ? WHERE profile_id = ? AND session_id = ?",
+                    (json.dumps(mcp_overrides), safe_profile_id, safe_session_id),
+                )
             conn.commit()
         except Exception:
             conn.rollback()

@@ -3751,6 +3751,7 @@ class GatewayService:
             "selfhost_overrides",
             "cc_overrides",
             "prompt_module_overrides",
+            "mcp_overrides",
             "mode",
             "recall_mode",
             "daily_review_enabled",

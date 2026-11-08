@@ -36,7 +36,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 |------|------|
 | `server.py` | **Brain** 入口（约 700KB）。MCP 工具注册（`@mcp.tool`）+ REST API（`@mcp.custom_route`）+ 记忆核心 |
 | `gateway.py` | **Gateway** 入口（约 1MB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线（透镜调试区分检索前排除与相关性拒绝）+ cc 持久化路由（`Route()` 注册） |
-| `gateway_state.py` | Gateway/cc SQLite 状态：单行唤醒提示词自定义（`cc_agent_wake_prompt`，含更新时间）、带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式、固定 handoff、版本化按天滚动配置及 turn watermark、每协作者唯一主窗标记、软删除防复活、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision 成对指针及上一检查点、显式 Haven 正文恢复的原子 lane 切换记录、Context GC 配置/历史、带 `created/recalled/breath` 原因与 context revision 生命周期的召回隔离账本；日期清单按日汇总正文、工具、附件视觉/文件正文（attachment_image_tokens 单列图片子集，不重复计入 total）、召回、thinking、运行时时间戳、消息框架和 agent wake 的 token 预估；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox，正式主动消息（含 quiet，`delivery` 原样保存在 raw）还会在该事务内解除缓存保活的临时暂停，no-op 不解除；初始化事务约束见下方「cc 持久化（Haven 侧）」节 |
+| `gateway_state.py` | Gateway/cc SQLite 状态：单行唤醒提示词自定义（`cc_agent_wake_prompt`，含更新时间）、带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式与 MCP 覆盖、固定 handoff、版本化按天滚动配置及 turn watermark、每协作者唯一主窗标记、软删除防复活、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision 成对指针及上一检查点、显式 Haven 正文恢复的原子 lane 切换记录、Context GC 配置/历史、带 `created/recalled/breath` 原因与 context revision 生命周期的召回隔离账本；日期清单按日汇总正文、工具、附件视觉/文件正文（attachment_image_tokens 单列图片子集，不重复计入 total）、召回、thinking、运行时时间戳、消息框架和 agent wake 的 token 预估；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox，正式主动消息（含 quiet，`delivery` 原样保存在 raw）还会在该事务内解除缓存保活的临时暂停，no-op 不解除；初始化事务约束见下方「cc 持久化（Haven 侧）」节 |
 | `trpg_store.py` | 独立 `state/trpg.sqlite`；profile 隔离、phase/CAS、角色/检定/日志事务、公开与 DM 前情提要（recap）、每局设置与言之续接运行态、结束只读档案与模组软删除；`view_for` 是玩家可见性与字段白名单的唯一查询边界 |
 | `trpg_dice.py` | 通用表达式掷骰、CoC 7 d100、三档难度、奖励/惩罚骰和 SAN 损失式；生产用 `secrets`，测试可注入随机源 |
 | `trpg_mcp.py` | Brain HTTP 端口上的两个独立 FastMCP + 小羊 REST；独立 Bearer 鉴权，组合主/子 lifespan 启动 session manager |
@@ -271,7 +271,7 @@ GET    /gateway/api/conversation/sessions?source=&persona_id=&deleted=1&limit=&o
 GET    /gateway/api/conversation/session?session_id=&include_bucket_exclusions=1&include_context_days=1&include_rolling_seed=1&native_session_id=
        # 窗口状态、滚动配置/revision/watermark、可选日期清单（含正文/工具/附件/召回/thinking/运行时开销的按日 token 预估及未知附件数），以及按原文日和 context revision 计算的 created/recalled/breath 桶排除集合；include_rolling_seed 按当前 revision + native_session_id 精确查询本 profile/session 的 raw_json.rolling_seed 凭据，缺失返回 null，不依赖最近轮数
 PATCH  /gateway/api/conversation/session
-       # 修改持久窗口覆盖；pinned 设置每个 persona 唯一主窗；rolling_context 以 state_version CAS 生成配置版本（含钉选快照）；rolling_pinned_snapshot 以 persona + expected_context_revision 校验只补齐当前旧版本的缺失快照，不推进 revision/state_version；rolling_context.rebuild_revision=true 为一次性显式保存请求，即便配置相同也在 state_version CAS 下推进 revision，不把标记存入配置；rolling_recovery_commit 以旧 CC session ID + revision + state_version 原子切换人工正文恢复 transcript；Context GC 路径保持原契约
+       # 修改持久窗口覆盖（含整份替换 mcp_overrides，沿用 state_version CAS）；pinned 设置每个 persona 唯一主窗；rolling_context 以 state_version CAS 生成配置版本（含钉选快照）；rolling_pinned_snapshot 以 persona + expected_context_revision 校验只补齐当前旧版本的缺失快照，不推进 revision/state_version；rolling_context.rebuild_revision=true 为一次性显式保存请求，即便配置相同也在 state_version CAS 下推进 revision，不把标记存入配置；rolling_recovery_commit 以旧 CC session ID + revision + state_version 原子切换人工正文恢复 transcript；Context GC 路径保持原契约
 DELETE /gateway/api/conversation/session
        # 默认软删除并清除置顶/wake 记录，后续 turn 不得隐式复活；permanent=true 且 confirm_session_id 精确匹配时永久删除窗口数据
 GET|PATCH /gateway/api/daily-reviews?persona_id=
@@ -451,6 +451,8 @@ cc 配置/用户数据由 **Gateway** 持久化到 Haven 数据库，路由注�
 /api/notifications/bark     # Bark 掩码配置、最近状态与测试推送；GET / PATCH / POST
 ```
 这些 Gateway 路由要求服务端 Bearer；Dashboard 代理路径见 dashboard `docs/reference.md`「文件结构速查」的 `app/api` 行。
+
+窗口 MCP 覆盖存 `conversation_sessions.mcp_overrides TEXT NOT NULL DEFAULT '{}'`，旧库幂等补列，损坏 JSON 读取为空对象。现有 Bearer `/api/conversation/session` GET/PATCH payload 包含 `mcp_overrides`；PATCH 整份替换，仅接受最多 64 项 `^[A-Za-z0-9_-]{1,64}$` key 与布尔值，沿用 profile/persona 隔离和 `expected_state_version` CAS，不更改其他字段。全局默认值由 dashboard 存在既有 `cc_mcp_config` JSON 的 `servers[].defaultInWindows` / `builtInDefaults`（缺省 true），不另建配置表。
 
 唤醒提示词的 `instructions`、`tool_description`、`updated_at` 存 `gateway_state.db` 的 `cc_agent_wake_prompt` 单行表；GET 无自定义时返回 `config: null`，PUT 覆盖，DELETE 删除该行以恢复 Dashboard 默认文本；使用相同 cc Bearer 鉴权，旧库建表可重复执行。
 

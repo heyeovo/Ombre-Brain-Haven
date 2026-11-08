@@ -14,6 +14,8 @@ Ombre Brain 是一套以 Markdown 记忆桶为长期真源、同时提供 MCP �
 - **新窗口恢复连续性，不做全库倾倒。** handoff 只携带紧凑的自我、关系和近期上下文。
 - **数据尽量可读、可改、可迁移。** 长期记忆保存在 Markdown；运行索引保存在独立 state 目录。
 
+手机 App 使用记录由 dashboard 接收快捷指令 / 主屏 PWA 事件后写入 Haven 独立 SQLite；`device_activity` 可查询最近使用情况，后台唤醒可读取单行摘要。关闭事件可能漏记，时长按保守规则估算。接口与存储契约见 [reference](docs/reference.md#手机使用记录)。
+
 ## 系统组成
 
 ```mermaid

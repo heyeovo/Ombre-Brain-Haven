@@ -164,6 +164,7 @@ from prompt_store import (
 )
 from recall_diagnostics import RecallDiagnosticsLogger
 from reminder_store import ReminderStore
+from device_event_store import DeviceEventStore, derive_sessions, digest
 from todo_store import TODO_DOMAINS, TodoStore
 from reranker_engine import RerankerEngine
 from self_anchor import SELF_ANCHOR_TAG, is_self_anchor_bucket, is_self_anchor_metadata
@@ -360,6 +361,7 @@ weekly_journey_engine = WeeklyJourneyEngine(
 )
 automation_executor = AutomationExecutor(automation_store, bucket_mgr, weekly_journey_engine)
 raw_event_store = RawEventStore(config)                  # Raw dialogue archive / 原文保险箱
+device_event_store = DeviceEventStore(config)
 reminder_store = ReminderStore(config)                    # Standalone care memos / 独立照顾备忘
 todo_store = TodoStore(config)                            # Standalone todos / 独立待办
 
@@ -16165,6 +16167,48 @@ async def admin_backfill(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 # --- Entry point / 启动入口 ---
+
+
+@mcp.tool()
+async def device_activity(hours: int = 6) -> str:
+    """查小羊最近在手机上用了哪些 App。"""
+    return device_event_store.activity(max(1, min(int(hours), 336)))
+
+
+@mcp.custom_route("/api/device-events", methods=["POST", "GET"])
+async def api_device_events(request):
+    from starlette.responses import JSONResponse
+    err = _require_room_bearer(request)
+    if err:
+        return err
+    try:
+        if request.method == "POST":
+            body = bytearray()
+            async for chunk in request.stream():
+                body.extend(chunk)
+                if len(body) > 210000:
+                    return JSONResponse({"error": "请求过大"}, status_code=413)
+            payload = _json_lib.loads(body)
+            if not (isinstance(payload, dict) and "events" in payload) and len(body) > 4096:
+                return JSONResponse({"error": "单条请求过大"}, status_code=413)
+            return JSONResponse(device_event_store.write(payload))
+        hours = max(1, min(int(request.query_params.get("hours", 24)), 336))
+        limit = max(1, min(int(request.query_params.get("limit", 200)), 2000))
+        events = device_event_store.events(hours, limit)
+        return JSONResponse({"events": events, "sessions": derive_sessions(events)})
+    except (ValueError, TypeError, OverflowError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@mcp.custom_route("/api/device-events/digest", methods=["GET"])
+async def api_device_events_digest(request):
+    from starlette.responses import JSONResponse
+    err = _require_room_bearer(request)
+    if err:
+        return err
+    return JSONResponse({"digest": digest(device_event_store.events())})
+
+
 if __name__ == "__main__":
     transport = config.get("transport", "stdio")
     logger.info(f"Ombre Brain starting | transport: {transport}")

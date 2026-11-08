@@ -73,7 +73,7 @@ def test_digest_three_modes():
     assert '约 50 分钟' in crossing
     assert digest([event('微信', minute=-400)], NOW) == '[手机 最后记录 11-07 23:20 开了微信]'
     line = digest([event(minute=-32), event(kind='closed', battery_pct='58')], NOW)
-    assert '06:00 关了douyin（约 32 分钟）' in line and '电量 58%' in line
+    assert '05:28–06:00 douyin（约 32 分钟）' in line and '电量 58%' in line
     assert len(derive_sessions([event(str(i), minute=-i) for i in range(5)])) == 5
     assert digest([event(str(i), minute=-i) for i in range(5)], NOW).count(' · ') == 2
 
@@ -134,7 +134,7 @@ def test_activity_now_line_merged_details_and_today_totals(tmp_path):
     text = store.activity(1, now)
     lines = text.splitlines()
     assert lines[0] == '现在：在我们家（23:30 打开，已经 10 分）'
-    assert [l for l in lines if '关了我们家' in l] == ['- 23:15 关了我们家（约 14 分钟）']  # 三段碎记录并成一段
+    assert [l for l in lines if '23:15 我们家' in l] == ['- 23:00–23:15 我们家（约 14 分钟）']  # 三段碎记录并成一段
     assert '今天（4 点起）：我们家 14 分 · 抖音 2 分' in text
     assert '电量：36%' in text
     assert day_start(timestamp('2026-11-09T03:59:00+08:00')).day == 8

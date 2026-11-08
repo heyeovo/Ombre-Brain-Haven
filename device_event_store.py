@@ -72,15 +72,17 @@ def derive_sessions(events):
 
 
 def session_text(s):
-    at = timestamp(s['ended_at'] or s['started_at']).strftime('%H:%M')
+    clock = lambda value: timestamp(value).strftime('%H:%M')
     name = s['app_name'].replace('\n', ' ').replace('\r', ' ')
     if s['status'] == 'closed_only':
-        return f'{at} 离开{name}（只记到离开）'
-    if s['ended_at']:
-        duration = s['duration_seconds']
-        label = f'约 {round(duration / 60)} 分钟' if duration is not None else '时长未知'
-        return f'{at} {"估算离开" if s["estimated"] else "关了"}{name}（{label}）'
-    return f'{at} 开了{name}（结束未知）'
+        return f'{clock(s["ended_at"])} 离开{name}（没记到打开）'
+    if not s['ended_at']:
+        return f'{clock(s["started_at"])} 起 {name}（还没记到离开）'
+    duration = s['duration_seconds']
+    label = f'约 {round(duration / 60)} 分钟' if duration is not None else '时长未知'
+    if s['estimated']:
+        label += '，离开时间是估算'
+    return f'{clock(s["started_at"])}–{clock(s["ended_at"])} {name}（{label}）'
 
 
 def digest(events, now=None):

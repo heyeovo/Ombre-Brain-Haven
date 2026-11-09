@@ -52,7 +52,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `automation_scheduler.py` | 日回顾与 weekly journey 的香港时区分钟级调度规则：固定 04:00 日界线、下次运行计算、连续轨迹截止游标和可编辑时间校验 |
 | `automation_executor.py` | 人工批准候选的白名单执行器；当前只注册 `weekly_journey`，负责冲突校验、批准稿 hash、派生 operation ID、重复确认回放、两步切换恢复及确认完成时原子推进轨迹游标 |
 | `journey_weekly_engine.py` | 每周触发的 journey 只读输入聚合与严格三类候选生成；从已确认截止日下一天连续读取到最近完整 OB 日，积压单次最多 31 天，读取开放阶段、日回顾、新桶/独立 feel/旧桶 feel 年轮并排除旧日印象/关系天气 feel |
-| `bucket_manager.py` | 桶 CRUD、搜索、评分、回收站、命中统计、分词 |
+| `bucket_manager.py` | 桶 CRUD、搜索、评分、回收站、命中统计、分词；feel 身份依赖显式类型，归档保存 type_before_archive |
 | `dehydrator.py` | 原文加元数据头的输出格式化、LLM 合并、打标与摘记；模型调用共用可热更新的 dehydration token、temperature、thinking 参数（含 `_last_merge_usage` 成本追踪） |
 | `decay_engine.py` | 衰减引擎，只计算排序 score；不自动 resolved、digested 或 archive |
 | `embedding_engine.py` | 向量嵌入 + 相似度搜索；可区分当前模型可用、缺失、损坏及模型/维度过期的桶向量状态；每个事件循环各用一个 API 客户端（Brain 调度线程各有循环）；记录运行态健康快照（最近成功/失败、错误类型、连续失败数） |
@@ -62,7 +62,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `raw_archive_import.py` | Claude 官方与 Kelivo 导出的流式白名单适配、预览审计、跨来源疑似重复、可见聊天＋推理档案打包及确认式上传 CLI；工具和附件内容不入 Haven |
 | `repair_raw_archive_thinking.py` | 历史档案正文/thinking 一次性幂等修复；默认 dry-run，只更新正文或 thinking 确有差异的消息；`--apply` 使用整批事务从 Haven 私密归档回填并重建正文哈希/FTS，异常时整批回滚 |
 | `recall_policy.py` | 召回策略（none/explicit/contextual 必要性、vague 闸、相对日期、分词整词判断） |
-| `reflection_engine.py` | 反思/日印象引擎 |
+| `reflection_engine.py` | 反思/日印象引擎；enrich 过滤模型新生成的类型保留词标签 |
 | `daily_review_engine.py` | 默认每日 04:30 按协作者生成第一人称日回顾；D 日材料固定为 D 日 04:00–D+1 日 04:00，安全字符预算内直接使用全部可见正文，超预算才按工作窗口压缩较早轮次并保留每窗最近原文；连续性参考仍为 D-2、D-1 两条日回顾，可由逐任务 router 选择 API 或 Pro，结果不进记忆桶 |
 | `persona_engine.py` / `portrait_engine.py` | 用户画像（persona 状态 + 画像生成） |
 | `memory_*.py` | 记忆分层：layers/nodes/edges/metadata/moments/diffusion/relevance/write_gate |

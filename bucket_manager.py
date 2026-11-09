@@ -754,18 +754,10 @@ class BucketManager:
             logger.warning(f"Failed to load bucket for update / 加载桶失败: {file_path}: {e}")
             return False
 
-        def _marker_set(value) -> set[str]:
-            values = value if isinstance(value, list) else [value]
-            return {str(item).strip().lower() for item in values if item is not None}
-
-        # Pinning is only a selection preference for feel buckets.  It must not
-        # change their type, directory, importance, or decay/retrieval behavior.
-        feel_markers = _marker_set(post.get("domain")) | _marker_set(post.get("tags"))
+        # Identity comes only from explicit type metadata, never semantic tags/domain.
         was_feel = (
             str(post.get("type") or "").strip().lower() == "feel"
             or str(post.get("type_before_pin") or "").strip().lower() == "feel"
-            or "feel" in feel_markers
-            or "沉淀物" in feel_markers
         )
 
         # --- Noise marking: save/restore importance_before_noise ---
@@ -2573,13 +2565,9 @@ class BucketManager:
 
             dest = safe_path(archive_subdir, os.path.basename(file_path))
 
-            # Preserve feel/wish flags in tags before overwriting type / 保留 feel/wish 标记
-            original_type = post.get("type", "")
-            if original_type == "feel":
-                tags = post.get("tags", [])
-                if isinstance(tags, list) and "feel" not in tags:
-                    tags.insert(0, "feel")
-                    post["tags"] = tags
+            # Preserve identity explicitly; repeated archive must not overwrite it.
+            if post.get("type") != "archived":
+                post["type_before_archive"] = post.get("type", "dynamic")
             # Update type marker then move file / 更新类型标记后移动文件
             post["type"] = "archived"
             with open(file_path, "w", encoding="utf-8") as f:
@@ -2596,7 +2584,7 @@ class BucketManager:
         return True
 
     async def unarchive(self, bucket_id: str) -> bool:
-        """Move a bucket back from archive to dynamic directory (preserving domain subdirs)."""
+        """Restore archived feels to feel storage; other buckets return to dynamic storage."""
         file_path = self._find_bucket_file(bucket_id)
         if not file_path or self.archive_dir not in str(file_path):
             return False
@@ -2606,13 +2594,16 @@ class BucketManager:
             if not isinstance(domain, list):
                 domain = [domain]
             primary_domain = sanitize_name(domain[0]) if domain else "未分类"
-            dynamic_subdir = os.path.join(self.dynamic_dir, primary_domain)
-            os.makedirs(dynamic_subdir, exist_ok=True)
-            dest = safe_path(dynamic_subdir, os.path.basename(file_path))
-            post["type"] = "dynamic"
-            # Restore feel type if tags indicate it was a feel bucket
-            if isinstance(post.get("tags"), list) and "feel" in post["tags"]:
-                post["type"] = "feel"
+            restored_feel = (
+                post.get("type_before_archive") == "feel"
+                or post.get("type_before_pin") == "feel"
+            )
+            post["type"] = "feel" if restored_feel else "dynamic"
+            post.metadata.pop("type_before_archive", None)
+            target_root = self.feel_dir if restored_feel else self.dynamic_dir
+            target_subdir = os.path.join(target_root, "沉淀物" if restored_feel else primary_domain)
+            os.makedirs(target_subdir, exist_ok=True)
+            dest = safe_path(target_subdir, os.path.basename(file_path))
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(frontmatter.dumps(post))
             shutil.move(file_path, str(dest))
@@ -2636,15 +2627,20 @@ class BucketManager:
             if not isinstance(domain, list):
                 domain = [domain]
             primary_domain = sanitize_name(domain[0]) if domain else "未分类"
-            target_dir = os.path.join(self.dynamic_dir, primary_domain)
+            restored_feel = (
+                post.get("type") == "feel"
+                or post.get("type_before_archive") == "feel"
+                or post.get("type_before_pin") == "feel"
+            )
+            post["type"] = "feel" if restored_feel else "dynamic"
+            post.metadata.pop("type_before_archive", None)
+            target_dir = os.path.join(
+                self.feel_dir if restored_feel else self.dynamic_dir,
+                "沉淀物" if restored_feel else primary_domain,
+            )
             os.makedirs(target_dir, exist_ok=True)
             dest = safe_path(target_dir, os.path.basename(file_path))
 
-            # Restore feel type if tags indicate it was a feel bucket
-            if isinstance(post.get("tags"), list) and "feel" in post["tags"]:
-                post["type"] = "feel"
-            else:
-                post["type"] = "dynamic"
             post["active"] = True
             post["deprecated"] = False
             post["resolved"] = False
@@ -2661,7 +2657,7 @@ class BucketManager:
             )
             return False
 
-        logger.info(f"Activated bucket / 恢复记忆桶: {bucket_id} → dynamic/{primary_domain}/")
+        logger.info(f"Activated bucket / 恢复记忆桶: {bucket_id} → {target_dir}/")
 
         return True
 

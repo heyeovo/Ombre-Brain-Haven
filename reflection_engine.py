@@ -679,7 +679,12 @@ class ReflectionEngine:
         else:
             result = self._heuristic_classify(bucket)
 
-        tags = self._string_list(result.get("tags"), limit=8)
+        # LLM topic labels must not impersonate storage types.
+        reserved_types = {"feel", "沉淀物", "journal", "日记", "dynamic", "permanent", "archived"}
+        tags = [
+            tag for tag in self._string_list(result.get("tags"), limit=8)
+            if tag.strip().lower() not in reserved_types
+        ]
         confidence = self._clamp(result.get("confidence", 0.55))
         importance = self._int_between(result.get("importance"), meta.get("importance", 5))
         if self._has_favorite_tag(tags) and not self._has_favorite_reason(bucket.get("content", "")):

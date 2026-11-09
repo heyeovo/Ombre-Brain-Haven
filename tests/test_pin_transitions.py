@@ -99,14 +99,14 @@ class PinTransitionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(Path(bucket["path"]).parent.name, "沉淀物")
         self.assertEqual(Path(bucket["path"]).parent.parent.name, "feel")
 
-    async def test_legacy_feel_marker_restores_feel_on_unpin(self):
+    async def test_explicit_legacy_feel_type_restores_feel_on_unpin(self):
         bucket_id = await self.manager.create(
             content="旧版误改类型的感受",
             name="旧版感受",
             importance=10,
             bucket_type="permanent",
             pinned=True,
-            tags=["feel"],
+            extra_metadata={"type_before_pin": "feel"},
             domain=[],
         )
 

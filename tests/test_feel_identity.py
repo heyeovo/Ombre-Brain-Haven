@@ -54,16 +54,20 @@ class FeelIdentityTest(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(Path(restored["path"]).is_relative_to(root))
                     self.assertNotIn("type_before_archive", restored["metadata"])
 
-    async def test_legacy_tag_only_archive_is_not_guessed_as_feel(self):
-        bid = await self.manager.create(content="旧归档普通桶", tags=["feel"])
-        await self.manager.archive(bid)
-        bucket = await self.manager.get(bid)
-        post = frontmatter.load(bucket["path"])
-        post.metadata.pop("type_before_archive")
-        Path(bucket["path"]).write_text(frontmatter.dumps(post))
-        self.assertTrue(await self.manager.unarchive(bid))
-        restored = await self.manager.get(bid)
-        self.assertEqual(restored["metadata"]["type"], "dynamic")
+    async def test_legacy_tag_only_archive_keeps_old_feel_restore(self):
+        # Pre-type_before_archive archives marked feels only with a "feel" tag.
+        for restore in ("unarchive", "activate"):
+            for tags, expected in ((["feel"], "feel"), (["日常"], "dynamic")):
+                with self.subTest(restore=restore, tags=tags):
+                    bid = await self.manager.create(content="旧归档", tags=tags)
+                    await self.manager.archive(bid)
+                    bucket = await self.manager.get(bid)
+                    post = frontmatter.load(bucket["path"])
+                    post.metadata.pop("type_before_archive")
+                    Path(bucket["path"]).write_text(frontmatter.dumps(post))
+                    self.assertTrue(await getattr(self.manager, restore)(bid))
+                    restored = await self.manager.get(bid)
+                    self.assertEqual(restored["metadata"]["type"], expected)
 
     async def test_normal_pin_cycle_with_feel_topics_stays_normal(self):
         bid = await self.manager.create(content="普通桶", tags=["feel"], domain=["沉淀物"])

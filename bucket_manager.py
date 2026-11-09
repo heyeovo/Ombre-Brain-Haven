@@ -2583,6 +2583,19 @@ class BucketManager:
             return False
         return True
 
+    @staticmethod
+    def _archived_was_feel(post) -> bool:
+        if post.get("type_before_archive") == "feel" or post.get("type_before_pin") == "feel":
+            return True
+        # Archives made before type_before_archive existed only kept a "feel" tag.
+        tags = post.get("tags")
+        return (
+            "type_before_archive" not in post.metadata
+            and post.get("type") == "archived"
+            and isinstance(tags, list)
+            and "feel" in tags
+        )
+
     async def unarchive(self, bucket_id: str) -> bool:
         """Restore archived feels to feel storage; other buckets return to dynamic storage."""
         file_path = self._find_bucket_file(bucket_id)
@@ -2594,10 +2607,7 @@ class BucketManager:
             if not isinstance(domain, list):
                 domain = [domain]
             primary_domain = sanitize_name(domain[0]) if domain else "未分类"
-            restored_feel = (
-                post.get("type_before_archive") == "feel"
-                or post.get("type_before_pin") == "feel"
-            )
+            restored_feel = self._archived_was_feel(post)
             post["type"] = "feel" if restored_feel else "dynamic"
             post.metadata.pop("type_before_archive", None)
             target_root = self.feel_dir if restored_feel else self.dynamic_dir
@@ -2627,11 +2637,7 @@ class BucketManager:
             if not isinstance(domain, list):
                 domain = [domain]
             primary_domain = sanitize_name(domain[0]) if domain else "未分类"
-            restored_feel = (
-                post.get("type") == "feel"
-                or post.get("type_before_archive") == "feel"
-                or post.get("type_before_pin") == "feel"
-            )
+            restored_feel = post.get("type") == "feel" or self._archived_was_feel(post)
             post["type"] = "feel" if restored_feel else "dynamic"
             post.metadata.pop("type_before_archive", None)
             target_dir = os.path.join(

@@ -71,3 +71,5 @@
 ```
 
 手机记录：用 `device_activity(hours=6)` 查小羊最近在手机上用了哪些 App；关闭事件可能漏记，时长是估算，不能据此断言持续使用。
+
+Outlook：`calendar`（list/create/update/delete）管理日历，`reminders`（list/create/update/complete/delete）管理 Microsoft To Do；时间均为北京时间，新建只写「言之」，改动小羊其他日历／列表须先问她，同意后才传 `confirmed=true`，id 可用查询返回的短码。

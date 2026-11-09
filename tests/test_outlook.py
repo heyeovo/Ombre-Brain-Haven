@@ -278,10 +278,12 @@ async def test_calendar_all_calendars_and_limit(store):
 @pytest.mark.asyncio
 async def test_reminder_list_filter_done(store):
     authorize(store)
+    filters = []
     def handler(r):
         if r.url.path.endswith('/lists'):
             return reply({'value':[{'id':'a','displayName':'私人'},{'id':'b','displayName':'言之'}]})
         assert '/lists/b/' in r.url.path
+        filters.append(r.url.params.get('$filter'))
         return reply({'value':[{'id':'one','title':'未完成','dueDateTime':graph_time('2026-11-10'), 'isReminderOn':True,
                                'reminderDateTime':graph_time('2026-11-10 09:00')},
                               {'id':'two','title':'已做','status':'completed'}]})
@@ -289,6 +291,22 @@ async def test_reminder_list_filter_done(store):
     text = await store.reminders('list',list='言之')
     assert '未完成' in text and '已做' not in text and '2026-11-10 09:00' in text
     assert '已做' in await store.reminders('list',list='言之',include_done=True)
+    assert filters == ["status ne 'completed'", None]
+
+
+@pytest.mark.asyncio
+async def test_calendar_list_skips_unreadable_calendar(store):
+    authorize(store)
+    def handler(r):
+        if r.url.path.endswith('/calendars'):
+            return reply({'value':[{'id':'a','name':'节假日'},{'id':'b','name':'言之'}]})
+        if '/calendars/a/' in r.url.path:
+            return reply({'error':{'message':'not supported'}}, 400)
+        return reply({'value':[{'id':'e','subject':'吃饭','start':graph_time('2026-11-10 12:00'),
+                                'end':graph_time('2026-11-10 13:00')}]})
+    mock(store, handler)
+    result = await store.calendar('list', start='2026-11-10')
+    assert '吃饭' in result and '读取失败的日历：节假日' in result
 
 
 @pytest.mark.asyncio

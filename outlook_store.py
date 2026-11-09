@@ -366,10 +366,15 @@ class OutlookStore:
             finish = parse_time(end) if end else begin + timedelta(days=7)
             if finish <= begin:
                 raise OutlookError('结束时间必须晚于开始时间')
-            rows = []
+            rows, failed = [], []
             for parent in await self.values('/me/calendars'):
-                events = await self.values(f'/me/calendars/{segment(parent["id"])}/calendarView',
-                    params={'startDateTime': begin.isoformat(), 'endDateTime': finish.isoformat()})
+                try:
+                    events = await self.values(f'/me/calendars/{segment(parent["id"])}/calendarView',
+                        params={'startDateTime': begin.isoformat(), 'endDateTime': finish.isoformat()})
+                except OutlookError:
+                    # One unreadable calendar (subscribed / holiday) must not hide the rest.
+                    failed.append(parent.get('name', ''))
+                    continue
                 for event in events:
                     code = self.short_id('calendar', event['id'], parent['id'])
                     at = display_time(event['start'])
@@ -377,7 +382,8 @@ class OutlookStore:
                     text = f'{span} {event.get("subject", "")} ［{parent["name"]}］ {event.get("location", {}).get("displayName", "")} id:{code}'
                     rows.append((at, text))
             rows.sort(key=lambda row: row[0])
-            return self.lines([row[1] for row in rows], '没有日程')
+            text = self.lines([row[1] for row in rows], '没有日程')
+            return text + (f'\n（读取失败的日历：{"、".join(failed)}）' if failed else '')
         if action == 'create' and (not title or not start):
             raise OutlookError('创建日程需要 title 和 start')
         body = {}
@@ -441,7 +447,8 @@ class OutlookStore:
             for parent in await self.values('/me/todo/lists'):
                 if list and parent['displayName'] != list:
                     continue
-                for task in await self.values(f'/me/todo/lists/{segment(parent["id"])}/tasks'):
+                query = {} if include_done else {'params': {'$filter': "status ne 'completed'"}}
+                for task in await self.values(f'/me/todo/lists/{segment(parent["id"])}/tasks', **query):
                     if not include_done and task.get('status') == 'completed':
                         continue
                     code = self.short_id('reminders', task['id'], parent['id'])

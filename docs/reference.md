@@ -34,6 +34,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 
 | 文件 | 职责 |
 |------|------|
+| `outlook_store.py` | 个人 Outlook 设备码授权、串行刷新、Graph 日历/To Do、言之资源缓存和短码映射；独立 `state_dir/outlook.sqlite` |
 | `server.py` | **Brain** 入口（约 700KB）。MCP 工具注册（`@mcp.tool`）+ REST API（`@mcp.custom_route`）+ 记忆核心 |
 | `gateway.py` | **Gateway** 入口（约 1MB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线（透镜调试区分检索前排除与相关性拒绝）+ cc 持久化路由（`Route()` 注册） |
 | `gateway_state.py` | Gateway/cc SQLite 状态：单行唤醒提示词自定义（`cc_agent_wake_prompt`，含更新时间）、带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式与 MCP 覆盖、固定 handoff、版本化按天滚动配置及 turn watermark、每协作者唯一主窗标记、软删除防复活、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision 成对指针及上一检查点、显式 Haven 正文恢复的原子 lane 切换记录、Context GC 配置/历史、带 `created/recalled/breath` 原因与 context revision 生命周期的召回隔离账本；日期清单按日汇总正文、工具、附件视觉/文件正文（attachment_image_tokens 单列图片子集，不重复计入 total）、召回、thinking、运行时时间戳、消息框架和 agent wake 的 token 预估；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox，正式主动消息（含 quiet，`delivery` 原样保存在 raw）还会在该事务内解除缓存保活的临时暂停，no-op 不解除；初始化事务约束见下方「cc 持久化（Haven 侧）」节 |
@@ -327,6 +328,22 @@ POST /api/import/review                                  # 审查决策（import
 POST /api/import/pause                                   # 暂停
 GET  /api/import/patterns                                # 模式检测
 ```
+
+### Outlook 日历与提醒事项
+
+三个接口均由 `_require_room_bearer` 鉴权，无凭据返回 401；配置要求见 [ENV_VARS](../ENV_VARS.md#outlook-日历与-microsoft-to-dobrain)。
+
+```
+POST /api/outlook/auth/start          # 返回 user_code、verification_uri、expires_in、message、expires_at；重复调用复用进行中授权
+GET /api/outlook/auth/status          # connected、account、pending（仅 expires_at）、last_error、calendar_id/todo_list_id 是否已缓存（bool）
+POST /api/outlook/auth/disconnect     # 取消轮询，删除本地凭据、资源 ID 和短码
+```
+
+`outlook_store.py` 使用独立 SQLite（WAL、busy_timeout=5000、可重复初始化），保存 refresh/access token、到期时间、邮箱、scope、更新时间，以及「言之」日历/列表 ID 和类型隔离的短码映射。这是单个个人账号级集成，不关联聊天 session/profile。状态接口和工具不返回 token；设备码仅存进程内，重启后重新 start。每次 Graph 调用前检查凭据，到期前五分钟按需串行刷新并保存轮换的 refresh token；`invalid_grant` 清除凭据并提示重新授权。disconnect 是本地断开，不撤销微软账户端的应用同意。
+
+MCP `calendar` 支持 list/create/update/delete；`reminders` 支持 list/create/update/complete/delete。时间输入按北京时间解释（ISO 带偏移时先转换），Graph 读写使用 China Standard Time。日历 list 默认今天零点到七天后，枚举 `/me/calendars` 并逐个读取 calendarView（`/me/calendarView` 仅默认日历），展开重复事件并跨日历排序；任务 list 可选列表和已完成项。分页完整读取，每次最多输出 50 条并报告余数，返回短码或接受完整 ID。新建只写「言之」，资源缺失或缓存 404 时重新查找/创建；每次修改会查实际归属，其他日历/列表须先征得小羊同意再传 `confirmed=true`。日历默认一小时、提前 15 分钟提醒（-1 关闭）；全天事件按零点和不包含结束日处理，默认一天，不提供重复规则。提醒事项支持 remind_at、due、notes，update 传空字符串可清除提醒/到期。Graph 429/503 按 Retry-After 重试一次，其余错误附中文步骤与原始 error.message。
+
+[微软说明](https://support.microsoft.com/en-us/todo/using-apple-watch-with-microsoft-to-do) To Do 可通过 Outlook 账户同步到 Apple 提醒事项；自建「言之」列表在小羊当前 iOS 上的可见性、reminderDateTime 的实际提示时间和到期日仍需真机验收，MockTransport 测试不代表已完成端到端同步验证。
 
 ### 手机使用记录
 

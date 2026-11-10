@@ -16,6 +16,8 @@ Ombre Brain 是一套以 Markdown 记忆桶为长期真源、同时提供 MCP �
 
 手机 App 使用记录由 dashboard 接收快捷指令 / 主屏 PWA 事件后写入 Haven 独立 SQLite；`device_activity` 可查询最近使用情况，后台唤醒可读取单行摘要。关闭事件可能漏记，时长按保守规则估算。接口与存储契约见 [reference](docs/reference.md#手机使用记录)。
 
+Outlook 日历和 Microsoft To Do 通过个人微软账户设备码授权接入，`calendar` / `reminders` 可查询所有日历／列表，新建固定写入「言之」，修改小羊其他日历／列表须先获同意；接入与存储见 [reference](docs/reference.md#outlook-日历与提醒事项)。
+
 ## 系统组成
 
 ```mermaid
@@ -305,6 +307,8 @@ cc 协作者可分别维护基础 system 提示词和长期提示词模块：基
 
 ## 快速部署
 
+Outlook 为可选集成，Brain 容器的配置及微软应用注册要求见 [ENV_VARS](ENV_VARS.md#outlook-日历与-microsoft-to-dobrain)，授权凭据随 state 卷持久化。
+
 ### 推荐：交互式脚本
 
 Linux / VPS：
@@ -570,6 +574,7 @@ Codex 接线时注意：
 | `profile_fact` | 管理带证据的画像事实 |
 | `reminder_create/list/update` | 管理独立照顾备忘 |
 | `room` | enter / write / read / list / leave / open；私密条目、来访封存与便条，锁只限制 open |
+| `calendar` / `reminders` | Outlook 日历与 Microsoft To Do 查询、创建和修改；北京时间，新建固定写入「言之」 |
 | `trace` / `pulse` / `introspection` | 近期轨迹、系统脉搏与内省 |
 | `search_chat` | 按关键词搜索聊天原文（FTS5 + LIKE）；支持日期/角色/会话过滤和排除当前窗口 |
 | `get_chat_context` | 按 turn_id 展开某条聊天记录的前后 N 轮上下文 |

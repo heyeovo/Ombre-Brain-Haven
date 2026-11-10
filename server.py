@@ -165,6 +165,7 @@ from prompt_store import (
 from recall_diagnostics import RecallDiagnosticsLogger
 from reminder_store import ReminderStore
 from device_event_store import DeviceEventStore, derive_sessions, digest
+from outlook_store import OutlookStore, OutlookError
 from todo_store import TODO_DOMAINS, TodoStore
 from reranker_engine import RerankerEngine
 from self_anchor import SELF_ANCHOR_TAG, is_self_anchor_bucket, is_self_anchor_metadata
@@ -362,6 +363,7 @@ weekly_journey_engine = WeeklyJourneyEngine(
 automation_executor = AutomationExecutor(automation_store, bucket_mgr, weekly_journey_engine)
 raw_event_store = RawEventStore(config)                  # Raw dialogue archive / 原文保险箱
 device_event_store = DeviceEventStore(config)
+outlook_store = OutlookStore(config)
 reminder_store = ReminderStore(config)                    # Standalone care memos / 独立照顾备忘
 todo_store = TodoStore(config)                            # Standalone todos / 独立待办
 
@@ -16176,6 +16178,56 @@ async def admin_backfill(request):
 async def device_activity(hours: int = 6) -> str:
     """查小羊最近在手机上用了哪些 App。"""
     return device_event_store.activity(max(1, min(int(hours), 336)))
+
+
+@mcp.tool()
+async def calendar(action: str, id: str | None = None, title: str | None = None,
+                   start: str | None = None, end: str | None = None, all_day: bool | None = None,
+                   location: str | None = None, notes: str | None = None,
+                   remind_minutes: int | None = None, confirmed: bool = False) -> str:
+    """日历 list/create/update/delete；北京时间，新建只写「言之」，改删小羊其他日历须先征得同意再传 confirmed=true。"""
+    return await outlook_store.tool('calendar', action, id=id, title=title, start=start, end=end,
+        all_day=all_day, location=location, notes=notes, remind_minutes=remind_minutes, confirmed=confirmed)
+
+
+@mcp.tool()
+async def reminders(action: str, id: str | None = None, list: str | None = None,
+                    include_done: bool = False, title: str | None = None,
+                    remind_at: str | None = None, due: str | None = None,
+                    notes: str | None = None, confirmed: bool = False) -> str:
+    """提醒事项 list/create/update/complete/delete；北京时间，新建只写「言之」，改动小羊其他列表须先征得同意再传 confirmed=true。"""
+    return await outlook_store.tool('reminders', action, id=id, list=list, include_done=include_done,
+        title=title, remind_at=remind_at, due=due, notes=notes, confirmed=confirmed)
+
+
+async def _outlook_auth_response(request, action):
+    from starlette.responses import JSONResponse
+    err = _require_room_bearer(request)
+    if err:
+        return err
+    try:
+        return JSONResponse(await getattr(outlook_store, action)())
+    except OutlookError as exc:
+        return JSONResponse({'error': str(exc)}, status_code=400)
+    except httpx.HTTPError:
+        return JSONResponse({'error': 'Outlook 授权失败：网络连接异常，请稍后重试'}, status_code=502)
+    except (ValueError, KeyError, TypeError):
+        return JSONResponse({'error': 'Outlook 授权失败：微软服务响应无效，请稍后重试'}, status_code=502)
+
+
+@mcp.custom_route("/api/outlook/auth/start", methods=["POST"])
+async def api_outlook_auth_start(request):
+    return await _outlook_auth_response(request, 'start_auth')
+
+
+@mcp.custom_route("/api/outlook/auth/status", methods=["GET"])
+async def api_outlook_auth_status(request):
+    return await _outlook_auth_response(request, 'status')
+
+
+@mcp.custom_route("/api/outlook/auth/disconnect", methods=["POST"])
+async def api_outlook_auth_disconnect(request):
+    return await _outlook_auth_response(request, 'disconnect')
 
 
 @mcp.custom_route("/api/device-events", methods=["POST", "GET"])

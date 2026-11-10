@@ -192,3 +192,11 @@ Webhook 推送格式（JSON）：
 | `TRPG_DM_MCP_TOKEN` | 空 | `/trpg/dm/mcp` 的独立 Bearer；仅放在 Brain（验证端）与 trpg-dm 容器（客户端），不得放进 Dashboard |
 
 未配置对应 token 时该端点一律 401；两者必须互不相同，且均不得等于 `OMBRE_GATEWAY_TOKEN`，重复配置也拒绝。OB Bearer 和 ChatGPT OAuth 不能访问两套 MCP。Dashboard 服务端仅用已有 Gateway Bearer 调用 `/trpg/api/*`；浏览器不得取得这些密钥。部署时需要在 Brain 容器注入这两个变量，现有 Compose 不会自动转发新增变量，由发布维护者配置。
+
+## Outlook 日历与 Microsoft To Do（Brain）
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `OUTLOOK_CLIENT_ID` | 未配置 | 个人微软账户 Entra 应用的客户端 ID；只在 Brain 注入。未配置时相关工具和授权接口返回中文提示 |
+
+应用账户类型选择「仅个人 Microsoft 账户」，开启「允许公共客户端流」，委托权限为 `Calendars.ReadWrite`、`Tasks.ReadWrite`、`User.Read`、`offline_access`。通过 consumers authority 的设备码授权，无 client secret、无 redirect URI。配置后以房间 Bearer 调用授权接口，按返回的登录地址和设备码完成授权；接口定义见 [reference](docs/reference.md#outlook-日历与提醒事项)。Coolify 保存的 Compose 需由发布维护者显式向 Brain 转发该变量，不能仅在 Service 环境变量列表填写而不注入容器。授权凭据保存在持久 state 卷，不存环境变量。

@@ -5,7 +5,7 @@ tests/
 *.pyc
 *.pyo
 .env
-.venv/
+.venv
 .claude/settings.local.json
 .claude/hooks/__pycache__/
 .vscode/

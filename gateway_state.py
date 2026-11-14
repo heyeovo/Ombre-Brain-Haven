@@ -829,6 +829,7 @@ class GatewayStateStore:
                 "persona_id": "TEXT NOT NULL DEFAULT 'ombre'",
                 "local_engine_preference": "TEXT NOT NULL DEFAULT 'cc'",
                 "selfhost_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
+                "gpt_subscription_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
                 "cc_overrides_json": "TEXT NOT NULL DEFAULT '{}'",
                 "cc_lanes_json": "TEXT NOT NULL DEFAULT '{}'",
                 "context_gc_json": "TEXT NOT NULL DEFAULT '{}'",
@@ -4361,7 +4362,7 @@ class GatewayStateStore:
         row = conn.execute(
             """
             SELECT profile_id, session_id, persona_id, title,
-                   local_engine_preference, selfhost_overrides_json, cc_overrides_json,
+                   local_engine_preference, selfhost_overrides_json, gpt_subscription_overrides_json, cc_overrides_json,
                    cc_lanes_json, context_gc_json, rolling_context_json, context_revision,
                    context_turn_watermark,
                    prompt_module_overrides_json,
@@ -4378,7 +4379,7 @@ class GatewayStateStore:
         if row is None:
             return {}
         preference = str(row["local_engine_preference"] or "cc")
-        if preference not in {"cc", "selfhost"}:
+        if preference not in {"cc", "selfhost", "gpt_subscription"}:
             preference = "cc"
         mode = str(row["mode"] or "chat")
         if mode not in {"chat", "work"}:
@@ -4390,6 +4391,7 @@ class GatewayStateStore:
             "title": str(row["title"] or ""),
             "local_engine_preference": preference,
             "selfhost_overrides": self._json_object(row["selfhost_overrides_json"]),
+            "gpt_subscription_overrides": self._json_object(row["gpt_subscription_overrides_json"]),
             "cc_overrides": self._json_object(row["cc_overrides_json"]),
             "cc_lanes": self._json_object(row["cc_lanes_json"]),
             "context_gc": self._json_object(row["context_gc_json"]),
@@ -5134,7 +5136,7 @@ class GatewayStateStore:
         if "effective_engine" in updates:
             raise ValueError("effective_engine is runtime-only and cannot be persisted")
         allowed = {
-            "local_engine_preference", "selfhost_overrides", "cc_overrides", "prompt_module_overrides",
+            "local_engine_preference", "selfhost_overrides", "gpt_subscription_overrides", "cc_overrides", "prompt_module_overrides",
             "mode", "mcp_overrides", "recall_mode", "daily_review_enabled", "initialize_daily_review_snapshot", "handoff_snapshot",
             "frozen_persona_append",
         }
@@ -5145,8 +5147,17 @@ class GatewayStateStore:
         preference: str | None = None
         if "local_engine_preference" in updates:
             preference = str(updates.get("local_engine_preference") or "").strip()
-            if preference not in {"cc", "selfhost"}:
-                raise ValueError("local_engine_preference must be cc or selfhost")
+            if preference not in {"cc", "selfhost", "gpt_subscription"}:
+                raise ValueError("local_engine_preference must be cc, selfhost or gpt_subscription")
+        gpt_overrides = None
+        if "gpt_subscription_overrides" in updates:
+            raw_gpt = updates["gpt_subscription_overrides"]
+            if not isinstance(raw_gpt, dict) or set(raw_gpt) - {"model"}:
+                raise ValueError("gpt_subscription_overrides only accepts model")
+            model = raw_gpt.get("model", "")
+            if not isinstance(model, str) or len(model) > 200:
+                raise ValueError("gpt_subscription_overrides.model must be a string up to 200 characters")
+            gpt_overrides = {"model": model.strip()} if model.strip() else {}
         overrides: dict[str, Any] | None = None
         if "selfhost_overrides" in updates:
             raw_overrides = updates.get("selfhost_overrides")
@@ -5356,6 +5367,11 @@ class GatewayStateStore:
                     updated_at,
                 ),
             )
+            if gpt_overrides is not None:
+                conn.execute(
+                    "UPDATE conversation_sessions SET gpt_subscription_overrides_json = ? WHERE profile_id = ? AND session_id = ?",
+                    (json.dumps(gpt_overrides), safe_profile_id, safe_session_id),
+                )
             if mcp_overrides is not None:
                 conn.execute(
                     "UPDATE conversation_sessions SET mcp_overrides = ? WHERE profile_id = ? AND session_id = ?",

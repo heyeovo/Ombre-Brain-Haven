@@ -38,6 +38,7 @@ from gateway_state import (
     RequestIdReuseError,
     SessionStateConflictError,
 )
+from gpt_chat_requests import GPTChatRequests
 from gpt_subscription import GPTSubscriptionService, GPTSubscriptionError, MAX_BODY_BYTES, ID_PATTERN, public_error, validate_request
 from memory_diffusion import (
     diffuse_memory,
@@ -526,6 +527,7 @@ class GatewayService:
             os.path.join(config["buckets_dir"], "gateway_state.db")
         )
         self.conversation_slice_store = ConversationSliceStore(self.state_store.db_path)
+        self.gpt_chat_requests = GPTChatRequests(self.state_store.db_path)
         self.gpt_subscription = GPTSubscriptionService(config["buckets_dir"])
         self._session_handoff_blocks: dict[str, str] = {}
         self.raw_event_store = raw_event_store or RawEventStore(config)
@@ -2675,6 +2677,19 @@ class GatewayService:
         if auth_result is not None:
             return auth_result
         profile_id = self._conversation_profile_id
+        if request.url.path.endswith("/chat-requests"):
+            try:
+                raw = await request.body()
+                if len(raw) > 4096:
+                    return JSONResponse({"ok": False, "error": "request too large"}, status_code=413)
+                body = json.loads(raw)
+                if not isinstance(body, dict):
+                    raise ValueError("body must be an object")
+                result = self.gpt_chat_requests.control(profile_id, body)
+                return JSONResponse(result, status_code=200 if result["ok"] else 409,
+                                    headers={"Cache-Control": "no-store"})
+            except (ValueError, TypeError) as exc:
+                return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         service = self.gpt_subscription
         operation = request.url.path.rsplit("/", 1)[-1]
         headers = {"Cache-Control": "no-store"}
@@ -3822,6 +3837,7 @@ class GatewayService:
         state_keys = {
             "local_engine_preference",
             "selfhost_overrides",
+            "gpt_subscription_overrides",
             "cc_overrides",
             "prompt_module_overrides",
             "mcp_overrides",
@@ -21843,6 +21859,7 @@ def create_gateway_app(
             Route("/api/gpt-subscription/models", gpt_subscription, methods=["GET"]),
             Route("/api/gpt-subscription/responses", gpt_subscription, methods=["POST"]),
             Route("/api/gpt-subscription/cancel", gpt_subscription, methods=["POST"]),
+            Route("/api/gpt-subscription/chat-requests", gpt_subscription, methods=["POST"]),
             Route("/api/conversation/attachment", conversation_attachment, methods=["GET", "POST", "DELETE"]),
             Route("/api/conversation/import/polaris", polaris_conversation_import, methods=["POST"]),
             Route("/api/conversation/sessions", conversation_sessions, methods=["GET"]),

@@ -35,6 +35,8 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | 文件 | 职责 |
 |------|------|
 | `outlook_store.py` | 个人 Outlook 设备码授权、串行刷新、Graph 日历/To Do、言之资源缓存和短码映射；独立 `state_dir/outlook.sqlite` |
+| `gpt_subscription.py` | Gateway 的 GPT 订阅文字传输：profile 隔离的 Node 私有管道、活跃 request_id 去重、取消与停止收尾、错误分类；不处理人设/召回/历史或原始授权导入 |
+| `integrations/gpt_subscription/` | 固定官方 SIWC DevKit 源码及许可、AES-GCM 加密、跨进程刷新锁/轮换恢复、stdin 管理导入与本机 SSH 登录交接；Node 依赖由 package-lock 固定 |
 | `server.py` | **Brain** 入口（约 700KB）。MCP 工具注册（`@mcp.tool`）+ REST API（`@mcp.custom_route`）+ 记忆核心 |
 | `gateway.py` | **Gateway** 入口（约 1MB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线（透镜调试区分检索前排除与相关性拒绝）+ cc 持久化路由（`Route()` 注册） |
 | `gateway_state.py` | Gateway/cc SQLite 状态：单行唤醒提示词自定义（`cc_agent_wake_prompt`，含更新时间）、带永久消息 ID 与聊天日期的会话原文、窗口闲聊/工作模式与 MCP 覆盖、固定 handoff、版本化按天滚动配置及 turn watermark、每协作者唯一主窗标记、软删除防复活、全局 Pro 额度快照、独立 `daily_reviews`、图片/文件附件、协作者归属与提示词、幂等写入、跨设备冲突、CC Pro/API 分线路 session 与 context revision 成对指针及上一检查点、显式 Haven 正文恢复的原子 lane 切换记录、Context GC 配置/历史、带 `created/recalled/breath` 原因与 context revision 生命周期的召回隔离账本；日期清单按日汇总正文、工具、附件视觉/文件正文（attachment_image_tokens 单列图片子集，不重复计入 total）、召回、thinking、运行时时间戳、消息框架和 agent wake 的 token 预估；CC 严格提交可同事务写 agent wake 结果、活动/cache 时间、next wake、silence timer 与 Bark outbox，正式主动消息（含 quiet，`delivery` 原样保存在 raw）还会在该事务内解除缓存保活的临时暂停，no-op 不解除；初始化事务约束见下方「cc 持久化（Haven 侧）」节 |
@@ -186,6 +188,39 @@ phase 合法边为 `players → yanzhi/dm`、`yanzhi → dm`、`dm → players/c
 ```
 POST /auth/login  { password } → set-cookie
 ```
+
+### GPT 订阅授权与传输（Gateway）
+
+以下均只接受 Gateway Bearer；浏览器 Cookie 无效。profile 只取 Gateway 当前 persona 的 `profile_id`，不接受客户端指定 profile。HTTP 不提供令牌导入或读取；连接状态和模型列表均 `Cache-Control: no-store`。
+
+```text
+GET  /api/gpt-subscription/connection    # configured/status/sharing/connection_id/label/掩码 account/error；limits 固定 null
+POST /api/gpt-subscription/connection    # {action:"select",connection_id} 或 {action:"disconnect"}
+GET  /api/gpt-subscription/connections   # 当前 Haven profile 内的授权登记列表，不返回个人身份或令牌
+GET  /api/gpt-subscription/models        # {ok,models:[{slug,displayName}]}；按账号当前目录顺序，仅 visibility=list
+POST /api/gpt-subscription/responses     # 仅文字；下述 SSE 契约
+POST /api/gpt-subscription/cancel        # {request_id} → {ok,cancel_requested,request_id}
+```
+
+连接状态为 `disconnected | connecting | connected | reauth_required`；另有 `configured`、`login_method=local_ssh_import`、`usage_url`。未配置密钥时 connection GET 返回 `configured:false`，其余请求明确失败，不回退到其他付款线路。`connected` 表示已保存授权；真正使用前在锁内检查并按需刷新。状态中的 `error` 优先于状态标签：密钥/存储问题应修复原文件，不应通过重新登录覆盖。
+
+请求正文为 `{request_id,model,input:[{role:"user"|"assistant"|"developer",content:string}],instructions?:string}`，最多 2000 条消息、整个正文小于 4 MiB。拒绝其他字段（包括 tools、附件、profile、store、conversation），人设指导通过 instructions。客户端 request_id 为 1–100 位字母数字、下划线或连字符。向官方固定 `POST https://api.openai.com/v1/responses` 发 `store:false,stream:true`，不继承环境中的 Platform Key、组织、项目或自定义请求头；HTTP 429 不自动重试。
+
+SSE 事件 `event: delta | completed | error`，每个 data 是含同名 `type` 和客户端 `request_id` 的 JSON：
+
+- `delta`：`text` 增量。
+- `completed`：仅在官方 `response.completed` 之后；可有 `responseId`、`requestId`（官方 HTTP 请求标识，与客户端 request_id 区分），`usage` 为实际数字字段 `input_tokens/output_tokens/total_tokens/cached_tokens/reasoning_tokens`，缺失为 null。它不是订阅剩余额度；`limits:null` 不代表 0 或无限。
+- `error`：`error={code,message,retryable,status?,requestId?,param?,responseShape?,action}`。code/status/请求标识保留官方诊断，原始响应正文、令牌和可能回显的请求文字不透传。`action` 为 reconnect / usage_settings / enable_sharing / retry / inspect。
+
+流中失败、incomplete、取消、无终态 EOF 均不能转为 completed；部分 delta 可保留，但应由窗口 2 保存为中断轮次。`subscription_sharing_usage_limit_exceeded` 提示到 usage_url 查看额度，不能推断具体重置时间；暂时不可用和普通 401/403 不清除凭据。终结性 refresh 错误才清除不可用 token 并保留登记用于重新授权。disconnect 会尝试撤销远端 renewable session；失败时仍本地断开并返回 `revocation_failed`，需到 ChatGPT Settings 检查远端撤销。
+
+**持久化**：`buckets_dir/gpt-subscription/<sha256(profile_id)>/chatgpt-auth.json` 是 AES-256-GCM 密文（包含各登记的 client ID、已验证身份、令牌、pending refresh、导入回执）；AAD 绑定 profile，复制到另一 profile 无法解密。`chatgpt-host.json` 为此运行域稳定且非秘密的 host ID，重授权/导入不得换成本机 ID。私有目录 0700、文件 0600。密钥要求只维护在 [ENV_VARS](../ENV_VARS.md#GPT-订阅聊天gateway可选)。密钥缺失、密文损坏或身份暂时不可验证时保留原文件。旧 DevKit v1/v2 由同一锁内迁移为加密格式；初始化可重复，不改已有聊天数据库或数据表。
+
+**刷新与导入**：只有 Haven 使用交接后的 refresh token，所有 Node 辅助进程共享同一 profile 的跨进程锁；请求取消不打断已开始的刷新。根目录 `.registrations/chatgpt-auth.json` 是另行加密的登记归属索引，导入在全局锁下先绑定 registration 到唯一 profile，禁止同一刷新登记被导入另一个 profile；归属先持久化，后续授权写入失败仍保留保守占用，同 profile 可以重试。收到带 ID token 的轮换结果先加密 fsync 成 pending checkpoint，再验证签名，后续进程可恢复验证而不重用旧 refresh token。原子 rename 后同步目录。网络响应收到至首次持久写入之间若进程/磁盘故障，仍可能需要重新授权，不能保证跨网络与文件系统的原子事务。
+
+Node `admin.mjs` 仅从 stdin 接受 prepare-import/import。导入绑定目标 host ID 和 generation，先验证 ID token 的 issuer/audience/subject 及账号模型访问，再原子激活；校验失败不动可用授权。`transfer_id` + 摘要回执让成功交接可幂等重试，即便令牌已刷新也不会写回旧授权。新的 generation 冲突必须重新准备并登录，不能强行覆盖。本机工具在发送前保存加密的冻结记录，移除本机活动 access/refresh token；交接无回执时保留恢复记录，确认后才删除；详见[管理步骤](../integrations/gpt_subscription/README.md)。
+
+**运行边界**：只支持每数据卷一个 Gateway worker/实例，进程内登记 `(profile_id,request_id)` 的活跃请求以去重、取消和断线清理；取消先标记再通知辅助进程，返回 cancel_requested 不是保存成功。相同 ID 在完成后可再次发起，因此长期幂等、历史保存、恢复和部署排空由窗口 2 的 runner 实现。HTTP 断开将取消这一底层传输；后台聊天若需断线后继续，runner 必须持有自己的请求，不把它直接绑定到浏览器连接。连接切换/断开先取消本 profile 活跃请求并在变更期间拒绝新请求；关闭服务会通知取消并等待刷新收尾。共享卷的多 Gateway 实例取消协调不受支持。
 
 ### 房间（Brain，服务端 Bearer）
 

@@ -27,6 +27,19 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-asyncio
 
+      - name: Set up GPT subscription helper runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: integrations/gpt_subscription/package-lock.json
+
+      - name: Build and test GPT subscription helper
+        working-directory: integrations/gpt_subscription
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test
+
       - name: Run test suite
         run: python -m pytest tests -v --asyncio-mode=auto
 

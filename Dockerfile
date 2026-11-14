@@ -12,14 +12,24 @@ WORKDIR /tmp/claude-pkg
 RUN npm init -y && npm install @anthropic-ai/claude-agent-sdk@0.3.220 2>/dev/null; exit 0
 RUN test -f node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude
 
-# --- Stage 2: main image ---
+# --- GPT subscription helper: pinned DevKit, compiled and tested separately ---
+FROM node:22-bookworm-slim AS gpt-helper
+WORKDIR /helper
+COPY integrations/gpt_subscription/package.json integrations/gpt_subscription/package-lock.json integrations/gpt_subscription/tsconfig.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY integrations/gpt_subscription/vendor ./vendor
+COPY integrations/gpt_subscription/test ./test
+COPY integrations/gpt_subscription/*.mjs ./
+RUN npm test && npm prune --omit=dev --ignore-scripts --no-audit --no-fund
+
+# --- Stage 3: main image ---
 FROM python:3.12-slim
 
 WORKDIR /app
 
 # Runtime tools needed by claude CLI for recovery mode
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes ca-certificates curl git \
+    && apt-get install --no-install-recommends --yes ca-certificates curl git libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies first (leverage Docker cache)
@@ -29,6 +39,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Claude CLI binary for recovery console
 COPY --from=claude-cli /tmp/claude-pkg/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude /usr/local/bin/claude
+COPY --from=gpt-helper /usr/local/bin/node /usr/local/bin/node
+COPY --from=gpt-helper /helper /app/integrations/gpt_subscription
 RUN chmod +x /usr/local/bin/claude \
     && groupadd --gid 10001 cc \
     && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/cc --shell /bin/bash recovery

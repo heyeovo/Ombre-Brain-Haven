@@ -38,6 +38,7 @@ from gateway_state import (
     RequestIdReuseError,
     SessionStateConflictError,
 )
+from gpt_subscription import GPTSubscriptionService, GPTSubscriptionError, MAX_BODY_BYTES, ID_PATTERN, public_error, validate_request
 from memory_diffusion import (
     diffuse_memory,
     diffusion_options_from_config,
@@ -525,6 +526,7 @@ class GatewayService:
             os.path.join(config["buckets_dir"], "gateway_state.db")
         )
         self.conversation_slice_store = ConversationSliceStore(self.state_store.db_path)
+        self.gpt_subscription = GPTSubscriptionService(config["buckets_dir"])
         self._session_handoff_blocks: dict[str, str] = {}
         self.raw_event_store = raw_event_store or RawEventStore(config)
         self.reminder_store = ReminderStore(config)
@@ -840,6 +842,8 @@ class GatewayService:
         self._load_gateway_runtime_config()
 
     async def close(self) -> None:
+        if getattr(self, "gpt_subscription", None):
+            await self.gpt_subscription.close()
         if self.http_client and not getattr(self.http_client, "is_closed", False):
             await self.http_client.aclose()
 
@@ -2665,6 +2669,75 @@ class GatewayService:
     @property
     def _conversation_profile_id(self) -> str:
         return str(getattr(self.persona_engine, "profile_id", "") or "default")
+
+    async def handle_gpt_subscription(self, request: Request) -> Response:
+        auth_result = self._authorize(request.headers.get("Authorization", ""))
+        if auth_result is not None:
+            return auth_result
+        profile_id = self._conversation_profile_id
+        service = self.gpt_subscription
+        operation = request.url.path.rsplit("/", 1)[-1]
+        headers = {"Cache-Control": "no-store"}
+        try:
+            if request.method == "GET":
+                op = {"connection": "status", "connections": "profiles", "models": "models"}[operation]
+                if op == "status" and not service.key_file:
+                    return JSONResponse({"ok": True, "configured": False, "status": "disconnected", "sharing": False,
+                                         "login_method": "local_ssh_import", "limits": None}, headers=headers)
+                result = await service.call(profile_id, op)
+                return JSONResponse(result, status_code=self._gpt_result_status(result), headers=headers)
+            raw = bytearray()
+            async for chunk in request.stream():
+                raw.extend(chunk)
+                if len(raw) > MAX_BODY_BYTES:
+                    raise GPTSubscriptionError("invalid_request", "请求过大。", 413)
+            try:
+                body = json.loads(raw)
+            except (ValueError, UnicodeDecodeError):
+                raise GPTSubscriptionError("invalid_request", "请求必须为有效 JSON。", 400) from None
+            if operation == "responses":
+                payload = validate_request(body)
+                request_id = body["request_id"]
+                service.reserve(profile_id, request_id)
+
+                async def events():
+                    async for event in service.stream(profile_id, request_id, payload):
+                        yield f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+                return StreamingResponse(events(), media_type="text/event-stream", headers={**headers, "X-Accel-Buffering": "no"})
+            if operation == "cancel":
+                if (not isinstance(body, dict) or set(body) != {"request_id"}
+                        or not isinstance(body["request_id"], str) or not ID_PATTERN.fullmatch(body["request_id"])):
+                    raise GPTSubscriptionError("invalid_request", "请提供有效 request_id。", 400)
+                return JSONResponse(await service.cancel(profile_id, body["request_id"]), headers=headers)
+            if operation == "connection":
+                if not isinstance(body, dict):
+                    raise GPTSubscriptionError("invalid_request", "授权操作无效。", 400)
+                if body == {"action": "disconnect"}:
+                    result = await service.call(profile_id, "disconnect")
+                elif (set(body) == {"action", "connection_id"} and body["action"] == "select"
+                      and isinstance(body["connection_id"], str) and ID_PATTERN.fullmatch(body["connection_id"])):
+                    result = await service.call(profile_id, "select", connection_id=body["connection_id"])
+                else:
+                    raise GPTSubscriptionError("invalid_request", "此接口只接受选择或断开授权，不接受令牌。", 400)
+                return JSONResponse(result, status_code=self._gpt_result_status(result), headers=headers)
+            raise GPTSubscriptionError("invalid_request", "不支持的 GPT 操作。", 400)
+        except GPTSubscriptionError as exc:
+            return JSONResponse({"ok": False, "error": public_error(exc.detail)}, status_code=exc.status, headers=headers)
+
+    @staticmethod
+    def _gpt_result_status(result: dict) -> int:
+        if result.get("ok"):
+            return 200
+        error = result.get("error", {})
+        status = error.get("status")
+        if isinstance(status, int) and 400 <= status <= 599:
+            return status
+        if error.get("action") == "reconnect":
+            return 401
+        if error.get("code") in {"profile_not_found", "invalid_request"}:
+            return 400
+        return 503
 
     async def handle_conversation_turn(self, request: Request) -> JSONResponse:
         auth_result = self._authorize(request.headers.get("Authorization", ""))
@@ -21683,6 +21756,9 @@ def create_gateway_app(
     async def bark_notifications(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_bark_notifications(request)
 
+    async def gpt_subscription(request: Request) -> Response:
+        return await request.app.state.gateway_service.handle_gpt_subscription(request)
+
     async def conversation_attachment(request: Request) -> Response:
         return await request.app.state.gateway_service.handle_conversation_attachment(request)
 
@@ -21762,6 +21838,11 @@ def create_gateway_app(
             Route("/api/conversation/turn", conversation_turn, methods=["GET", "POST"]),
             Route("/api/conversation/agent-wake", agent_wake_schedule, methods=["GET", "PATCH", "POST"]),
             Route("/api/notifications/bark", bark_notifications, methods=["GET", "PATCH", "POST"]),
+            Route("/api/gpt-subscription/connection", gpt_subscription, methods=["GET", "POST"]),
+            Route("/api/gpt-subscription/connections", gpt_subscription, methods=["GET"]),
+            Route("/api/gpt-subscription/models", gpt_subscription, methods=["GET"]),
+            Route("/api/gpt-subscription/responses", gpt_subscription, methods=["POST"]),
+            Route("/api/gpt-subscription/cancel", gpt_subscription, methods=["POST"]),
             Route("/api/conversation/attachment", conversation_attachment, methods=["GET", "POST", "DELETE"]),
             Route("/api/conversation/import/polaris", polaris_conversation_import, methods=["POST"]),
             Route("/api/conversation/sessions", conversation_sessions, methods=["GET"]),

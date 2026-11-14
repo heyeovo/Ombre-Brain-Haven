@@ -1,0 +1,21 @@
+{
+  "name": "haven-gpt-subscription",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test vendor/test/*.test.mjs test/*.test.mjs"
+  },
+  "engines": { "node": ">=22.12" },
+  "dependencies": {
+    "jose": "6.2.12",
+    "openai": "7.21.0",
+    "proper-lockfile": "4.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.5",
+    "@types/proper-lockfile": "4.1.4",
+    "typescript": "7.0.2"
+  }
+}

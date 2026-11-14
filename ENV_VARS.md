@@ -11,6 +11,15 @@
 | `OMBRE_GATEWAY_TOKEN` | — | Gateway 的 Bearer 认证令牌 |
 | `OMBRE_DASHBOARD_PASSWORD` | — | Dashboard 预设密码；设置后首次访问不弹设置向导，页面内"修改密码"禁用 |
 
+## GPT 订阅聊天（Gateway，可选）
+
+| 变量名 | 默认 | 说明 |
+|--------|------|------|
+| `OMBRE_GPT_KEY_FILE` | 未启用 | Gateway 与 Node 管理命令使用的独立密钥文件**绝对路径**。内容为一个 base64 编码的随机 32 字节 AES 密钥；Linux 下必须为普通文件、仅所有者可读（0400/0600），不能放在整个 buckets 数据目录内。通过单独 secret 挂载提供并独立备份，不提交 Git、不把密钥值放环境变量或日志。路径示例 `/run/secrets/haven-gpt-key` 仅为方案示例，并非当前线上配置。未设置时 GPT 功能关闭，原有线路不受影响。 |
+| `OMBRE_GPT_LOCAL_KEY_FILE` | 未设置 | 仅非 Windows 本机 `login-transfer.mjs` 使用；同样是独立的 base64 32 字节密钥文件绝对路径，放在 `.local-auth` 目录外。Windows 辅助登录自动使用当前用户 DPAPI，不使用此变量。不是 Gateway 配置，也不可把 Windows 密文搬到 Linux。 |
+
+授权密文布局、唯一刷新责任和接口见 [reference](docs/reference.md#GPT-订阅授权与传输gateway)；初始化及交接步骤见 [管理工具说明](integrations/gpt_subscription/README.md)。不配置长期固定 access token，也不继承 Platform API Key 作为备用付款线路。
+
 ## 脱水 / 打标模型
 
 `config.yaml` 字段：`dehydration.*`

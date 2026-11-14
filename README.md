@@ -309,6 +309,10 @@ cc 协作者可分别维护基础 system 提示词和长期提示词模块：基
 
 Outlook 为可选集成，Brain 容器的配置及微软应用注册要求见 [ENV_VARS](ENV_VARS.md#outlook-日历与-microsoft-to-dobrain)，授权凭据随 state 卷持久化。
 
+GPT 订阅传输层为可选能力，仅供本人非商业使用；Gateway 通过独立 Node 辅助进程管理 ChatGPT 授权、刷新、模型列表和可取消的文字流。它不自动接入人设、召回或历史，也不提供工具、附件、房间或主动唤醒。接口与持久化契约见 [reference](docs/reference.md#GPT-订阅授权与传输gateway)。
+
+启用前须人工确认 Gateway 实际持久卷、运行账号及可信 profile，按 [环境变量要求](ENV_VARS.md#GPT-订阅聊天gateway可选)准备独立密钥 secret，再按[管理工具说明](integrations/gpt_subscription/README.md)在本机登录并通过 SSH stdin 交接。镜像包含固定版本的 DevKit 和 Node；CI 会构建并测试辅助进程。授权密文和 host ID 随 buckets 私有子目录持久化，密钥需单独挂载与备份；缺少或更换密钥不会自动清空已有授权。当前传输接口要求单个 Gateway worker/实例负责该数据卷；不要启动共享该卷的第二个 Gateway。上线仍按现有分支验收和完整 SHA 发布流程进行。
+
 ### 推荐：交互式脚本
 
 Linux / VPS：

@@ -66,7 +66,7 @@
 | `OMBRE_GATEWAY_UPSTREAM_MODEL` | `gateway.upstream_default_model` | 默认上游模型 |
 | `OMBRE_GATEWAY_UPSTREAM_MODELS` | `gateway.upstream_models` | 可用模型列表（逗号分隔） |
 | `OMBRE_GATEWAY_UPSTREAM_API_KEY` | — | 旧版单 upstream 的兜底 API Key；仅注入 Gateway，不得注入 Brain / Dashboard。多 upstream 优先使用各自的 `api_key_env` |
-| `OMBRE_GATEWAY_ADMIN_URL` | — | Gateway 管理 API 地址 |
+| `OMBRE_GATEWAY_ADMIN_URL` | — | 独立 Gateway 管理 API 地址，以 `/api/config` 结尾；Brain 的 GPT 对外转发亦由此派生目标地址，复用 `OMBRE_GATEWAY_TOKEN`，不在 Brain 另建授权实例 |
 | `OMBRE_GATEWAY_DEBUG_TIMEOUT_SECONDS` | — | Gateway debug 请求超时（默认 30s） |
 | `OMBRE_DOMAIN_SENTINEL_MODEL` | `gateway.domain_sentinel_model` | 领域哨兵模型 |
 | `OMBRE_DOMAIN_SENTINEL_API_KEY` | — | 领域哨兵 API Key |

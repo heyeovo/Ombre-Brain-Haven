@@ -14,7 +14,8 @@ def normalize(path: str) -> str:
 
 def registered_routes() -> dict[str, set[str]]:
     """路径 → 注册的方法；没写 methods 的路由记为空集合，只核对路径。"""
-    code = (ROOT / "server.py").read_text(encoding="utf-8") + (ROOT / "gateway.py").read_text(encoding="utf-8")
+    code = "\n".join((ROOT / name).read_text(encoding="utf-8") for name in
+                     ("server.py", "gateway.py", "gpt_subscription_proxy.py"))
     routes: dict[str, set[str]] = {}
     for match in re.finditer(r'(?:custom_route|Route)\(\s*"([^"]+)"', code):
         routes.setdefault(normalize(match.group(1)), set())

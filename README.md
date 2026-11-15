@@ -311,6 +311,8 @@ Outlook 为可选集成，Brain 容器的配置及微软应用注册要求见 [E
 
 GPT 订阅传输层为可选能力，仅供本人非商业使用；Gateway 通过独立 Node 辅助进程管理 ChatGPT 授权、刷新、模型列表和可取消的文字流。传输层不自行注入人设或保存历史；Dashboard 的独立 GPT 文字 runner 负责接入 Haven 人设、钉选、召回、日回顾和既有聊天轮次表，服务端请求登记防止重启后重复生成。窗口模型偏好和聊天正文仍以 Haven 为事实源，取消/失败的部分回复带中断状态保存；它不提供工具、附件、房间或主动唤醒。接口与持久化契约见 [reference](docs/reference.md#GPT-订阅授权与传输gateway)。
 
+Dashboard 经 Brain 访问 GPT 时，`/gateway/api/gpt-subscription/*` 使用现有 Gateway 内部连接转发到独立 Gateway，保留流式和取消行为。Brain 不另存授权或启动第二个 GPT 传输实例，也不需要挂载 GPT 密钥。
+
 启用前须人工确认 Gateway 实际持久卷、运行账号及可信 profile，按 [环境变量要求](ENV_VARS.md#GPT-订阅聊天gateway可选)准备独立密钥 secret，再按[管理工具说明](integrations/gpt_subscription/README.md)在本机登录并通过 SSH stdin 交接。镜像包含固定版本的 DevKit 和 Node；CI 会构建并测试辅助进程。授权密文和 host ID 随 buckets 私有子目录持久化，密钥需单独挂载与备份；缺少或更换密钥不会自动清空已有授权。当前传输接口要求单个 Gateway worker/实例负责该数据卷；不要启动共享该卷的第二个 Gateway。上线仍按现有分支验收和完整 SHA 发布流程进行。
 
 ### 推荐：交互式脚本

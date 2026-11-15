@@ -36,6 +36,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 |------|------|
 | `outlook_store.py` | 个人 Outlook 设备码授权、串行刷新、Graph 日历/To Do、言之资源缓存和短码映射；独立 `state_dir/outlook.sqlite` |
 | `gpt_subscription.py` | Gateway 的 GPT 订阅文字传输：profile 隔离的 Node 私有管道、活跃 request_id 去重、取消与停止收尾、错误分类；不处理人设/召回/历史或原始授权导入 |
+| `gpt_subscription_proxy.py` | Brain 的 GPT 对外入口：认证后通过既有内部地址转发至独立 Gateway，保留流式/取消语义；不持有授权或创建第二个 GPT 服务 |
 | `gpt_chat_requests.py` | GPT 聊天请求的持久准入登记、同窗并发互斥与重启后防重复执行；只存摘要/状态，不存正文 |
 | `integrations/gpt_subscription/` | 固定官方 SIWC DevKit 源码及许可、AES-GCM 加密、跨进程刷新锁/轮换恢复、stdin 管理导入与本机 SSH 登录交接；Node 依赖由 package-lock 固定 |
 | `server.py` | **Brain** 入口（约 700KB）。MCP 工具注册（`@mcp.tool`）+ REST API（`@mcp.custom_route`）+ 记忆核心 |
@@ -193,6 +194,20 @@ POST /auth/login  { password } → set-cookie
 ### GPT 订阅授权与传输（Gateway）
 
 以下均只接受 Gateway Bearer；浏览器 Cookie 无效。profile 只取 Gateway 当前 persona 的 `profile_id`，不接受客户端指定 profile。HTTP 不提供令牌导入或读取；连接状态和模型列表均 `Cache-Control: no-store`。
+
+Dashboard 使用 Brain 入口时走下列转发路径，方法和正文保持 Gateway 契约：
+
+```text
+GET  /gateway/api/gpt-subscription/connection
+POST /gateway/api/gpt-subscription/connection
+GET  /gateway/api/gpt-subscription/connections
+GET  /gateway/api/gpt-subscription/models
+POST /gateway/api/gpt-subscription/responses
+POST /gateway/api/gpt-subscription/cancel
+POST /gateway/api/gpt-subscription/chat-requests
+```
+
+Brain 先验证既有 Gateway Bearer，再从 `OMBRE_GATEWAY_ADMIN_URL` 的 `/api/config` 地址派生独立 Gateway 目标；缺少连接配置时明确返回 503，不回退到 Brain 内嵌实例，不要求 Brain 挂载 GPT 密钥。仅暴露上述路径/方法，不转发请求 Cookie、查询参数、身份覆盖头或任意上游响应头，不跟随重定向。JSON 状态/错误和 SSE 逐块透传，HTTP 断开关闭上游流，由原 Gateway 收尾取消；授权、刷新锁、活跃请求和可信 profile 仍仅由独立 Gateway 管理。没有新增环境变量、数据表或凭据位置。
 
 ```text
 GET  /api/gpt-subscription/connection    # configured/status/sharing/connection_id/label/掩码 account/error；limits 固定 null

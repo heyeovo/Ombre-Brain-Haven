@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from gpt_chat_requests import GPTChatRequests
-from gpt_context_audit import cache_evidence, request_hash
+from gpt_context_audit import cache_evidence, quota_evidence, request_hash
 from gpt_subscription import GPTSubscriptionService
 from gateway_state import GatewayStateStore
 from gateway import GatewayService
@@ -23,6 +23,12 @@ def snapshot():
             'context': {'estimator': 'utf8-bytes-div-3-v1', 'estimate_safety_ratio': 1.05,
                         'input_tokens_estimated': 10, 'application_input_budget': 120000, 'model_context_limit': None,
                         'included_history_rounds': 0, 'omitted_history_rounds': 0, 'context_revision': 0}}
+
+
+def quota_snapshot(limit_id='codex', source='response_headers'):
+    return {'source': source, 'observed_at': '2026-11-17T10:00:00.000Z', 'limit_id': limit_id,
+            'scope': 'unverified', 'primary': {'used_percent': 0, 'window_minutes': 300,
+                                              'resets_at': 1794913200}, 'secondary': None}
 
 
 class GPTContextAudit(unittest.TestCase):
@@ -137,6 +143,71 @@ class GPTContextAudit(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 self.prepare(request=field, session=field, value=value)
 
+    def test_quota_candidates_are_allowlisted_durable_and_profile_scoped(self):
+        self.prepare()
+        candidates = [quota_snapshot(), quota_snapshot('other_bucket', 'stream_event')]
+        supplied = {'status': 'observed', 'snapshots': [
+            {**item, 'scope': 'account', 'headers': {'authorization': 'private-token'},
+             'body': 'private-body', 'primary': {**item['primary'], 'secret': 'private-extra'}}
+            for item in candidates]}
+        self.registry.audit_event('p', 'r', {'type': 'completed', 'quotaEvidence': supplied})
+        reopened = GPTChatRequests(self.path)
+        record = reopened.audit('p', 'r')
+        self.assertEqual(record['quota_evidence'], {'status': 'observed', 'snapshots': candidates})
+        self.assertNotIn('private', json.dumps(record))
+        self.assertIsNone(reopened.audit('other', 'r'))
+        self.assertEqual(reopened.control('other', {'action': 'audit-list', 'session_id': 's'})['records'], [])
+
+    def test_missing_unavailable_and_failed_quota_do_not_borrow_previous_values(self):
+        self.prepare()
+        self.registry.audit_event('p', 'r', {'type': 'completed', 'quotaEvidence': {
+            'status': 'observed', 'snapshots': [quota_snapshot()]}})
+        for request, event in (
+                ('old-helper', {'type': 'completed'}),
+                ('unavailable', {'type': 'completed', 'quotaEvidence': {'status': 'unavailable', 'snapshots': []}}),
+                ('failed', {'type': 'error', 'error': {'code': 'stream_interrupted'},
+                            'quotaEvidence': {'snapshots': [quota_snapshot()]}}),
+                ('cancelled', {'type': 'error', 'error': {'code': 'cancelled'},
+                               'quotaEvidence': {'snapshots': [quota_snapshot()]}})):
+            with self.subTest(request=request):
+                self.prepare(request=request, session=request)
+                self.registry.audit_event('p', request, event)
+                record = self.registry.audit('p', request)
+                if request == 'unavailable':
+                    self.assertEqual(record['quota_evidence'], {'status': 'unavailable', 'snapshots': []})
+                else:
+                    self.assertNotIn('quota_evidence', record)
+
+    def test_quota_invalid_values_stay_unknown_and_real_zero_survives(self):
+        empty = {'status': 'unavailable', 'snapshots': []}
+        for value in (None, [], {}, {'status': 'observed'}, {'snapshots': [None, [], 'private']}):
+            with self.subTest(value=value):
+                self.assertEqual(quota_evidence(value), empty)
+        for used in (-1, 101, float('nan'), float('inf'), True, '0', None):
+            item = quota_snapshot()
+            item['primary']['used_percent'] = used
+            with self.subTest(used=used):
+                self.assertEqual(quota_evidence({'snapshots': [item]}), empty)
+        for key, value in (('source', 'x-ratelimit-remaining-tokens'), ('source', []),
+                           ('limit_id', 'Bearer private-token'), ('observed_at', '2026-02-30T00:00:00.000Z')):
+            self.assertEqual(quota_evidence({'snapshots': [{**quota_snapshot(), key: value}]}), empty)
+        item = quota_snapshot()
+        item['primary'].update(window_minutes=True, resets_at=253402300800)
+        actual = quota_evidence({'snapshots': [item]})['snapshots'][0]['primary']
+        self.assertEqual(actual, {'used_percent': 0, 'window_minutes': None, 'resets_at': None})
+
+    def test_quota_buckets_are_bounded_separate_and_not_merged(self):
+        first = quota_snapshot()
+        latest = quota_snapshot()
+        latest.update(primary=None, secondary={'used_percent': 60.5, 'window_minutes': None, 'resets_at': None})
+        other_source = quota_snapshot(source='stream_event')
+        result = quota_evidence({'snapshots': [first, latest, other_source]})['snapshots']
+        self.assertEqual(result, [latest, other_source])
+        many = [quota_snapshot(f'bucket{i}') for i in range(100)]
+        self.assertEqual(len(quota_evidence({'snapshots': many})['snapshots']), 16)
+        both = many[:16] + [quota_snapshot(f'bucket{i}', 'stream_event') for i in range(16)]
+        self.assertEqual(len(quota_evidence({'snapshots': both})['snapshots']), 32)
+
     def test_cross_language_final_body_hash(self):
         self.assertEqual(request_hash({'model': 'test-model', 'instructions': '背景😀\n',
                                        'input': [{'role': 'user', 'content': '你好'}]}),
@@ -196,12 +267,15 @@ class GPTAuditPipe(unittest.IsolatedAsyncioTestCase):
                                   'owner': 'd' * 32, 'snapshot': snapshot()})
             evidence = {'version': 1, 'response_model': 'gpt-5.6-sol', 'service_tier': 'default',
                         'cache_write_tokens': 0, 'diagnostics': None}
+            quota = {'status': 'observed', 'snapshots': [quota_snapshot()]}
             _, events = await self.run_pipe(lambda event: registry.audit_event('p', 'r', event), [
                 {'type': 'request', 'body_hash': 'b' * 64}, {'type': 'receipt', 'requestId': 'req'},
-                {'type': 'completed', 'usage': {'cached_tokens': 0}, 'cacheEvidence': evidence}])
+                {'type': 'completed', 'usage': {'cached_tokens': 0}, 'cacheEvidence': evidence, 'quotaEvidence': quota}])
             self.assertEqual(events[-1]['cacheEvidence'], evidence)
+            self.assertEqual(events[-1]['quotaEvidence'], quota)
             record = GPTChatRequests(registry.db_path).audit('p', 'r')
             self.assertEqual(record['cache_evidence'], evidence)
+            self.assertEqual(record['quota_evidence'], quota)
             self.assertEqual(record['usage']['cached_tokens'], 0)
 
     async def test_failed_write_never_acknowledges_or_reports_success(self):

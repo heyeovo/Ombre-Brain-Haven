@@ -1,6 +1,7 @@
 """Bounded, body-free GPT request evidence; never accepts arbitrary prompt snapshots."""
 import hashlib
 import json
+import math
 import re
 from datetime import datetime, timezone
 
@@ -87,6 +88,48 @@ def cache_evidence(value):
     }
 
 
+def quota_evidence(value):
+    """Keep bounded quota candidates only; their account/application scope is unverified."""
+    def window(raw):
+        if not isinstance(raw, dict):
+            return None
+        used = raw.get('used_percent')
+        if type(used) not in (int, float) or not 0 <= used <= 100 or not math.isfinite(used):
+            return None
+        minutes, reset = raw.get('window_minutes'), raw.get('resets_at')
+        return {'used_percent': used,
+                'window_minutes': minutes if type(minutes) is int and 0 < minutes <= 9007199254740991 else None,
+                'resets_at': reset if type(reset) is int and 0 < reset <= 253402300799 else None}
+
+    raw = value.get('snapshots') if isinstance(value, dict) else None
+    snapshots = {}
+    counts = {'response_headers': 0, 'stream_event': 0}
+    # Current helper emits at most 16 buckets per source; do not traverse unbounded input.
+    for item in raw[:32] if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        source, limit_id, observed = item.get('source'), item.get('limit_id'), item.get('observed_at')
+        if not isinstance(source, str) or source not in counts or not isinstance(limit_id, str) or not re.fullmatch(r'[a-zA-Z][a-zA-Z0-9_-]{0,63}', limit_id):
+            continue
+        if not isinstance(observed, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z', observed):
+            continue
+        try:
+            datetime.fromisoformat(observed.replace('Z', '+00:00'))
+        except ValueError:
+            continue
+        primary, secondary = window(item.get('primary')), window(item.get('secondary'))
+        if primary is None and secondary is None:
+            continue
+        key = (source, limit_id)
+        if key not in snapshots:
+            if counts[source] >= 16:
+                continue
+            counts[source] += 1
+        snapshots[key] = {'source': source, 'observed_at': observed, 'limit_id': limit_id,
+                          'scope': 'unverified', 'primary': primary, 'secondary': secondary}
+    return {'status': 'observed' if snapshots else 'unavailable', 'snapshots': list(snapshots.values())}
+
+
 def apply_event(record, event):
     kind = event.get("type")
     if kind == "request":
@@ -106,6 +149,8 @@ def apply_event(record, event):
         # Old helpers omit this field. Error/cancel events cannot manufacture a completed response.
         if kind == 'completed' and 'cacheEvidence' in event:
             record['cache_evidence'] = cache_evidence(event['cacheEvidence'])
+        if kind == 'completed' and 'quotaEvidence' in event:
+            record['quota_evidence'] = quota_evidence(event['quotaEvidence'])
     for source, target in (("requestId", "official_request_id"), ("responseId", "response_id")):
         value = event.get(source)
         if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,200}", value):

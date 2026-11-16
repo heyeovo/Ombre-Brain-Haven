@@ -1,6 +1,64 @@
 import OpenAI from "openai";
 import { apiError, ChatGPTError, isObject } from "./errors.js";
-import type { StreamResponseOptions } from "./types.js";
+import type { GptQuotaSnapshot, GptQuotaWindow, StreamResponseOptions } from "./types.js";
+
+// Haven modification 2026-11-16. Only accept quota fields documented in the
+// official Codex parser. Whether the SIWC route emits them needs real verification.
+const MAX_QUOTA_BUCKETS = 16;
+const quotaId = (value: unknown): string | null => typeof value === "string" && /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(value)
+  ? value.toLowerCase().replaceAll("-", "_") : null;
+
+function quotaNumber(value: unknown, header: boolean): number | null {
+  if (header && typeof value === "string") {
+    const text = value.trim();
+    if (!/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(text)) return null;
+    value = Number(text);
+  }
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function quotaWindow(percent: unknown, minutes: unknown, reset: unknown, header = false): GptQuotaWindow | null {
+  const used = quotaNumber(percent, header);
+  if (used === null || used < 0 || used > 100) return null;
+  const duration = quotaNumber(minutes, header);
+  const epoch = quotaNumber(reset, header);
+  return {
+    used_percent: used,
+    window_minutes: duration !== null && Number.isSafeInteger(duration) && duration > 0 ? duration : null,
+    resets_at: epoch !== null && Number.isSafeInteger(epoch) && epoch > 0 && epoch <= 253402300799 ? epoch : null,
+  };
+}
+
+function quotaHeaders(headers: Headers): GptQuotaSnapshot[] {
+  const ids = new Set<string>();
+  for (const name of headers.keys()) {
+    // Deliberately exclude API RPM/TPM x-ratelimit-* and unrelated headers.
+    const match = /^(x-codex(?:-[a-z0-9]+)*)-(?:primary|secondary)-used-percent$/.exec(name);
+    if (match?.[1] && match[1].length <= 65 && ids.size < MAX_QUOTA_BUCKETS) ids.add(match[1]);
+  }
+  const snapshots: GptQuotaSnapshot[] = [];
+  const observed_at = new Date().toISOString();
+  for (const prefix of ids) {
+    const read = (window: string) => quotaWindow(headers.get(`${prefix}-${window}-used-percent`),
+      headers.get(`${prefix}-${window}-window-minutes`), headers.get(`${prefix}-${window}-reset-at`), true);
+    const primary = read("primary");
+    const secondary = read("secondary");
+    if (primary || secondary) snapshots.push({ source: "response_headers", observed_at,
+      limit_id: prefix.slice(2).replaceAll("-", "_"), scope: "unverified", primary, secondary });
+  }
+  return snapshots;
+}
+
+function quotaEvent(event: Record<string, unknown>): GptQuotaSnapshot | null {
+  const id = quotaId(event.metered_limit_name ?? event.limit_name ?? "codex");
+  if (!id || !isObject(event.rate_limits)) return null;
+  const read = (value: unknown) => isObject(value)
+    ? quotaWindow(value.used_percent, value.window_minutes, value.reset_at) : null;
+  const primary = read(event.rate_limits.primary);
+  const secondary = read(event.rate_limits.secondary);
+  return primary || secondary ? { source: "stream_event", observed_at: new Date().toISOString(),
+    limit_id: id, scope: "unverified", primary, secondary } : null;
+}
 
 export async function streamResponse(
   accessToken: string,
@@ -46,6 +104,8 @@ export async function streamResponse(
       stream: true,
     }, { signal: requestSignal, headers: { accept: "text/event-stream" } }).withResponse();
     response = result.response;
+    const headerQuotas = quotaHeaders(response.headers);
+    const eventQuotas = new Map<string, GptQuotaSnapshot>();
     const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
     // The direct route can return valid SSE without Content-Type. In that case,
     // validate the events below and still require response.completed for success.
@@ -56,10 +116,18 @@ export async function streamResponse(
 
     let completed = false;
     let text = "";
-    for await (const event of result.data) {
+    for await (const streamed of result.data) {
       requestSignal.throwIfAborted();
+      // The public SDK union does not declare Codex's optional extension event.
+      const event: unknown = streamed;
       if (!isObject(event)) continue;
-      if (event.type === "response.output_text.delta" && typeof event.delta === "string") {
+      if (event.type === "codex.rate_limits") {
+        const snapshot = quotaEvent(event);
+        // Latest event per bucket, without combining different observations.
+        if (snapshot && (eventQuotas.has(snapshot.limit_id) || eventQuotas.size < MAX_QUOTA_BUCKETS)) {
+          eventQuotas.set(snapshot.limit_id, snapshot);
+        }
+      } else if (event.type === "response.output_text.delta" && typeof event.delta === "string") {
         text += event.delta;
         if (text.length > 16 * 1024 * 1024) throw new ChatGPTError("response_too_large", "The response was too large. Try a smaller request.");
         options.onDelta?.(event.delta);
@@ -82,10 +150,12 @@ export async function streamResponse(
           if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) usage[key] = value;
         }
         const id = isObject(event.response) ? event.response.id : undefined;
+        const snapshots = [...headerQuotas, ...eventQuotas.values()];
         options.onCompleted?.({
           ...(typeof id === "string" && /^[a-zA-Z0-9_-]{1,200}$/.test(id) ? { responseId: id } : {}),
           ...(result.request_id && /^[a-zA-Z0-9_-]{1,160}$/.test(result.request_id) ? { requestId: result.request_id } : {}),
           usage: Object.keys(usage).length ? usage : null,
+          quotaEvidence: { status: snapshots.length ? "observed" : "unavailable", snapshots },
         });
         completed = true;
         break;

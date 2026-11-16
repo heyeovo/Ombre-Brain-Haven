@@ -146,6 +146,8 @@ test('real helper waits for private durable acknowledgement and can cancel befor
   const f = await fixture(t); await seed(f);
   const auditCallsFile = join(f.directory, 'audit-calls');
   await writeFile(f.mockPath, JSON.stringify({ ...f.config, auditCallsFile,
+    responseMetadata: { model: 'gpt-5.6-sol-actual', service_tier: 'default', prompt_cache_diagnostics: { type: 'cache_hit', secret: 'private-extra' } },
+    cacheWriteTokens: 0,
     quotaHeaders: { 'x-codex-primary-used-percent': '15', 'x-codex-primary-window-minutes': '300' },
     quotaEvents: [{ type: 'codex.rate_limits', rate_limits: { secondary: { used_percent: 30, window_minutes: 10080 } } }],
   }));
@@ -178,6 +180,7 @@ test('real helper waits for private durable acknowledgement and can cancel befor
       assert.equal(events.at(-1).error.code, 'cancelled');
       assert.equal(await readFile(auditCallsFile, 'utf8'), '');
       assert.ok(events.every(event => !('quotaEvidence' in event)));
+      assert.ok(events.every(event => !('cacheEvidence' in event)));
     } else {
       assert.deepEqual(events.map(event => event.type), ['request', 'receipt', 'delta', 'completed']);
       assert.equal(await readFile(auditCallsFile, 'utf8'), 'response\n');
@@ -186,6 +189,10 @@ test('real helper waits for private durable acknowledgement and can cancel befor
       assert.deepEqual(evidence.snapshots.map(snapshot => snapshot.source), ['response_headers', 'stream_event']);
       assert.equal(evidence.snapshots[0].primary.used_percent, 15);
       assert.equal(evidence.snapshots[1].secondary.window_minutes, 10080);
+      assert.deepEqual(events.at(-1).cacheEvidence, { version: 1, response_model: 'gpt-5.6-sol-actual',
+        service_tier: 'default', cache_write_tokens: 0, diagnostics: { type: 'cache_hit', reason: null,
+          comparison_reusable_tokens: null, cache_missed_tokens: null } });
+      assert.doesNotMatch(JSON.stringify(events), /private-extra/);
     }
   }
 });

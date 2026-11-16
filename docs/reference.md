@@ -38,7 +38,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `gpt_subscription.py` | Gateway 的 GPT 订阅文字传输：profile 隔离的 Node 私有管道、活跃 request_id 去重、取消与停止收尾、错误分类；不处理人设/召回/历史或原始授权导入 |
 | `gpt_subscription_proxy.py` | Brain 的 GPT 对外入口：认证后通过既有内部地址转发至独立 Gateway，保留流式/取消语义；不持有授权或创建第二个 GPT 服务 |
 | `gpt_chat_requests.py` | GPT 聊天请求的持久准入登记、同窗并发互斥与重启后防重复执行；只存摘要/状态，不存正文 |
-| `gpt_context_audit.py` | GPT 无正文审计的严格字段校验、请求对象指纹、执行阶段与真实 usage 投影；永久删除窗口时清除同 profile/session 证据 |
+| `gpt_context_audit.py` | GPT 无正文审计的严格字段校验、请求对象指纹、执行阶段、真实 usage 与上游缓存完成证据白名单投影；永久删除窗口时清除同 profile/session 证据 |
 | `integrations/gpt_subscription/` | 固定官方 SIWC DevKit 源码及许可、AES-GCM 加密、跨进程刷新锁/轮换恢复、stdin 管理导入与本机 SSH 登录交接；Node 依赖由 package-lock 固定 |
 | `server.py` | **Brain** 入口（约 700KB）。MCP 工具注册（`@mcp.tool`）+ REST API（`@mcp.custom_route`）+ 记忆核心 |
 | `gateway.py` | **Gateway** 入口（约 1MB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线（透镜调试区分检索前排除与相关性拒绝）+ cc 持久化路由（`Route()` 注册） |
@@ -244,6 +244,12 @@ SSE 事件 `event: delta | completed | error`，每个 data 是含同名 `type` 
 - snapshot 严格白名单：version=1、algorithm=`sha256-json-sorted-v1`、model、body_hash、instructions 的 hash/bytes；parts 的 persona/window/background/capability/recall/current_text/current_time 仅存 hash/bytes；messages 按原序存 role/hash/bytes/source_round_id/prefix_hash；context 只接受应用估算器、余量、预算、真实模型上限 null、纳入/省略轮数及 revision。摘要是 SHA-256 小写 hex；body_hash 对最终 SDK 对象按键排序、数组原序进行 UTF-8 JSON 序列化（store=false、stream=true），不包含本地 request_id、凭据或响应头。prefix_hash 从 instructions hash 起，逐项对“上一前缀 hash + 换行 + 消息 hash”计算；不代表 token 边界。
 - responses 收到已有审计记录时先校验请求对象，并拒绝已有 sending_at 的重发。Node 最终 SDK 调用前再次计算 body_hash，通过私有 `request` 事件让 Python 事务写入 sending_at；只有收到私有 audit_ack 后才发 HTTP。随后 receipt 写 acknowledged_at/安全 request ID；completed/error 写 finished_at、outcome、白名单 usage/response ID。没有回执不推断送达，缺失 token 为 null、真实零保留 0；缓存/推理是输入/输出子集。传输异常没有上游终态时保留未知，不伪造成功。旧客户端未准备证据的传输仍兼容，但不能声称存在发送前审计。
 - `audit-list` 接 `{session_id,before_cursor?,request_ids?}`；每页最新 20 项，返回 records/before_cursor，request_ids 最多 20 个并返回同 profile/session 的 matched_records，用于精确关联历史页。查询不返回正文或授权数据，status/finish 不改变旧防重语义。永久删除窗口会在同一事务中清空同 profile/session 的 audit_json，保留永久防重回执；其他 profile/session 不受影响。软删除沿用原窗口隐藏与不可追加契约，不清空历史证据。
+
+**上游缓存证据**：helper 的 `completed.cacheEvidence` 只从现有 `response.completed.response` 被动提取 `{version:1,response_model,service_tier,cache_write_tokens,diagnostics}`。`response_model` 为上游实际返回的 GPT/o 系列模型名（最多 200 字符），不是请求 model 的回填；`service_tier` 只接受 auto/default/flex/scale/priority。`cache_write_tokens` 只取 `usage.input_tokens_details.cache_write_tokens`，为 0 至 JavaScript 安全整数上限的整数；缓存读取数继续只用原 usage.cached_tokens，不从总输入推算写入。字段缺失、格式不符或未来未识别值一律 null，真实 0 保留 0。
+
+`diagnostics` 只提取上游已返回的 `prompt_cache_diagnostics`：type 仅 cache_hit/cache_miss/comparison_response_not_found/unavailable；reason 仅在 cache_miss 时保留 model_changed/prompt_cache_key_changed/service_tier_changed/tools_changed/text_format_changed/reasoning_effort_changed/verbosity_changed/context_compacted/input_changed，其他值为 null；仅另保留非负安全整数 comparison_reusable_tokens/cache_missed_tokens。其余字段不透传。diagnostics=null 表示未取得可识别诊断，不代表命中或未命中；诊断类型不代替真实 usage 计数，也不证明上游路由。
+
+Python 在 completed 时再次白名单过滤，存入该请求现有 `audit_json.cache_evidence`，与 snapshot 分开，沿用 profile/session 隔离、重开和删除规则，无新表/列。新 helper 缺字段时保存含 null 的结构；旧 helper/旧记录没有 cache_evidence，不补造；error/cancel 不产生完成证据。未知版本丢弃为全未知结构。无新增请求、诊断比较参数、缓存策略、授权读取、正文副本、原始 headers 或响应对象持久化。不会自动启用 comparison_response_id；SIWC 是否返回这些字段须用用户正常聊天观察。现有 Dashboard 不新增显示，本窗口可从去正文审计读取证据。
 
 **持久化**：`buckets_dir/gpt-subscription/<sha256(profile_id)>/chatgpt-auth.json` 是 AES-256-GCM 密文（包含各登记的 client ID、已验证身份、令牌、pending refresh、导入回执）；AAD 绑定 profile，复制到另一 profile 无法解密。`chatgpt-host.json` 为此运行域稳定且非秘密的 host ID，重授权/导入不得换成本机 ID。私有目录 0700、文件 0600。密钥要求只维护在 [ENV_VARS](../ENV_VARS.md#GPT-订阅聊天gateway可选)。密钥缺失、密文损坏或身份暂时不可验证时保留原文件。旧 DevKit v1/v2 由同一锁内迁移为加密格式；初始化可重复，不改已有聊天数据库或数据表。
 

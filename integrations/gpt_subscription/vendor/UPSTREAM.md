@@ -33,3 +33,13 @@ Haven modifications (2026-11-16):
 - The helper audit regression also exercises header/event quota evidence after
   durable acknowledgement, and verifies cancellation before HTTP emits no quota
   evidence. Request hashing and receipt callbacks retain their audit semantics.
+
+Haven modifications (2026-11-17):
+- Extract allowlisted cache evidence from an existing completed response into
+  `cacheEvidence`; its authoritative field/storage contract is in Haven
+  docs/reference.md, GPT subscription transport section. Missing data stays null.
+  This adds no request parameters or network calls and does not enable diagnostics.
+- Synthetic coverage in ../test/audit.test.mjs checks unchanged request bodies,
+  metadata filtering, unknown values, real zero, and failure semantics. The helper
+  durable-ack regression also checks completion propagation and pre-HTTP cancellation.
+  Upstream vendor tests remain unchanged.

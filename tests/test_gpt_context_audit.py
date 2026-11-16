@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from gpt_chat_requests import GPTChatRequests
-from gpt_context_audit import request_hash
+from gpt_context_audit import cache_evidence, request_hash
 from gpt_subscription import GPTSubscriptionService
 from gateway_state import GatewayStateStore
 from gateway import GatewayService
@@ -56,6 +56,7 @@ class GPTContextAudit(unittest.TestCase):
         record = self.registry.audit('p', 'r')
         self.assertIsNone(record['usage'])
         self.assertNotIn('sending_at', record)
+        self.assertNotIn('cache_evidence', record)
         self.assertTrue(self.prepare()['ok'])
         changed = snapshot(); changed['parts']['background']['hash'] = 'e' * 64
         self.assertFalse(self.prepare(value=changed)['ok'])
@@ -77,6 +78,54 @@ class GPTContextAudit(unittest.TestCase):
         self.assertEqual(record['usage']['cached_tokens'], 0)
         self.assertIsNone(record['usage']['output_tokens'])
         self.assertNotIn('secret', json.dumps(record))
+
+    def test_cache_evidence_is_allowlisted_durable_and_profile_scoped(self):
+        self.prepare()
+        supplied = {'version': 1, 'response_model': 'gpt-5.6-sol-actual', 'service_tier': 'priority',
+                    'cache_write_tokens': 0, 'diagnostics': {'type': 'cache_miss', 'reason': 'model_changed',
+                    'comparison_reusable_tokens': 2048, 'cache_missed_tokens': 1024, 'secret': 'private-extra'},
+                    'body': 'private-body', 'headers': {'authorization': 'private-token'}}
+        self.registry.audit_event('p', 'r', {'type': 'completed', 'cacheEvidence': supplied})
+        reopened = GPTChatRequests(self.path)
+        record = reopened.audit('p', 'r')
+        self.assertEqual(record['cache_evidence'], {'version': 1, 'response_model': 'gpt-5.6-sol-actual',
+            'service_tier': 'priority', 'cache_write_tokens': 0, 'diagnostics': {'type': 'cache_miss',
+            'reason': 'model_changed', 'comparison_reusable_tokens': 2048, 'cache_missed_tokens': 1024}})
+        self.assertNotIn('private', json.dumps(record))
+        self.assertIsNone(reopened.audit('other', 'r'))
+        self.assertEqual(reopened.control('other', {'action': 'audit-list', 'session_id': 's'})['records'], [])
+
+    def test_missing_or_invalid_cache_metadata_stays_unknown(self):
+        empty = {'version': 1, 'response_model': None, 'service_tier': None, 'cache_write_tokens': None, 'diagnostics': None}
+        for value in (None, [], {}, {'version': 2, 'response_model': 'gpt-5.6-sol'}, {'version': True}):
+            with self.subTest(value=value):
+                self.assertEqual(cache_evidence(value), empty)
+        for number in (-1, 0.5, '0', True, None, 9007199254740992):
+            with self.subTest(number=number):
+                self.assertEqual(cache_evidence({'version': 1, 'response_model': 'Bearer private-token',
+                    'service_tier': 'private-tier', 'cache_write_tokens': number,
+                    'diagnostics': {'type': 'private-type'}}), empty)
+        self.prepare()
+        self.registry.audit_event('p', 'r', {'type': 'completed', 'usage': None})
+        self.assertNotIn('cache_evidence', self.registry.audit('p', 'r'))
+        self.registry.audit_event('p', 'r', {'type': 'completed', 'cacheEvidence': None})
+        self.assertEqual(self.registry.audit('p', 'r')['cache_evidence'], empty)
+
+    def test_cache_diagnostic_enums_and_counters_are_bounded(self):
+        for kind in ('cache_hit', 'comparison_response_not_found', 'unavailable', 'cache_miss'):
+            with self.subTest(kind=kind):
+                evidence = cache_evidence({'version': 1, 'diagnostics': {'type': kind,
+                    'reason': 'private-reason', 'comparison_reusable_tokens': True, 'cache_missed_tokens': '1024'}})
+                self.assertEqual(evidence['diagnostics'], {'type': kind, 'reason': None,
+                    'comparison_reusable_tokens': None, 'cache_missed_tokens': None})
+
+    def test_errors_and_cancellation_do_not_fabricate_completed_cache_evidence(self):
+        for request, code in (('failed', 'stream_interrupted'), ('cancelled', 'cancelled')):
+            with self.subTest(code=code):
+                self.prepare(session=request, request=request)
+                self.registry.audit_event('p', request, {'type': 'error', 'error': {'code': code},
+                    'cacheEvidence': {'version': 1, 'cache_write_tokens': 100}})
+                self.assertNotIn('cache_evidence', self.registry.audit('p', request))
 
     def test_arbitrary_body_fields_rejected(self):
         for field in ('instructions', 'parts', 'messages', 'context'):
@@ -137,6 +186,23 @@ class GPTAuditPipe(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stages, ['request', 'receipt', 'completed'])
         process.stdin.write.assert_called_once_with(b'{"audit_ack":true}\n')
         self.assertEqual(events[-1]['type'], 'completed')
+
+    async def test_cache_evidence_crosses_pipe_and_survives_registry_reopen(self):
+        with tempfile.TemporaryDirectory() as directory:
+            registry = GPTChatRequests(str(Path(directory) / 'state.db'))
+            registry.control('p', {'action': 'claim', 'session_id': 's', 'request_id': 'r',
+                                  'fingerprint': 'f' * 64, 'owner': 'd' * 32})
+            registry.control('p', {'action': 'prepare', 'session_id': 's', 'request_id': 'r',
+                                  'owner': 'd' * 32, 'snapshot': snapshot()})
+            evidence = {'version': 1, 'response_model': 'gpt-5.6-sol', 'service_tier': 'default',
+                        'cache_write_tokens': 0, 'diagnostics': None}
+            _, events = await self.run_pipe(lambda event: registry.audit_event('p', 'r', event), [
+                {'type': 'request', 'body_hash': 'b' * 64}, {'type': 'receipt', 'requestId': 'req'},
+                {'type': 'completed', 'usage': {'cached_tokens': 0}, 'cacheEvidence': evidence}])
+            self.assertEqual(events[-1]['cacheEvidence'], evidence)
+            record = GPTChatRequests(registry.db_path).audit('p', 'r')
+            self.assertEqual(record['cache_evidence'], evidence)
+            self.assertEqual(record['usage']['cached_tokens'], 0)
 
     async def test_failed_write_never_acknowledges_or_reports_success(self):
         def fail(event):

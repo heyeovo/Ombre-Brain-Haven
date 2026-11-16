@@ -93,6 +93,20 @@ export interface GptQuotaEvidence {
   snapshots: GptQuotaSnapshot[];
 }
 
+// Passive response metadata only; never sent as a model request option.
+export interface GptCacheEvidence {
+  version: 1;
+  response_model: string | null;
+  service_tier: string | null;
+  cache_write_tokens: number | null;
+  diagnostics: {
+    type: 'cache_hit' | 'cache_miss' | 'comparison_response_not_found' | 'unavailable';
+    reason: string | null;
+    comparison_reusable_tokens: number | null;
+    cache_missed_tokens: number | null;
+  } | null;
+}
+
 export interface StreamResponseOptions {
   model: string;
   input: string | ResponseInputMessage[];
@@ -104,7 +118,7 @@ export interface StreamResponseOptions {
   onRequest?: (value: { body_hash: string }) => Promise<void>;
   onReceipt?: (value: { requestId?: string }) => void;
   // Haven modification 2026-11-15: terminal metadata, never credentials or raw responses.
-  onCompleted?: (metadata: { responseId?: string; requestId?: string; usage: Record<string, number> | null; quotaEvidence: GptQuotaEvidence }) => void;
+  onCompleted?: (metadata: { responseId?: string; requestId?: string; usage: Record<string, number> | null; quotaEvidence: GptQuotaEvidence; cacheEvidence: GptCacheEvidence }) => void;
 }
 
 export interface SignInOptions {

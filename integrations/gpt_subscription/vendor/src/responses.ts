@@ -1,7 +1,32 @@
 import OpenAI from "openai";
 import { createHash } from "node:crypto";
 import { apiError, ChatGPTError, isObject } from "./errors.js";
-import type { GptQuotaSnapshot, GptQuotaWindow, StreamResponseOptions } from "./types.js";
+import type { GptCacheEvidence, GptQuotaSnapshot, GptQuotaWindow, StreamResponseOptions } from "./types.js";
+
+function cacheEvidence(response: unknown): GptCacheEvidence {
+  const value = isObject(response) ? response : {};
+  const integer = (n: unknown): number | null => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0 ? n : null;
+  const model = value.model;
+  const tier = value.service_tier;
+  const usage = isObject(value.usage) ? value.usage : {};
+  const details = isObject(usage.input_tokens_details) ? usage.input_tokens_details : {};
+  const raw = isObject(value.prompt_cache_diagnostics) ? value.prompt_cache_diagnostics : {};
+  const types = ['cache_hit', 'cache_miss', 'comparison_response_not_found', 'unavailable'] as const;
+  const reasons = ['model_changed', 'prompt_cache_key_changed', 'service_tier_changed', 'tools_changed',
+    'text_format_changed', 'reasoning_effort_changed', 'verbosity_changed', 'context_compacted', 'input_changed'];
+  return {
+    version: 1,
+    response_model: typeof model === 'string' && model.length <= 200 && /^(?:gpt-[A-Za-z0-9._-]+|o[1-9][A-Za-z0-9._-]*)$/.test(model) ? model : null,
+    service_tier: typeof tier === 'string' && ['auto', 'default', 'flex', 'scale', 'priority'].includes(tier) ? tier : null,
+    cache_write_tokens: integer(details.cache_write_tokens),
+    diagnostics: types.includes(raw.type as typeof types[number]) ? {
+      type: raw.type as typeof types[number],
+      reason: raw.type === 'cache_miss' && typeof raw.reason === 'string' && reasons.includes(raw.reason) ? raw.reason : null,
+      comparison_reusable_tokens: integer(raw.comparison_reusable_tokens),
+      cache_missed_tokens: integer(raw.cache_missed_tokens),
+    } : null,
+  };
+}
 
 // Haven modification 2026-11-16. Only accept quota fields documented in the
 // official Codex parser. Whether the SIWC route emits them needs real verification.
@@ -171,6 +196,7 @@ export async function streamResponse(
           ...(result.request_id && /^[a-zA-Z0-9_-]{1,160}$/.test(result.request_id) ? { requestId: result.request_id } : {}),
           usage: Object.keys(usage).length ? usage : null,
           quotaEvidence: { status: snapshots.length ? "observed" : "unavailable", snapshots },
+          cacheEvidence: cacheEvidence(event.response),
         });
         completed = true;
         break;

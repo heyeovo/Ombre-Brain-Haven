@@ -59,6 +59,34 @@ def request_hash(payload):
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def cache_evidence(value):
+    value = value if isinstance(value, dict) and type(value.get('version')) is int and value['version'] == 1 else {}
+
+    def integer(number):
+        return number if type(number) is int and 0 <= number <= 9007199254740991 else None
+
+    model = value.get('response_model')
+    tier = value.get('service_tier')
+    raw = value.get('diagnostics')
+    raw = raw if isinstance(raw, dict) else {}
+    kind = raw.get('type')
+    kinds = ('cache_hit', 'cache_miss', 'comparison_response_not_found', 'unavailable')
+    reasons = ('model_changed', 'prompt_cache_key_changed', 'service_tier_changed', 'tools_changed',
+               'text_format_changed', 'reasoning_effort_changed', 'verbosity_changed', 'context_compacted', 'input_changed')
+    return {
+        'version': 1,
+        'response_model': model if isinstance(model, str) and len(model) <= 200 and re.fullmatch(r'(?:gpt-[A-Za-z0-9._-]+|o[1-9][A-Za-z0-9._-]*)', model) else None,
+        'service_tier': tier if tier in ('auto', 'default', 'flex', 'scale', 'priority') else None,
+        'cache_write_tokens': integer(value.get('cache_write_tokens')),
+        'diagnostics': {
+            'type': kind,
+            'reason': raw.get('reason') if kind == 'cache_miss' and raw.get('reason') in reasons else None,
+            'comparison_reusable_tokens': integer(raw.get('comparison_reusable_tokens')),
+            'cache_missed_tokens': integer(raw.get('cache_missed_tokens')),
+        } if kind in kinds else None,
+    }
+
+
 def apply_event(record, event):
     kind = event.get("type")
     if kind == "request":
@@ -75,6 +103,9 @@ def apply_event(record, event):
         raw = event.get("usage")
         record["usage"] = {key: raw.get(key) if type(raw.get(key)) is int and raw[key] >= 0 else None
                            for key in ("input_tokens", "output_tokens", "total_tokens", "cached_tokens", "reasoning_tokens")} if isinstance(raw, dict) else None
+        # Old helpers omit this field. Error/cancel events cannot manufacture a completed response.
+        if kind == 'completed' and 'cacheEvidence' in event:
+            record['cache_evidence'] = cache_evidence(event['cacheEvidence'])
     for source, target in (("requestId", "official_request_id"), ("responseId", "response_id")):
         value = event.get(source)
         if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,200}", value):

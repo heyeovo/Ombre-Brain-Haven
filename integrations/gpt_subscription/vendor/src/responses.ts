@@ -1,6 +1,13 @@
 import OpenAI from "openai";
+import { createHash } from "node:crypto";
 import { apiError, ChatGPTError, isObject } from "./errors.js";
 import type { StreamResponseOptions } from "./types.js";
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`).join(',')}}`;
+  return JSON.stringify(value);
+}
 
 export async function streamResponse(
   accessToken: string,
@@ -38,14 +45,22 @@ export async function streamResponse(
   const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(180_000)]);
   let response: Response | undefined;
   try {
-    const result = await client.responses.create({
+    const body = {
       model: options.model,
       input: input.map((message) => ({ role: message.role, content: message.content })),
       ...(options.instructions !== undefined ? { instructions: options.instructions } : {}),
-      store: false,
-      stream: true,
-    }, { signal: requestSignal, headers: { accept: "text/event-stream" } }).withResponse();
+      store: false as const,
+      stream: true as const,
+    };
+    if (options.expectedRequestHash) {
+      const body_hash = createHash('sha256').update(canonical(body)).digest('hex');
+      if (body_hash !== options.expectedRequestHash || !options.onRequest) throw new ChatGPTError('audit_mismatch', 'Request audit did not match. No request was sent.');
+      await options.onRequest({ body_hash });
+      requestSignal.throwIfAborted();
+    }
+    const result = await client.responses.create(body, { signal: requestSignal, headers: { accept: "text/event-stream" } }).withResponse();
     response = result.response;
+    options.onReceipt?.({ ...(result.request_id && /^[a-zA-Z0-9_-]{1,160}$/.test(result.request_id) ? { requestId: result.request_id } : {}) });
     const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
     // The direct route can return valid SSE without Content-Type. In that case,
     // validate the events below and still require response.completed for success.

@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -152,7 +153,7 @@ class GPTSubscriptionService:
         try:
             line = await asyncio.wait_for(process.stdout.readline(), timeout=300)
             event = json.loads(line)
-            if not isinstance(event, dict) or event.get("type") not in {"result", "delta", *TERMINAL}:
+            if not isinstance(event, dict) or event.get("type") not in {"result", "delta", "request", "receipt", *TERMINAL}:
                 raise ValueError()
             if event["type"] == "error":
                 event["error"] = public_error(event["error"])
@@ -198,33 +199,54 @@ class GPTSubscriptionService:
             raise GPTSubscriptionError("request_in_progress", "同一请求正在执行。", 409)
         self._running[key] = None
 
-    async def stream(self, profile_id: str, request_id: str, request: dict) -> AsyncIterator[dict]:
+    async def stream(self, profile_id: str, request_id: str, request: dict, *, audit=None) -> AsyncIterator[dict]:
         key = (profile_id, request_id)
         process = None
         terminal = False
+        audit_started = False
+        audit_receipt = False
         try:
             if key not in self._running:
                 raise GPTSubscriptionError("request_not_reserved", "请求未登记。", 409)
             if key in self._cancelled:
                 yield {"type": "error", "request_id": request_id, "error": public_error({"code": "cancelled", "message": "已停止回复。", "retryable": False})}
                 return
-            process = await self._spawn(profile_id, {"op": "stream", "request": request})
+            process = await self._spawn(profile_id, {"op": "stream", "request": request,
+                **({"audit_hash": audit["body_hash"]} if audit else {})})
             self._running[key] = process
             if key in self._cancelled:
                 await self._signal_cancel(process)
             while not terminal:
                 event = await self._read(process)
-                if event["type"] not in {"delta", *TERMINAL}:
+                if event["type"] not in {"delta", "request", "receipt", *TERMINAL}:
                     raise GPTSubscriptionError("transport_error", "GPT 回复事件无效。")
+                if audit and ((event['type'] == 'receipt' and not audit_started) or
+                              (event['type'] in {'delta', 'completed'} and not audit_receipt)):
+                    raise GPTSubscriptionError('audit_sequence_invalid', 'GPT 请求缺少发送或上游回执证据。')
+                if event['type'] in {'request', 'receipt'}:
+                    if not audit:
+                        raise GPTSubscriptionError('audit_unexpected', 'GPT 审计状态不匹配。')
+                    audit['record'](event)
+                    if event['type'] == 'request':
+                        process.stdin.write(b'{"audit_ack":true}\n')
+                        await process.stdin.drain()
+                        audit_started = True
+                    else:
+                        audit_receipt = True
                 terminal = event["type"] in TERMINAL
                 if key in self._cancelled and event["type"] != "error":
                     if terminal:
                         event = {"type": "error", "error": public_error({"code": "cancelled", "message": "已停止回复。", "retryable": False})}
                     else:
                         continue
+                if audit and terminal:
+                    audit['record'](event)
                 yield {**event, "request_id": request_id}
         except GPTSubscriptionError as exc:
             yield {"type": "error", "request_id": request_id, "error": public_error(exc.detail)}
+        except (ValueError, sqlite3.Error, OSError):
+            yield {"type": "error", "request_id": request_id, "error": public_error({
+                'code': 'audit_persistence_failed', 'message': 'GPT 审计记录未能确认保存，请核对历史。', 'retryable': True})}
         finally:
             if process:
                 await self._stop(process)

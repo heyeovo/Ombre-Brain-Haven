@@ -38,6 +38,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `gpt_subscription.py` | Gateway 的 GPT 订阅文字传输：profile 隔离的 Node 私有管道、活跃 request_id 去重、取消与停止收尾、错误分类；不处理人设/召回/历史或原始授权导入 |
 | `gpt_subscription_proxy.py` | Brain 的 GPT 对外入口：认证后通过既有内部地址转发至独立 Gateway，保留流式/取消语义；不持有授权或创建第二个 GPT 服务 |
 | `gpt_chat_requests.py` | GPT 聊天请求的持久准入登记、同窗并发互斥与重启后防重复执行；只存摘要/状态，不存正文 |
+| `gpt_context_audit.py` | GPT 无正文审计的严格字段校验、请求对象指纹、执行阶段与真实 usage 投影；永久删除窗口时清除同 profile/session 证据 |
 | `integrations/gpt_subscription/` | 固定官方 SIWC DevKit 源码及许可、AES-GCM 加密、跨进程刷新锁/轮换恢复、stdin 管理导入与本机 SSH 登录交接；Node 依赖由 package-lock 固定 |
 | `server.py` | **Brain** 入口（约 700KB）。MCP 工具注册（`@mcp.tool`）+ REST API（`@mcp.custom_route`）+ 记忆核心 |
 | `gateway.py` | **Gateway** 入口（约 1MB）。OpenAI 兼容转发 + `/gateway` 前缀路由 + 注入/召回管线（透镜调试区分检索前排除与相关性拒绝）+ cc 持久化路由（`Route()` 注册） |
@@ -233,9 +234,15 @@ SSE 事件 `event: delta | completed | error`，每个 data 是含同名 `type` 
 **聊天请求登记**（Dashboard runner 服务端使用）：`POST /api/gpt-subscription/chat-requests`，同样先用 Gateway Bearer 认证，profile 只取运行时可信 profile，body 的 profile_id 不生效。请求为 `{action:"claim"|"finish"|"status",session_id,request_id,owner?,fingerprint?}`；request_id 沿用传输层字符限制，session_id 最多 200 字。claim 需要 32 位 hex owner 和规范请求的 64 位 SHA-256 hex 摘要；finish 需精确 owner，status 只需窗口和请求标识。
 
 - claim 用 gateway_state.db 的事务原子写入 `gpt_chat_requests`。同 profile/request_id 永久只准入一次；不同窗口或摘要复用返回 409 request_id_reused，同摘要重试返回 request_already_admitted。同 profile/session 同时只有一项有效 running 登记，第二项返回 conversation_busy；profile 隔离，不接受浏览器指定 profile。
-- 登记只保存 profile/request/session/摘要/owner/status/到期时间，不另存正文或授权数据。建表/索引可重复执行。12 分钟 lease 仅用于停止阻塞新请求：过期 running 的 status 为 interrupted，**不**授权重跑旧 request_id。Dashboard 单轮生成上限为 9 分钟并另留最终提交时间。
+- 登记保存 profile/request/session/摘要/owner/status/到期时间，以及下述无正文审计 JSON，不另存正文或授权数据。建表/索引和 audit_json 列升级可重复执行，旧行默认空串。12 分钟 lease 仅用于停止阻塞新请求：过期 running 的 status 为 interrupted，**不**授权重跑旧 request_id。Dashboard 单轮生成上限为 9 分钟并另留最终提交时间。
 - finish 仅把自己的登记改为 finished，解除同窗互斥，不删除防重回执；owner 不同返回 request_owner_conflict。status 返回 `{ok,found,status}`，状态为 running / finished / interrupted 或 null。完成登记不代表正文保存成功，必须另按 request_id 核对 conversation_turns。进程死亡、网络不明及未落库草稿不能伪装成 completed。
 - 这一路由不是任务队列，不执行模型、不保存聊天正文，也不提供多副本事件广播/远程停止。Dashboard 的路由、SSE、接回和失败保存契约只维护在 Dashboard reference。
+
+**GPT 发送前上下文证据**：上述 chat-requests 另接受 `prepare` 与 `audit-list`，均在可信 profile 下运行，不开放浏览器授权代理。prepare 接 `{session_id,request_id,owner,snapshot}`，最多 512 KiB；其余操作仍限 4096 字节。仅 running 且 owner 匹配、窗口未删除时可写，首次写入后 snapshot 不可变；同内容重试幂等，不授权重新生成。`audit_json` 与准入回执位于 gateway_state.db 同一行，不另建聊天正文表，不以临时文件/进程/浏览器作事实源。
+
+- snapshot 严格白名单：version=1、algorithm=`sha256-json-sorted-v1`、model、body_hash、instructions 的 hash/bytes；parts 的 persona/window/background/capability/recall/current_text/current_time 仅存 hash/bytes；messages 按原序存 role/hash/bytes/source_round_id/prefix_hash；context 只接受应用估算器、余量、预算、真实模型上限 null、纳入/省略轮数及 revision。摘要是 SHA-256 小写 hex；body_hash 对最终 SDK 对象按键排序、数组原序进行 UTF-8 JSON 序列化（store=false、stream=true），不包含本地 request_id、凭据或响应头。prefix_hash 从 instructions hash 起，逐项对“上一前缀 hash + 换行 + 消息 hash”计算；不代表 token 边界。
+- responses 收到已有审计记录时先校验请求对象，并拒绝已有 sending_at 的重发。Node 最终 SDK 调用前再次计算 body_hash，通过私有 `request` 事件让 Python 事务写入 sending_at；只有收到私有 audit_ack 后才发 HTTP。随后 receipt 写 acknowledged_at/安全 request ID；completed/error 写 finished_at、outcome、白名单 usage/response ID。没有回执不推断送达，缺失 token 为 null、真实零保留 0；缓存/推理是输入/输出子集。传输异常没有上游终态时保留未知，不伪造成功。旧客户端未准备证据的传输仍兼容，但不能声称存在发送前审计。
+- `audit-list` 接 `{session_id,before_cursor?,request_ids?}`；每页最新 20 项，返回 records/before_cursor，request_ids 最多 20 个并返回同 profile/session 的 matched_records，用于精确关联历史页。查询不返回正文或授权数据，status/finish 不改变旧防重语义。永久删除窗口会在同一事务中清空同 profile/session 的 audit_json，保留永久防重回执；其他 profile/session 不受影响。软删除沿用原窗口隐藏与不可追加契约，不清空历史证据。
 
 **持久化**：`buckets_dir/gpt-subscription/<sha256(profile_id)>/chatgpt-auth.json` 是 AES-256-GCM 密文（包含各登记的 client ID、已验证身份、令牌、pending refresh、导入回执）；AAD 绑定 profile，复制到另一 profile 无法解密。`chatgpt-host.json` 为此运行域稳定且非秘密的 host ID，重授权/导入不得换成本机 ID。私有目录 0700、文件 0600。密钥要求只维护在 [ENV_VARS](../ENV_VARS.md#GPT-订阅聊天gateway可选)。密钥缺失、密文损坏或身份暂时不可验证时保留原文件。旧 DevKit v1/v2 由同一锁内迁移为加密格式；初始化可重复，不改已有聊天数据库或数据表。
 

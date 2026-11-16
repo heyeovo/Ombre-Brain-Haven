@@ -78,6 +78,10 @@ export interface StreamResponseOptions {
   instructions?: string;
   signal?: AbortSignal;
   onDelta?: (delta: string) => void;
+  // Haven audit: awaited before the HTTP call; private-pipe acknowledgement is durable.
+  expectedRequestHash?: string;
+  onRequest?: (value: { body_hash: string }) => Promise<void>;
+  onReceipt?: (value: { requestId?: string }) => void;
   // Haven modification 2026-11-15: terminal metadata, never credentials or raw responses.
   onCompleted?: (metadata: { responseId?: string; requestId?: string; usage: Record<string, number> | null }) => void;
 }

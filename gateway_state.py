@@ -5442,6 +5442,8 @@ class GatewayStateStore:
                     (safe_profile_id, safe_session_id),
                 )
                 counts[table] = max(0, int(cursor.rowcount or 0))
+            from gpt_context_audit import clear_session_audit
+            clear_session_audit(conn, safe_profile_id, safe_session_id)
             counts.update(
                 delete_conversation_slice_session_records(
                     conn,

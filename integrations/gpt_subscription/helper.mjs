@@ -8,8 +8,13 @@ process.on('SIGTERM', () => abort.abort());
 process.on('SIGINT', () => abort.abort());
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 let started = false;
+let acknowledge;
 lines.on('line', (line) => {
-  if (started) { if (line === '{"cancel":true}') abort.abort(); return; }
+  if (started) {
+    if (line === '{"cancel":true}') abort.abort();
+    if (line === '{"audit_ack":true}') acknowledge?.();
+    return;
+  }
   started = true;
   void run(line).finally(() => { lines.close(); process.stdin.destroy(); });
 });
@@ -29,6 +34,17 @@ async function run(line) {
     else if (command.op === 'stream') {
       let metadata = { usage: null };
       await client.streamResponse({ ...command.request, signal: abort.signal,
+        ...(command.audit_hash ? { expectedRequestHash: command.audit_hash,
+          onRequest: ({ body_hash }) => new Promise((resolve, reject) => {
+            const timer = setTimeout(() => { acknowledge = undefined; reject(new ChatGPTError('audit_timeout', 'Request audit was not acknowledged.')); }, 15000);
+            const cancel = () => { clearTimeout(timer); acknowledge = undefined; reject(new ChatGPTError('cancelled', 'The response was cancelled.')); };
+            abort.signal.addEventListener('abort', cancel, { once: true });
+            acknowledge = () => { clearTimeout(timer); abort.signal.removeEventListener('abort', cancel); acknowledge = undefined; resolve(); };
+            if (abort.signal.aborted) { cancel(); return; }
+            emit({ type: 'request', body_hash });
+          }),
+          onReceipt: (value) => emit({ type: 'receipt', ...value }),
+        } : {}),
         onDelta: (text) => emit({ type: 'delta', text }), onCompleted: (value) => { metadata = value; } });
       emit({ type: 'completed', ...metadata });
     } else throw new ChatGPTError('invalid_request', '不支持的授权操作。');

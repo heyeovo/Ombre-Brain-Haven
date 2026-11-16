@@ -2680,11 +2680,13 @@ class GatewayService:
         if request.url.path.endswith("/chat-requests"):
             try:
                 raw = await request.body()
-                if len(raw) > 4096:
+                if len(raw) > 512 * 1024:
                     return JSONResponse({"ok": False, "error": "request too large"}, status_code=413)
                 body = json.loads(raw)
                 if not isinstance(body, dict):
                     raise ValueError("body must be an object")
+                if body.get('action') != 'prepare' and len(raw) > 4096:
+                    return JSONResponse({"ok": False, "error": "request too large"}, status_code=413)
                 result = self.gpt_chat_requests.control(profile_id, body)
                 return JSONResponse(result, status_code=200 if result["ok"] else 409,
                                     headers={"Cache-Control": "no-store"})
@@ -2713,10 +2715,19 @@ class GatewayService:
             if operation == "responses":
                 payload = validate_request(body)
                 request_id = body["request_id"]
+                from gpt_context_audit import request_hash
+                registry = getattr(self, 'gpt_chat_requests', None)
+                evidence = registry.audit(profile_id, request_id) if registry else None
+                audit = None
+                if evidence:
+                    if evidence.get('sending_at') or evidence['snapshot']['body_hash'] != request_hash(payload):
+                        raise GPTSubscriptionError('audit_mismatch', '请求已发送或与发送前记录不一致，请核对历史。', 409)
+                    audit = {'body_hash': evidence['snapshot']['body_hash'],
+                             'record': lambda event: registry.audit_event(profile_id, request_id, event)}
                 service.reserve(profile_id, request_id)
 
                 async def events():
-                    async for event in service.stream(profile_id, request_id, payload):
+                    async for event in service.stream(profile_id, request_id, payload, **({'audit': audit} if audit else {})):
                         yield f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
 
                 return StreamingResponse(events(), media_type="text/event-stream", headers={**headers, "X-Accel-Buffering": "no"})

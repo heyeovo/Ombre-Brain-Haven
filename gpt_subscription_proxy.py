@@ -1,6 +1,7 @@
 """Brain's public GPT paths relay to the single credential-owning Gateway."""
 import hmac
 import os
+import json
 from urllib.parse import urlsplit, urlunsplit
 
 import anyio
@@ -37,11 +38,18 @@ async def forward_gpt_subscription(request):
         path[:-len("/api/config")] + f"/api/gpt-subscription/{operation}", "", ""))
     body = bytearray()
     if request.method == "POST":
-        limit = 4 * 1024 * 1024 if operation == "responses" else 4096
+        limit = 4 * 1024 * 1024 if operation == "responses" else 512 * 1024 if operation == 'chat-requests' else 4096
         async for chunk in request.stream():
             body.extend(chunk)
             if len(body) > limit:
                 return failure("request_too_large", 413)
+        if operation == 'chat-requests' and len(body) > 4096:
+            try:
+                value = json.loads(body)
+                if not isinstance(value, dict) or value.get('action') != 'prepare':
+                    return failure('request_too_large', 413)
+            except ValueError:
+                return failure('request_too_large', 413)
 
     client = httpx.AsyncClient(follow_redirects=False, trust_env=False,
         timeout=httpx.Timeout(connect=10, read=300 if operation == "responses" else 45,

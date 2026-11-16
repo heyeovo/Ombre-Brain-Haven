@@ -14,5 +14,10 @@ Haven modifications (2026-11-15, also marked in changed source files):
 - Export state validation and ID-token verification for the trusted import command.
 - Add an optional terminal metadata callback with allowlisted per-response usage.
   Existing streamResponse return value and text behavior remain unchanged.
+- 2026-11-16: optional final SDK request hash verification and awaited pre-request
+  audit callback, plus a safe response-receipt callback. Haven's helper waits for
+  the Python durable-write acknowledgement before issuing HTTP. No credentials,
+  prompt bodies or arbitrary headers are included in the audit events. Regression
+  coverage lives in ../test/audit.test.mjs; upstream regression tests stay unchanged.
 
 The vendor tests are upstream regression tests, unchanged. Haven tests live in ../test.

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { generateKeyPair, exportJWK, SignJWT } from 'jose';
 import { openConnection, prepareImport, importConnection, publicSession } from '../connection.mjs';
@@ -138,6 +139,45 @@ test('terminal usage is actual and allowlisted; missing usage stays null; mid-st
   assert.equal(failure[0].type, 'delta'); assert.equal(failure[1].type, 'error');
   assert.equal(failure[1].error.code, 'subscription_sharing_usage_limit_exceeded');
   assert.ok(!JSON.stringify(failure).includes('private secret'));
+});
+
+test('real helper waits for private durable acknowledgement and can cancel before HTTP', async (t) => {
+  const f = await fixture(t); await seed(f);
+  const auditCallsFile = join(f.directory, 'audit-calls');
+  await writeFile(f.mockPath, JSON.stringify({ ...f.config, auditCallsFile }));
+  const request = { model: 'test-model', input: [{ role: 'user', content: 'synthetic input' }] };
+  const body = { input: [{ content: 'synthetic input', role: 'user' }], model: 'test-model', store: false, stream: true };
+  const audit_hash = createHash('sha256').update(JSON.stringify(body)).digest('hex');
+  for (const cancel of [false, true]) {
+    await writeFile(auditCallsFile, '');
+    const events = await new Promise((accept, reject) => {
+      const child = spawn(process.execPath, ['--import', pathToFileURL(resolve('test/mock-openai.mjs')).href, resolve('helper.mjs')], { env: {
+        ...process.env, HAVEN_GPT_ROOT: f.root, HAVEN_GPT_SCOPE: scope('profile-a'), OMBRE_GPT_KEY_FILE: f.keyFile, HAVEN_TEST_FIXTURE: f.mockPath,
+      }, stdio: ['pipe', 'pipe', 'pipe'] });
+      const received = [];
+      const timeout = setTimeout(() => { child.kill(); reject(new Error('audit helper timed out')); }, 10000);
+      const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+      lines.on('line', line => {
+        const event = JSON.parse(line); received.push(event);
+        if (event.type === 'request') void (async () => {
+          await new Promise(resolve => setTimeout(resolve, 30));
+          assert.equal(await readFile(auditCallsFile, 'utf8'), '');
+          child.stdin.end(cancel ? '{"cancel":true}\n' : '{"audit_ack":true}\n');
+        })().catch(error => { child.kill(); reject(error); });
+      });
+      child.on('error', reject);
+      child.on('close', () => { clearTimeout(timeout); accept(received); });
+      child.stdin.write(JSON.stringify({ op: 'stream', request, audit_hash }) + '\n');
+    });
+    assert.equal(events[0].type, 'request');
+    if (cancel) {
+      assert.equal(events.at(-1).error.code, 'cancelled');
+      assert.equal(await readFile(auditCallsFile, 'utf8'), '');
+    } else {
+      assert.deepEqual(events.map(event => event.type), ['request', 'receipt', 'delta', 'completed']);
+      assert.equal(await readFile(auditCallsFile, 'utf8'), 'response\n');
+    }
+  }
 });
 
 test('local handoff durably freezes refresh credentials before transfer and retains encrypted recovery metadata', async (t) => {

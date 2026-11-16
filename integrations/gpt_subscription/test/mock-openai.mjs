@@ -27,6 +27,7 @@ export function installMock(config) {
       { slug: 'test-model', display_name: 'Test Model', visibility: 'list' },
     ] });
     if (address.endsWith('/v1/responses')) {
+      if (config.auditCallsFile) await appendFile(config.auditCallsFile, 'response\n');
       const payload = JSON.parse(options.body);
       if (payload.store !== false || payload.stream !== true || 'tools' in payload) throw new Error('unsafe request');
       if (config.waitForCancel) return new Response(new ReadableStream({

@@ -72,6 +72,27 @@ export interface ResponseInputMessage {
   content: string;
 }
 
+// Haven modification 2026-11-16: passive quota evidence, not an entitlement decision.
+export interface GptQuotaWindow {
+  used_percent: number;
+  window_minutes: number | null;
+  resets_at: number | null;
+}
+
+export interface GptQuotaSnapshot {
+  source: "response_headers" | "stream_event";
+  observed_at: string;
+  limit_id: string;
+  scope: "unverified";
+  primary: GptQuotaWindow | null;
+  secondary: GptQuotaWindow | null;
+}
+
+export interface GptQuotaEvidence {
+  status: "observed" | "unavailable";
+  snapshots: GptQuotaSnapshot[];
+}
+
 export interface StreamResponseOptions {
   model: string;
   input: string | ResponseInputMessage[];
@@ -83,7 +104,7 @@ export interface StreamResponseOptions {
   onRequest?: (value: { body_hash: string }) => Promise<void>;
   onReceipt?: (value: { requestId?: string }) => void;
   // Haven modification 2026-11-15: terminal metadata, never credentials or raw responses.
-  onCompleted?: (metadata: { responseId?: string; requestId?: string; usage: Record<string, number> | null }) => void;
+  onCompleted?: (metadata: { responseId?: string; requestId?: string; usage: Record<string, number> | null; quotaEvidence: GptQuotaEvidence }) => void;
 }
 
 export interface SignInOptions {

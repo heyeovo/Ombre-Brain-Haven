@@ -36,13 +36,13 @@ export function installMock(config) {
           options.signal.addEventListener('abort', () => controller.error(new DOMException('aborted', 'AbortError')), { once: true });
         },
       }), { headers: { 'content-type': 'text/event-stream' } });
-      const frames = [{ type: 'response.output_text.delta', delta: 'synthetic reply' }];
+      const frames = [{ type: 'response.output_text.delta', delta: 'synthetic reply' }, ...(config.quotaEvents ?? [])];
       if (config.failStream) frames.push({ type: 'response.failed', response: { error: { code: 'subscription_sharing_usage_limit_exceeded', message: 'private secret never expose' } } });
       else frames.push({ type: 'response.completed', response: { id: 'resp_test', status: 'completed', ...(config.noUsage ? {} : { usage: {
         input_tokens: 20, output_tokens: 8, total_tokens: 28, input_tokens_details: { cached_tokens: 3 },
         output_tokens_details: { reasoning_tokens: 2 }, secret: 'never expose',
       } }) } });
-      return new Response(frames.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream', 'x-request-id': 'req_test' } });
+      return new Response(frames.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream', 'x-request-id': 'req_test', ...config.quotaHeaders } });
     }
     if (address.endsWith('/oauth/revoke')) return new Response('', { status: 200 });
     throw new Error('Unexpected synthetic endpoint');

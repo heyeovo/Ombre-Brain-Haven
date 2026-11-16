@@ -227,6 +227,7 @@ SSE 事件 `event: delta | completed | error`，每个 data 是含同名 `type` 
 
 - `delta`：`text` 增量。
 - `completed`：仅在官方 `response.completed` 之后；可有 `responseId`、`requestId`（官方 HTTP 请求标识，与客户端 request_id 区分），`usage` 为实际数字字段 `input_tokens/output_tokens/total_tokens/cached_tokens/reasoning_tokens`，缺失为 null。它不是订阅剩余额度；`limits:null` 不代表 0 或无限。
+- `completed.quotaEvidence`：本次正常 Responses 响应的被动额度证据，`{status:"observed"|"unavailable",snapshots:[]}`；只提取 `x-codex-…-primary/secondary-used-percent/window-minutes/reset-at` 和 `codex.rate_limits` 流事件，排除 API RPM/TPM。每个快照有 `source:"response_headers"|"stream_event"`、`observed_at`、`limit_id`、`scope:"unverified"`、`primary/secondary`（可为 null）；窗口字段为 `used_percent`（0–100 的有限数）、`window_minutes`、`resets_at`（Unix 秒），周期/时间缺失或无效保留 null，不推定 5h/周或恢复。头和流快照分开保留，流内同桶只留最新一条，每来源最多 16 桶，不跨观测补字段。无有效额度时为 unavailable，不等于 0%。不读取/转发原始 headers、Cookie、凭据、正文或任意事件字段，不新增请求/存储；helper 和 Python stream 复用完成事件透传，Dashboard 当前忽略此字段。该证据属于允许丢失的单请求运行态，尚不能作为账号总额度、应用限额、模型额度或可用性判定；SIWC 真实返回及与同账号官方页的对应关系仍需验收。公开连接状态继续 `limits:null`。
 - `error`：`error={code,message,retryable,status?,requestId?,param?,responseShape?,action}`。code/status/请求标识保留官方诊断，原始响应正文、令牌和可能回显的请求文字不透传。`action` 为 reconnect / usage_settings / enable_sharing / retry / inspect。
 
 流中失败、incomplete、取消、无终态 EOF 均不能转为 completed；部分 delta 可保留，但应由窗口 2 保存为中断轮次。`subscription_sharing_usage_limit_exceeded` 提示到 usage_url 查看额度，不能推断具体重置时间；暂时不可用和普通 401/403 不清除凭据。终结性 refresh 错误才清除不可用 token 并保留登记用于重新授权。disconnect 会尝试撤销远端 renewable session；失败时仍本地断开并返回 `revocation_failed`，需到 ChatGPT Settings 检查远端撤销。

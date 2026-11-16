@@ -79,11 +79,16 @@ class GPTSubscriptionContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(validate_request(self.body())["input"][0]["content"], "text")
 
     async def test_stream_events_terminal_usage_and_authenticated_scope(self):
+        quota_evidence = {"status": "observed", "snapshots": [{
+            "source": "response_headers", "observed_at": "2026-11-16T00:00:00.000Z",
+            "limit_id": "codex", "scope": "unverified", "secondary": None,
+            "primary": {"used_percent": 15, "window_minutes": 300, "resets_at": 1900000000},
+        }]}
         async def stream(profile, request_id, body):
             self.assertEqual(profile, "trusted-profile")
             self.assertNotIn("request_id", body)
             yield {"type": "delta", "request_id": request_id, "text": "reply"}
-            yield {"type": "completed", "request_id": request_id, "usage": None}
+            yield {"type": "completed", "request_id": request_id, "usage": None, "quotaEvidence": quota_evidence}
 
         service = SimpleNamespace(reserve=Mock(), stream=stream)
         response = await gateway(service).handle_gpt_subscription(request("responses", self.body()))
@@ -92,6 +97,9 @@ class GPTSubscriptionContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("event: delta", data)
         self.assertIn('"usage": null', data)
         self.assertEqual(data.count("event: completed"), 1)
+        completed = next(json.loads(line.removeprefix("data: ")) for line in data.splitlines()
+                         if line.startswith("data: ") and json.loads(line[6:]).get("type") == "completed")
+        self.assertEqual(completed["quotaEvidence"], quota_evidence)
 
     async def test_quota_and_reauth_actions_and_status_are_not_conflated(self):
         self.assertEqual(public_error({"code": "invalid_grant"})["action"], "reconnect")

@@ -21,3 +21,15 @@ Haven modifications (2026-11-15, also marked in changed source files):
   coverage lives in ../test/audit.test.mjs; upstream regression tests stay unchanged.
 
 The vendor tests are upstream regression tests, unchanged. Haven tests live in ../test.
+
+Haven modifications (2026-11-16):
+- Passively collect allowlisted quota headers and `codex.rate_limits` stream events
+  into optional terminal metadata (`quotaEvidence`). No additional network call,
+  credential handling, persistence, or UI change. Absence remains unavailable;
+  observed values have unverified quota scope until checked against the same
+  account's official usage page. SIWC returning these fields is not yet verified.
+- New synthetic quota/parser and helper propagation tests live in ../test; upstream
+  vendor tests remain unchanged.
+- The helper audit regression also exercises header/event quota evidence after
+  durable acknowledgement, and verifies cancellation before HTTP emits no quota
+  evidence. Request hashing and receipt callbacks retain their audit semantics.

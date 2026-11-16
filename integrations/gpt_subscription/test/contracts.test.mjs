@@ -132,6 +132,7 @@ test('terminal usage is actual and allowlisted; missing usage stays null; mid-st
   assert.equal(events[0].text, 'synthetic reply');
   assert.deepEqual(events[1].usage, { input_tokens: 20, output_tokens: 8, total_tokens: 28, cached_tokens: 3, reasoning_tokens: 2 });
   assert.equal(events[1].responseId, 'resp_test');
+  assert.deepEqual(events[1].quotaEvidence, { status: 'unavailable', snapshots: [] });
   await writeFile(f.mockPath, JSON.stringify({ ...f.config, noUsage: true }));
   assert.equal((await helper(f, { op: 'stream', request }))[1].usage, null);
   await writeFile(f.mockPath, JSON.stringify({ ...f.config, failStream: true }));
@@ -144,7 +145,10 @@ test('terminal usage is actual and allowlisted; missing usage stays null; mid-st
 test('real helper waits for private durable acknowledgement and can cancel before HTTP', async (t) => {
   const f = await fixture(t); await seed(f);
   const auditCallsFile = join(f.directory, 'audit-calls');
-  await writeFile(f.mockPath, JSON.stringify({ ...f.config, auditCallsFile }));
+  await writeFile(f.mockPath, JSON.stringify({ ...f.config, auditCallsFile,
+    quotaHeaders: { 'x-codex-primary-used-percent': '15', 'x-codex-primary-window-minutes': '300' },
+    quotaEvents: [{ type: 'codex.rate_limits', rate_limits: { secondary: { used_percent: 30, window_minutes: 10080 } } }],
+  }));
   const request = { model: 'test-model', input: [{ role: 'user', content: 'synthetic input' }] };
   const body = { input: [{ content: 'synthetic input', role: 'user' }], model: 'test-model', store: false, stream: true };
   const audit_hash = createHash('sha256').update(JSON.stringify(body)).digest('hex');
@@ -173,11 +177,33 @@ test('real helper waits for private durable acknowledgement and can cancel befor
     if (cancel) {
       assert.equal(events.at(-1).error.code, 'cancelled');
       assert.equal(await readFile(auditCallsFile, 'utf8'), '');
+      assert.ok(events.every(event => !('quotaEvidence' in event)));
     } else {
       assert.deepEqual(events.map(event => event.type), ['request', 'receipt', 'delta', 'completed']);
       assert.equal(await readFile(auditCallsFile, 'utf8'), 'response\n');
+      const evidence = events.at(-1).quotaEvidence;
+      assert.equal(evidence.status, 'observed');
+      assert.deepEqual(evidence.snapshots.map(snapshot => snapshot.source), ['response_headers', 'stream_event']);
+      assert.equal(evidence.snapshots[0].primary.used_percent, 15);
+      assert.equal(evidence.snapshots[1].secondary.window_minutes, 10080);
     }
   }
+});
+
+test('helper completion forwards passive quota evidence without raw headers or event extras', async (t) => {
+  const f = await fixture(t); await seed(f);
+  await writeFile(f.mockPath, JSON.stringify({ ...f.config,
+    quotaHeaders: { 'x-codex-primary-used-percent': '15', 'x-codex-primary-window-minutes': '300', 'set-cookie': 'private-cookie' },
+    quotaEvents: [{ type: 'codex.rate_limits', rate_limits: { secondary: { used_percent: 30, window_minutes: 10080, reset_at: 1900000000 } }, secret: 'private-extra' }],
+  }));
+  const events = await helper(f, { op: 'stream', request: { model: 'test-model', input: 'synthetic input' } });
+  assert.equal(events[1].type, 'completed');
+  const evidence = events[1].quotaEvidence;
+  assert.equal(evidence.status, 'observed');
+  assert.deepEqual(evidence.snapshots.map((s) => s.source), ['response_headers', 'stream_event']);
+  assert.equal(evidence.snapshots[0].primary.used_percent, 15);
+  assert.equal(evidence.snapshots[1].secondary.window_minutes, 10080);
+  assert.doesNotMatch(JSON.stringify(events), /private-cookie|private-extra|access-old|refresh-old/);
 });
 
 test('local handoff durably freezes refresh credentials before transfer and retains encrypted recovery metadata', async (t) => {

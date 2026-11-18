@@ -46,8 +46,8 @@ def public_error(detail: dict) -> dict:
 
 
 def validate_request(body: object) -> dict:
-    if not isinstance(body, dict) or set(body) - {"request_id", "model", "input", "instructions"}:
-        raise GPTSubscriptionError("invalid_request", "首版只接受文字消息、模型和人设指令。", 400)
+    if not isinstance(body, dict) or set(body) - {"request_id", "model", "input", "instructions", "tools", "tool_choice", "include", "step"}:
+        raise GPTSubscriptionError("invalid_request", "GPT 请求包含不受支持的字段。", 400)
     request_id = body.get("request_id")
     if not isinstance(request_id, str) or not ID_PATTERN.fullmatch(request_id):
         raise GPTSubscriptionError("invalid_request", "请提供有效的 request_id。", 400)
@@ -57,16 +57,77 @@ def validate_request(body: object) -> dict:
     messages = body.get("input")
     if not isinstance(messages, list) or not 1 <= len(messages) <= 2000:
         raise GPTSubscriptionError("invalid_request", "input 必须为文字消息列表。", 400)
+    step = body.get("step", 0)
+    tools = body.get("tools")
+    if type(step) is not int or not 0 <= step <= 4 or (step and not tools):
+        raise GPTSubscriptionError("invalid_request", "GPT 工具续接序号无效。", 400)
+    if "tools" in body:
+        if not valid_tool_namespaces(tools) or body.get("include") != ["reasoning.encrypted_content"]:
+            raise GPTSubscriptionError("invalid_request", "GPT 工具定义无效。", 400)
+    elif "include" in body or "tool_choice" in body:
+        raise GPTSubscriptionError("invalid_request", "工具选项需要工具定义。", 400)
+    if "tool_choice" in body and (not step or body["tool_choice"] != "none"):
+        raise GPTSubscriptionError("invalid_request", "GPT 工具选择无效。", 400)
     for message in messages:
-        if (not isinstance(message, dict) or set(message) != {"role", "content"}
-                or message["role"] not in ("user", "assistant", "developer")
-                or not isinstance(message["content"], str)):
-            raise GPTSubscriptionError("unsupported_capability", "此线路首版不接受工具、图片或文件。", 400)
+        if isinstance(message, dict) and set(message) == {"role", "content"} and (
+            message["role"] in ("user", "assistant", "developer") and isinstance(message["content"], str)
+        ):
+            continue
+        if step and valid_tool_input(message):
+            continue
+        raise GPTSubscriptionError("unsupported_capability", "GPT 输入项不受支持。", 400)
     if "instructions" in body and not isinstance(body["instructions"], str):
         raise GPTSubscriptionError("invalid_request", "instructions 必须为文字。", 400)
     if len(json.dumps(body, ensure_ascii=False).encode()) > MAX_BODY_BYTES - 1024:
         raise GPTSubscriptionError("invalid_request", "请求过大，请缩短上下文。", 413)
-    return {k: v for k, v in body.items() if k != "request_id"}
+    return {k: v for k, v in body.items() if k not in {"request_id", "step"}}
+
+
+def valid_tool_namespaces(tools):
+    def named(item):
+        return isinstance(item.get("name"), str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", item["name"])
+
+    if not isinstance(tools, list) or not 1 <= len(tools) <= 64:
+        return False
+    total = 0
+    namespaces = set()
+    for group in tools:
+        if (not isinstance(group, dict) or set(group) != {"type", "name", "description", "tools"}
+                or group["type"] != "namespace" or not named(group) or group["name"] in namespaces
+                or not isinstance(group["description"], str) or not isinstance(group["tools"], list)
+                or not group["tools"]):
+            return False
+        namespaces.add(group["name"])
+        names = set()
+        for tool in group["tools"]:
+            if (not isinstance(tool, dict) or set(tool) != {"type", "name", "description", "parameters", "strict"}
+                    or tool["type"] != "function" or not named(tool) or tool["name"] in names
+                    or not isinstance(tool["description"], str) or not isinstance(tool["parameters"], dict)
+                    or tool["strict"] is not False):
+                return False
+            names.add(tool["name"])
+        total += len(names)
+    return total <= 512 and len(json.dumps(tools, ensure_ascii=False).encode()) <= 256 * 1024
+
+
+def valid_tool_input(item):
+    if not isinstance(item, dict):
+        return False
+    kind = item.get("type")
+    if kind == "function_call_output":
+        output = item.get("output")
+        return set(item) == {"type", "call_id", "output"} and isinstance(item.get("call_id"), str) and (
+            isinstance(output, str) and len(output.encode()) <= 8192
+        )
+    if kind == "function_call":
+        return all(isinstance(item.get(key), str) for key in ("call_id", "name", "arguments"))
+    if kind == "reasoning":
+        return isinstance(item.get("id"), str) and isinstance(item.get("summary"), list)
+    if kind == "message":
+        return item.get("role") == "assistant" and isinstance(item.get("content"), list) and all(
+            isinstance(part, dict) and part.get("type") in ("output_text", "refusal") for part in item["content"]
+        )
+    return False
 
 
 class GPTSubscriptionService:
@@ -153,7 +214,7 @@ class GPTSubscriptionService:
         try:
             line = await asyncio.wait_for(process.stdout.readline(), timeout=300)
             event = json.loads(line)
-            if not isinstance(event, dict) or event.get("type") not in {"result", "delta", "request", "receipt", *TERMINAL}:
+            if not isinstance(event, dict) or event.get("type") not in {"result", "delta", "request", "receipt", "tool_continuation", *TERMINAL}:
                 raise ValueError()
             if event["type"] == "error":
                 event["error"] = public_error(event["error"])
@@ -203,6 +264,7 @@ class GPTSubscriptionService:
         key = (profile_id, request_id)
         process = None
         terminal = False
+        released = False
         audit_started = False
         audit_receipt = False
         try:
@@ -212,16 +274,17 @@ class GPTSubscriptionService:
                 yield {"type": "error", "request_id": request_id, "error": public_error({"code": "cancelled", "message": "已停止回复。", "retryable": False})}
                 return
             process = await self._spawn(profile_id, {"op": "stream", "request": request,
-                **({"audit_hash": audit["body_hash"]} if audit else {})})
+                **({"audit_hash": audit["body_hash"]} if audit else {}),
+                **({"expected_connection_id": audit["connection_id"]} if audit and audit.get("connection_id") else {})})
             self._running[key] = process
             if key in self._cancelled:
                 await self._signal_cancel(process)
             while not terminal:
                 event = await self._read(process)
-                if event["type"] not in {"delta", "request", "receipt", *TERMINAL}:
+                if event["type"] not in {"delta", "request", "receipt", "tool_continuation", *TERMINAL}:
                     raise GPTSubscriptionError("transport_error", "GPT 回复事件无效。")
                 if audit and ((event['type'] == 'receipt' and not audit_started) or
-                              (event['type'] in {'delta', 'completed'} and not audit_receipt)):
+                              (event['type'] in {'delta', 'completed', 'tool_continuation'} and not audit_receipt)):
                     raise GPTSubscriptionError('audit_sequence_invalid', 'GPT 请求缺少发送或上游回执证据。')
                 if event['type'] in {'request', 'receipt'}:
                     if not audit:
@@ -233,6 +296,8 @@ class GPTSubscriptionService:
                         audit_started = True
                     else:
                         audit_receipt = True
+                if audit and event['type'] == 'tool_continuation' and key not in self._cancelled:
+                    audit['record'](event)
                 terminal = event["type"] in TERMINAL
                 if key in self._cancelled and event["type"] != "error":
                     if terminal:
@@ -241,17 +306,28 @@ class GPTSubscriptionService:
                         continue
                 if audit and terminal:
                     audit['record'](event)
-                yield {**event, "request_id": request_id}
+                if terminal:
+                    # Let a tool continuation reserve this request before the
+                    # client closes the completed SSE response.
+                    await self._stop(process)
+                    process = None
+                    self._running.pop(key, None)
+                    self._cancelled.discard(key)
+                    released = True
+                yield {**{k: v for k, v in event.items() if k != "connection_id"}, "request_id": request_id}
         except GPTSubscriptionError as exc:
             yield {"type": "error", "request_id": request_id, "error": public_error(exc.detail)}
         except (ValueError, sqlite3.Error, OSError):
             yield {"type": "error", "request_id": request_id, "error": public_error({
                 'code': 'audit_persistence_failed', 'message': 'GPT 审计记录未能确认保存，请核对历史。', 'retryable': True})}
         finally:
-            if process:
-                await self._stop(process)
-            self._running.pop(key, None)
-            self._cancelled.discard(key)
+            if not released:
+                try:
+                    if process:
+                        await self._stop(process)
+                finally:
+                    self._running.pop(key, None)
+                    self._cancelled.discard(key)
 
     async def cancel(self, profile_id: str, request_id: str) -> dict:
         key = (profile_id, request_id)

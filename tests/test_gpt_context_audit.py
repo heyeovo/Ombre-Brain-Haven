@@ -57,6 +57,25 @@ class GPTContextAudit(unittest.TestCase):
         self.assertEqual(reopened.audit('p', 'r')['snapshot'], snapshot())
         self.assertIsNone(reopened.audit('other', 'r'))
 
+    def test_tool_continuation_is_bound_to_owner_profile_and_connection(self):
+        self.prepare()
+        request = {'action': 'prepare-tool-step', 'session_id': 's', 'request_id': 'r',
+                   'owner': 'd' * 32, 'step': 1, 'body_hash': 'e' * 64}
+        self.assertFalse(self.registry.control('p', request)['ok'])
+        self.registry.audit_event('p', 'r', {'type': 'request', 'body_hash': 'b' * 64, 'connection_id': 'fixture-connection'})
+        self.registry.audit_event('p', 'r', {'type': 'receipt'})
+        self.registry.audit_event('p', 'r', {'type': 'tool_continuation', 'items': ['fixture-only']})
+        self.registry.audit_event('p', 'r', {'type': 'completed'})
+        self.assertFalse(self.registry.control('other', request)['ok'])
+        self.assertFalse(self.registry.control('p', {**request, 'owner': 'a' * 32})['ok'])
+        self.assertTrue(self.registry.control('p', request)['ok'])
+        self.assertFalse(self.registry.control('p', request)['ok'])
+        self.assertIsNone(self.registry.audit('other', 'r', 1))
+        evidence = self.registry.audit('p', 'r', 1)
+        self.assertEqual(evidence['connection_id'], 'fixture-connection')
+        self.assertEqual(evidence['snapshot']['body_hash'], 'e' * 64)
+        self.assertNotIn('fixture-only', json.dumps(self.registry.audit('p', 'r')))
+
     def test_immutable_prepare_owner_and_unknown_usage(self):
         self.prepare()
         record = self.registry.audit('p', 'r')
@@ -257,6 +276,18 @@ class GPTAuditPipe(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stages, ['request', 'receipt', 'completed'])
         process.stdin.write.assert_called_once_with(b'{"audit_ack":true}\n')
         self.assertEqual(events[-1]['type'], 'completed')
+
+    async def test_completed_stream_releases_reservation_before_the_client_closes(self):
+        service = GPTSubscriptionService('.', key_file='dummy', node='node')
+        service.reserve('p', 'r')
+        service._spawn = AsyncMock(return_value=object())
+        service._stop = AsyncMock()
+        service._read = AsyncMock(return_value={'type': 'completed', 'usage': None})
+        events = service.stream('p', 'r', {})
+        self.assertEqual((await anext(events))['type'], 'completed')
+        service.reserve('p', 'r')
+        await events.aclose()
+        self.assertIn(('p', 'r'), service._running)
 
     async def test_cache_evidence_crosses_pipe_and_survives_registry_reopen(self):
         with tempfile.TemporaryDirectory() as directory:

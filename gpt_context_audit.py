@@ -136,8 +136,13 @@ def apply_event(record, event):
         if record.get('sending_at') or event.get("body_hash") != record["snapshot"]["body_hash"]:
             raise ValueError("audit request mismatch")
         record["sending_at"] = now()
+        connection_id = event.get('connection_id')
+        if isinstance(connection_id, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,200}', connection_id):
+            record['connection_id'] = connection_id
     elif kind == "receipt":
         record["acknowledged_at"] = now()
+    elif kind == "tool_continuation":
+        record["tool_continuation"] = True
     elif kind in ("completed", "error"):
         record["finished_at"] = now()
         record["outcome"] = "completed" if kind == "completed" else "failed"

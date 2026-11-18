@@ -62,7 +62,7 @@ class GPTChatRequests:
             raise ValueError("invalid request_id")
         if not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 200:
             raise ValueError("invalid session_id")
-        if action not in {"claim", "finish", "status", "prepare"}:
+        if action not in {"claim", "finish", "status", "prepare", "prepare-tool-step"}:
             raise ValueError("invalid action")
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -75,7 +75,7 @@ class GPTChatRequests:
             owner = body.get("owner")
             if not isinstance(owner, str) or not re.fullmatch(r"[a-f0-9]{32}", owner):
                 raise ValueError("invalid owner")
-            if action == 'prepare':
+            if action in {'prepare', 'prepare-tool-step'}:
                 if not row or row['owner'] != owner or self._status(row) != 'running':
                     return {'ok': False, 'code': 'request_owner_conflict'}
                 if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='conversation_sessions'").fetchone():
@@ -83,6 +83,23 @@ class GPTChatRequests:
                                            (profile_id, session_id)).fetchone()
                     if not session or session['deleted_at']:
                         return {'ok': False, 'code': 'conversation_deleted'}
+            if action == 'prepare-tool-step':
+                step = body.get('step')
+                digest = body.get('body_hash')
+                if type(step) is not int or not 1 <= step <= 4 or not isinstance(digest, str) or not re.fullmatch(r'[a-f0-9]{64}', digest):
+                    raise ValueError('invalid tool step')
+                if not row['audit_json']:
+                    return {'ok': False, 'code': 'audit_missing'}
+                record = json.loads(row['audit_json'])
+                steps = record.setdefault('tool_steps', [])
+                previous = steps[-1] if steps else record
+                if step != len(steps) + 1 or not previous.get('tool_continuation') or previous.get('outcome') != 'completed' or not record.get('connection_id'):
+                    return {'ok': False, 'code': 'tool_step_not_ready'}
+                steps.append({'snapshot': {'body_hash': digest}, 'prepared_at': now()})
+                conn.execute('UPDATE gpt_chat_requests SET audit_json=? WHERE profile_id=? AND request_id=?',
+                             (json.dumps(record, ensure_ascii=False), profile_id, request_id))
+                return {'ok': True}
+            if action == 'prepare':
                 snapshot = validate_snapshot(body.get('snapshot'))
                 if row['audit_json']:
                     old = json.loads(row['audit_json'])
@@ -115,20 +132,30 @@ class GPTChatRequests:
                          (profile_id, request_id, session_id, fingerprint, owner, time.time() + self.LEASE_SECONDS))
             return {"ok": True}
 
-    def audit(self, profile_id, request_id):
+    def audit(self, profile_id, request_id, step=0):
         with self._connect() as conn:
-            row = conn.execute('SELECT audit_json FROM gpt_chat_requests WHERE profile_id=? AND request_id=?',
+            row = conn.execute('SELECT * FROM gpt_chat_requests WHERE profile_id=? AND request_id=?',
                                (profile_id, request_id)).fetchone()
-        return json.loads(row['audit_json']) if row and row['audit_json'] else None
+        if not row or not row['audit_json']:
+            return None
+        record = json.loads(row['audit_json'])
+        if not step:
+            return record
+        steps = record.get('tool_steps', [])
+        if self._status(row) != 'running' or step != len(steps):
+            return None
+        return {**steps[step - 1], 'connection_id': record.get('connection_id')}
 
-    def audit_event(self, profile_id, request_id, event):
+    def audit_event(self, profile_id, request_id, event, step=0):
         with self._connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             row = conn.execute('SELECT audit_json FROM gpt_chat_requests WHERE profile_id=? AND request_id=?',
                                (profile_id, request_id)).fetchone()
             if not row or not row['audit_json']:
                 raise ValueError('audit record missing')
-            record = apply_event(json.loads(row['audit_json']), event)
+            record = json.loads(row['audit_json'])
+            target = record['tool_steps'][step - 1] if step else record
+            apply_event(target, event)
             conn.execute('UPDATE gpt_chat_requests SET audit_json=? WHERE profile_id=? AND request_id=?',
                          (json.dumps(record, ensure_ascii=False), profile_id, request_id))
 

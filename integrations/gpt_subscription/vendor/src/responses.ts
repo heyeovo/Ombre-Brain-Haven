@@ -99,7 +99,9 @@ export async function streamResponse(
 ): Promise<{ text: string }> {
   const input = typeof options.input === "string" ? [{ role: "user" as const, content: options.input }] : options.input;
   if (!Array.isArray(input) || input.some((message) =>
-    !isObject(message) || !["user", "assistant", "developer"].includes(String(message.role)) || typeof message.content !== "string"
+    !isObject(message) || (!(
+      "role" in message && ["user", "assistant", "developer"].includes(String(message.role)) && typeof message.content === "string"
+    ) && !(options.tools && "type" in message && ["message", "reasoning", "function_call", "function_call_output"].includes(String(message.type))))
   )) {
     throw new ChatGPTError("invalid_request", "Use text messages with user, assistant, or developer roles. Put system guidance in instructions.");
   }
@@ -130,8 +132,12 @@ export async function streamResponse(
   try {
     const body = {
       model: options.model,
-      input: input.map((message) => ({ role: message.role, content: message.content })),
+      input: input.map(message => "type" in message && message.type ? message
+        : "role" in message && typeof message.content === "string" ? { role: message.role, content: message.content } : message),
       ...(options.instructions !== undefined ? { instructions: options.instructions } : {}),
+      ...(options.tools ? { tools: options.tools } : {}),
+      ...(options.tool_choice ? { tool_choice: options.tool_choice } : {}),
+      ...(options.include ? { include: options.include } : {}),
       store: false as const,
       stream: true as const,
     };
@@ -177,6 +183,13 @@ export async function streamResponse(
       } else if (event.type === "response.incomplete") {
         throw new ChatGPTError("response_incomplete", "ChatGPT stopped before completing the response. You can keep the partial text or try again.", true);
       } else if (event.type === "response.completed") {
+        const output = isObject(event.response) ? event.response.output : undefined;
+        if (Array.isArray(output) && output.some(item => isObject(item) && item.type === "function_call")) {
+          if (!options.onToolContinuation || output.length > 32 || Buffer.byteLength(JSON.stringify(output)) > 128 * 1024) {
+            throw new ChatGPTError("tool_output_invalid", "GPT tool call batch is unsupported or too large.");
+          }
+          options.onToolContinuation(output);
+        }
         // Haven modification 2026-11-15: expose allowlisted actual usage; absent is unknown.
         const raw = isObject(event.response) && isObject(event.response.usage) ? event.response.usage : undefined;
         const usage: Record<string, number> = {};

@@ -9,6 +9,33 @@ const request = (options = {}) => streamResponse('synthetic-oauth-token', {
 }, new AbortController().signal);
 const sse = wire => new Response(wire, { headers: { 'content-type': 'text/event-stream', 'x-request-id': 'req_test' } });
 
+test('function calls and encrypted reasoning can be replayed with a matching tool result', async (t) => {
+  const tools = [{ type: 'namespace', name: 'fixture', description: 'Test fixture', tools: [{
+    type: 'function', name: 'read', description: 'Read one fixture', parameters: { type: 'object' }, strict: false,
+  }] }];
+  const include = ['reasoning.encrypted_content'];
+  const items = [
+    { type: 'reasoning', id: 'rs_fixture', summary: [], encrypted_content: 'fixture-encrypted' },
+    { type: 'function_call', id: 'fc_fixture', namespace: 'fixture', name: 'read',
+      call_id: 'call_fixture', arguments: '{}' },
+  ];
+  const output = { type: 'function_call_output', call_id: 'call_fixture', output: 'fixture-37' };
+  const input = [{ role: 'user', content: 'Read a fixture' }];
+  t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    const body = JSON.parse(init.body);
+    assert.deepEqual(body.tools, tools);
+    assert.deepEqual(body.include, include);
+    assert.equal(body.store, false);
+    if (body.input.length === 1) return sse(frame({ ...completed, response: { ...completed.response, output: items } }));
+    assert.deepEqual(body.input, [...input, ...items, output]);
+    return sse(frame({ type: 'response.output_text.delta', delta: 'confirmed fixture-37' }) + frame(completed));
+  });
+  let replay;
+  await request({ tools, include, input, onToolContinuation: value => { replay = value; } });
+  assert.deepEqual(replay, items);
+  assert.deepEqual(await request({ tools, include, input: [...input, ...replay, output] }), { text: 'confirmed fixture-37' });
+});
+
 test('audit persists before the actual SDK request and hashes its exact body', async (t) => {
   const canonical = value => Array.isArray(value) ? `[${value.map(canonical).join(',')}]` : value && typeof value === 'object'
     ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}` : JSON.stringify(value);

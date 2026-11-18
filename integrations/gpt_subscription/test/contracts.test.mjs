@@ -11,6 +11,7 @@ import { generateKeyPair, exportJWK, SignJWT } from 'jose';
 import { openConnection, prepareImport, importConnection, publicSession } from '../connection.mjs';
 import { freezeForTransfer } from '../login-transfer.mjs';
 import { installMock } from './mock-openai.mjs';
+import { streamResponse } from '../vendor/dist/responses.js';
 
 const scope = (value) => createHash('sha256').update(value).digest('hex');
 const { privateKey, publicKey } = await generateKeyPair('RS256');
@@ -56,6 +57,20 @@ function helper(f, command, extra = {}) {
     child.stdin.end(JSON.stringify(command) + '\n');
   });
 }
+
+test('forwards one inline user image unchanged and refuses additional images before HTTP', async (t) => {
+  const input = [{ role: 'user', content: [{ type: 'input_text', text: '看图' },
+    { type: 'input_image', image_url: 'data:image/png;base64,aW1hZ2U=', detail: 'auto' }] }];
+  const fetchMock = t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    assert.deepEqual(JSON.parse(init.body).input, input);
+    return new Response('data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+      { headers: { 'Content-Type': 'text/event-stream' } });
+  });
+  const send = (messages) => streamResponse('synthetic-oauth-token', { model: 'test-model', input: messages }, new AbortController().signal);
+  await send(input);
+  await assert.rejects(send([...input, ...input]), { code: 'invalid_request' });
+  assert.equal(fetchMock.mock.callCount(), 1);
+});
 
 test('encrypted persistence survives process restart; profiles, keys and Linux permissions stay isolated', async (t) => {
   const f = await fixture(t); await seed(f);

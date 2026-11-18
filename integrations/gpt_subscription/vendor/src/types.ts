@@ -67,10 +67,14 @@ export interface ChatGPTConfig {
   sendHostId?: boolean;
 }
 
-export interface ResponseInputMessage {
+export type ResponseInputMessage = {
   role: "user" | "assistant" | "developer";
   content: string;
-}
+} | {
+  role: "user";
+  content: [{ type: "input_text"; text: string },
+    { type: "input_image"; image_url: string; detail: "auto" }];
+};
 
 // Haven modification 2026-11-16: passive quota evidence, not an entitlement decision.
 export interface GptQuotaWindow {

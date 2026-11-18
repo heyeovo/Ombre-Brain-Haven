@@ -309,7 +309,7 @@ cc 协作者可分别维护基础 system 提示词和长期提示词模块：基
 
 Outlook 为可选集成，Brain 容器的配置及微软应用注册要求见 [ENV_VARS](ENV_VARS.md#outlook-日历与-microsoft-to-dobrain)，授权凭据随 state 卷持久化。
 
-GPT 订阅传输层为可选能力，仅供本人非商业使用；Gateway 通过独立 Node 辅助进程管理 ChatGPT 授权、刷新、模型列表和可取消的文字流。传输层不自行注入人设或保存历史；Dashboard 的独立 GPT 文字 runner 负责接入 Haven 人设、钉选、召回、日回顾和既有聊天轮次表，服务端请求登记防止重启后重复生成。窗口模型偏好和聊天正文仍以 Haven 为事实源，取消/失败的部分回复带中断状态保存；它不提供工具、附件、房间或主动唤醒。接口与持久化契约见 [reference](docs/reference.md#GPT-订阅授权与传输gateway)。
+GPT 订阅传输层为可选能力，仅供本人非商业使用；Gateway 通过独立 Node 辅助进程管理 ChatGPT 授权、刷新、模型列表和可取消的文字回复流。支持图片的模型可以读取单张用户图片，图片复用 Haven 会话附件。Dashboard 的独立 GPT runner 负责组装人设、钉选、召回、日回顾和历史，服务端请求登记防止重启后重复生成。窗口模型偏好和聊天记录仍以 Haven 为事实源；不提供文档读取、生图、工具、房间或主动唤醒。接口与持久化契约见 [reference](docs/reference.md#GPT-订阅授权与传输gateway)。
 
 Dashboard 经 Brain 访问 GPT 时，`/gateway/api/gpt-subscription/*` 使用现有 Gateway 内部连接转发到独立 Gateway，保留流式和取消行为。Brain 不另存授权或启动第二个 GPT 传输实例，也不需要挂载 GPT 密钥。GPT 上下文审计复用现有面板，在 Haven 持久保存无正文的发送前指纹并关联真实用量；记录缺失或送达未知时明确保留未知，契约见 [reference](docs/reference.md#GPT-订阅授权与传输gateway)。
 

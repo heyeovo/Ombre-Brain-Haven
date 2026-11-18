@@ -69,7 +69,7 @@ class GPTSubscriptionContractTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(state["sharing"])
         service.call.assert_not_called()
 
-    async def test_text_only_contract_rejects_unhandled_capabilities(self):
+    async def test_contract_rejects_unhandled_capabilities(self):
         for changes in ({"tools": []}, {"profile_id": "attacker"}, {"store": True}, {"input": "raw text"},
                         {"input": [{"role": "tool", "content": "result"}]},
                         {"input": [{"role": "user", "content": [{"type": "image_url"}]}]},
@@ -77,6 +77,15 @@ class GPTSubscriptionContractTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(changes=changes), self.assertRaises(GPTSubscriptionError):
                 validate_request(self.body(**changes))
         self.assertEqual(validate_request(self.body())["input"][0]["content"], "text")
+
+    async def test_contract_accepts_one_inline_user_image_only(self):
+        picture = {"type": "input_image", "image_url": "data:image/png;base64,aW1hZ2U=", "detail": "auto"}
+        message = {"role": "user", "content": [{"type": "input_text", "text": "看图"}, picture]}
+        self.assertEqual(validate_request(self.body(input=[message]))["input"], [message])
+        for messages in ([message, message], [{**message, "role": "assistant"}],
+                         [{**message, "content": [message["content"][0], {**picture, "image_url": "https://example.test/image"}]}]):
+            with self.assertRaises(GPTSubscriptionError):
+                validate_request(self.body(input=messages))
 
     async def test_stream_events_terminal_usage_and_authenticated_scope(self):
         quota_evidence = {"status": "observed", "snapshots": [{

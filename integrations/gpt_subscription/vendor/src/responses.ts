@@ -98,10 +98,24 @@ export async function streamResponse(
   signal: AbortSignal,
 ): Promise<{ text: string }> {
   const input = typeof options.input === "string" ? [{ role: "user" as const, content: options.input }] : options.input;
-  if (!Array.isArray(input) || input.some((message) =>
-    !isObject(message) || !["user", "assistant", "developer"].includes(String(message.role)) || typeof message.content !== "string"
-  )) {
-    throw new ChatGPTError("invalid_request", "Use text messages with user, assistant, or developer roles. Put system guidance in instructions.");
+  let hasImage = false;
+  if (!Array.isArray(input) || input.some((message) => {
+    if (!isObject(message) || !["user", "assistant", "developer"].includes(String(message.role))) return true;
+    if (typeof message.content === "string") return false;
+    if (hasImage || message.role !== "user" || !Array.isArray(message.content) || message.content.length !== 2) return true;
+    const [text, picture] = message.content;
+    if (!isObject(text) || Object.keys(text).length !== 2 || text.type !== "input_text" || typeof text.text !== "string" ||
+        !isObject(picture) || Object.keys(picture).length !== 3 || picture.type !== "input_image" ||
+        picture.detail !== "auto" || typeof picture.image_url !== "string") return true;
+    const match = /^data:image\/(?:jpeg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(picture.image_url);
+    if (!match?.[1] || match[0] !== picture.image_url) return true;
+    const encoded = match[1];
+    const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
+    if (encoded.length % 4 || encoded.length / 4 * 3 - padding > 2 * 1024 * 1024) return true;
+    hasImage = true;
+    return false;
+  })) {
+    throw new ChatGPTError("invalid_request", "Use text messages and at most one inline user image. Put system guidance in instructions.");
   }
 
   // The DevKit supplies the selected ChatGPT account's refreshed OAuth token.

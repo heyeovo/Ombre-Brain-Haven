@@ -43,3 +43,8 @@ Haven modifications (2026-11-17):
   metadata filtering, unknown values, real zero, and failure semantics. The helper
   durable-ack regression also checks completion propagation and pre-HTTP cancellation.
   Upstream vendor tests remain unchanged.
+
+Haven modifications (single-image input):
+- `src/types.ts` and `src/responses.ts` accept a single inline user image;
+  `../test/contracts.test.mjs` verifies the wire shape and rejects multiple images.
+  Upstream tests remain unchanged.

@@ -118,6 +118,21 @@ class GPTChatContracts(unittest.TestCase):
             self.store.commit_conversation_turn(**{**arguments, "request_id": "another"})
 
 
+    def test_image_only_gpt_turn_reopens_and_replays_existing_attachment_binding(self):
+        image = self.store.create_conversation_attachment(
+            profile_id="p", session_id="s", filename="image.png", data=b"\x89PNG\r\n\x1a\n")
+        arguments = dict(profile_id="p", session_id="s", persona_id="ombre", request_id="image-request",
+                         expected_last_round_id=0, user_text="", assistant_text="",
+                         source="gpt_subscription", attachment_ids=[image["id"]])
+        first = self.store.commit_conversation_turn(**arguments)
+        self.store = GatewayStateStore(self.path)
+        replay = self.store.commit_conversation_turn(**arguments)
+        self.assertEqual(first["turn"]["id"], replay["turn"]["id"])
+        stored = self.store.get_conversation_turn_by_request_id(profile_id="p", request_id="image-request")
+        self.assertEqual([item["id"] for item in stored["attachments"]], [image["id"]])
+        self.assertEqual(self.store.get_conversation_turn_by_request_id(profile_id="other", request_id="image-request"), {})
+
+
 class GPTChatHTTPContracts(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def request(body, token="test-token"):

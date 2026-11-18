@@ -47,7 +47,7 @@ def public_error(detail: dict) -> dict:
 
 def validate_request(body: object) -> dict:
     if not isinstance(body, dict) or set(body) - {"request_id", "model", "input", "instructions"}:
-        raise GPTSubscriptionError("invalid_request", "首版只接受文字消息、模型和人设指令。", 400)
+        raise GPTSubscriptionError("invalid_request", "只接受消息、模型和人设指令。", 400)
     request_id = body.get("request_id")
     if not isinstance(request_id, str) or not ID_PATTERN.fullmatch(request_id):
         raise GPTSubscriptionError("invalid_request", "请提供有效的 request_id。", 400)
@@ -56,12 +56,30 @@ def validate_request(body: object) -> dict:
         raise GPTSubscriptionError("invalid_request", "请选择有效模型。", 400)
     messages = body.get("input")
     if not isinstance(messages, list) or not 1 <= len(messages) <= 2000:
-        raise GPTSubscriptionError("invalid_request", "input 必须为文字消息列表。", 400)
+        raise GPTSubscriptionError("invalid_request", "input 必须为消息列表。", 400)
+    has_image = False
     for message in messages:
         if (not isinstance(message, dict) or set(message) != {"role", "content"}
-                or message["role"] not in ("user", "assistant", "developer")
-                or not isinstance(message["content"], str)):
-            raise GPTSubscriptionError("unsupported_capability", "此线路首版不接受工具、图片或文件。", 400)
+                or message["role"] not in ("user", "assistant", "developer")):
+            raise GPTSubscriptionError("unsupported_capability", "只接受文字和一张用户图片。", 400)
+        content = message["content"]
+        if isinstance(content, str):
+            continue
+        if (has_image or message["role"] != "user" or not isinstance(content, list) or len(content) != 2
+                or not isinstance(content[0], dict) or set(content[0]) != {"type", "text"}
+                or content[0]["type"] != "input_text" or not isinstance(content[0]["text"], str)
+                or not isinstance(content[1], dict) or set(content[1]) != {"type", "image_url", "detail"}
+                or content[1]["type"] != "input_image" or content[1]["detail"] != "auto"):
+            raise GPTSubscriptionError("unsupported_capability", "只接受文字和一张用户图片。", 400)
+        image_url = content[1]["image_url"]
+        if not isinstance(image_url, str):
+            raise GPTSubscriptionError("invalid_request", "图片格式无效。", 400)
+        prefix, _, encoded = image_url.partition(",")
+        if (prefix not in ("data:image/jpeg;base64", "data:image/png;base64", "data:image/webp;base64")
+                or not encoded or len(encoded) % 4 or len(encoded) // 4 * 3 - (len(encoded) - len(encoded.rstrip("="))) > 2 * 1024 * 1024
+                or not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", encoded)):
+            raise GPTSubscriptionError("invalid_request", "图片格式无效或超过 2 MB。", 400)
+        has_image = True
     if "instructions" in body and not isinstance(body["instructions"], str):
         raise GPTSubscriptionError("invalid_request", "instructions 必须为文字。", 400)
     if len(json.dumps(body, ensure_ascii=False).encode()) > MAX_BODY_BYTES - 1024:

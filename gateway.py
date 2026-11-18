@@ -2715,15 +2715,22 @@ class GatewayService:
             if operation == "responses":
                 payload = validate_request(body)
                 request_id = body["request_id"]
+                step = body.get("step", 0)
                 from gpt_context_audit import request_hash
                 registry = getattr(self, 'gpt_chat_requests', None)
-                evidence = registry.audit(profile_id, request_id) if registry else None
+                evidence = registry.audit(profile_id, request_id, step) if registry and step else (
+                    registry.audit(profile_id, request_id) if registry else None)
+                if payload.get('tools') and not evidence:
+                    raise GPTSubscriptionError('audit_missing', 'GPT 工具请求尚未登记。', 409)
                 audit = None
                 if evidence:
-                    if evidence.get('sending_at') or evidence['snapshot']['body_hash'] != request_hash(payload):
+                    # Tool schemas can contain numbers and Unicode keys that Python and JS
+                    # serialize differently. The SDK helper verifies the actual body before HTTP.
+                    if evidence.get('sending_at') or (not payload.get('tools') and evidence['snapshot']['body_hash'] != request_hash(payload)):
                         raise GPTSubscriptionError('audit_mismatch', '请求已发送或与发送前记录不一致，请核对历史。', 409)
                     audit = {'body_hash': evidence['snapshot']['body_hash'],
-                             'record': lambda event: registry.audit_event(profile_id, request_id, event)}
+                             'record': lambda event: registry.audit_event(profile_id, request_id, event, step) if step else registry.audit_event(profile_id, request_id, event),
+                             **({'connection_id': evidence['connection_id']} if step else {})}
                 service.reserve(profile_id, request_id)
 
                 async def events():

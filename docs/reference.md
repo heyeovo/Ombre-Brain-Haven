@@ -35,7 +35,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | 文件 | 职责 |
 |------|------|
 | `outlook_store.py` | 个人 Outlook 设备码授权、串行刷新、Graph 日历/To Do、言之资源缓存和短码映射；独立 `state_dir/outlook.sqlite` |
-| `gpt_subscription.py` | Gateway 的 GPT 订阅传输：校验文字与单张内嵌图片、profile 隔离的 Node 私有管道、活跃 request_id 去重、取消与停止收尾、错误分类；不处理人设/召回/历史或原始授权导入 |
+| `gpt_subscription.py` | Gateway 的 GPT 订阅文字、单张图片与工具续接传输：profile 隔离的 Node 私有管道、活跃 request_id 去重、取消与停止收尾、错误分类；MCP 由 Dashboard 执行 |
 | `gpt_subscription_proxy.py` | Brain 的 GPT 对外入口：认证后通过既有内部地址转发至独立 Gateway，保留流式/取消语义；不持有授权或创建第二个 GPT 服务 |
 | `gpt_chat_requests.py` | GPT 聊天请求的持久准入登记、同窗并发互斥与重启后防重复执行；只存摘要/状态，不存正文 |
 | `gpt_context_audit.py` | GPT 无正文审计的严格字段校验、请求对象指纹、执行阶段、真实 usage 与上游缓存/额度候选完成证据白名单投影；永久删除窗口时清除同 profile/session 证据 |
@@ -215,17 +215,18 @@ GET  /api/gpt-subscription/connection    # configured/status/sharing/connection_
 POST /api/gpt-subscription/connection    # {action:"select",connection_id} 或 {action:"disconnect"}
 GET  /api/gpt-subscription/connections   # 当前 Haven profile 内的授权登记列表，不返回个人身份或令牌
 GET  /api/gpt-subscription/models        # {ok,models:[{slug,displayName}]}；按账号当前目录顺序，仅 visibility=list
-POST /api/gpt-subscription/responses     # 文字与最多一张用户图片；下述 SSE 契约
+POST /api/gpt-subscription/responses     # 文字、单张用户图片及命名空间函数续接；下述 SSE 契约
 POST /api/gpt-subscription/cancel        # {request_id} → {ok,cancel_requested,request_id}
 ```
 
 连接状态为 `disconnected | connecting | connected | reauth_required`；另有 `configured`、`login_method=local_ssh_import`、`usage_url`。未配置密钥时 connection GET 返回 `configured:false`，其余请求明确失败，不回退到其他付款线路。`connected` 表示已保存授权；真正使用前在锁内检查并按需刷新。状态中的 `error` 优先于状态标签：密钥/存储问题应修复原文件，不应通过重新登录覆盖。
 
-请求正文为 `{request_id,model,input:[{role,content}],instructions?:string}`，最多 2000 条消息、整个正文小于 4 MiB。所有角色可用文字（仅 user/assistant/developer），最多一条 user 消息可改用 `[input_text,input_image]`；图片仅接受 JPEG/PNG/WebP 的 base64 data URL（解码后最多 2 MiB，detail 为 auto）。拒绝外链、file ID、文件输入、工具和未知字段。客户端 request_id 为 1–100 位字母数字、下划线或连字符。向官方固定 `POST https://api.openai.com/v1/responses` 发 `store:false,stream:true`，不继承环境中的 Platform Key、组织、项目或自定义请求头；HTTP 429 不自动重试。
+基本请求正文含 request_id、model、input 和可选 instructions。最多 2000 个输入项、整个正文小于 4 MiB。文字项采用 `{role:"user"|"assistant"|"developer",content:string}`。最多一条 user 消息可使用一组 `[input_text,input_image]`，仅支持解码后不超过 2 MiB 的 JPEG、PNG 或 WebP base64 data URL。Dashboard 可提供含 function 的 namespace tools 和 `include:["reasoning.encrypted_content"]`。续接沿用 request_id，内部 step 为 1–4，并追加前段助手输出和按 call_id 匹配的结果，结果每项最多 8 KiB。这里仅允许受支持的工具输入项，拒绝其他附件、profile、store、conversation 和 previous_response_id。向官方固定 `POST https://api.openai.com/v1/responses` 发 `store:false,stream:true`，不继承环境中的 Platform Key、组织、项目或自定义请求头；HTTP 429 不自动重试。
 
-SSE 事件 `event: delta | completed | error`，每个 data 是含同名 `type` 和客户端 `request_id` 的 JSON：
+Dashboard 使用的 SSE 数据带同名 `type` 和客户端 `request_id`。
 
 - `delta`：`text` 增量。
+- `tool_continuation` 包含已完成响应中续接所需的模型输出，只传服务端内网。Dashboard 确认收到该段完成终态后才执行。审计仅记录是否有续接，原始参数、输出及推理项不写入审计。
 - `completed`：仅在官方 `response.completed` 之后；可有 `responseId`、`requestId`（官方 HTTP 请求标识，与客户端 request_id 区分），`usage` 为实际数字字段 `input_tokens/output_tokens/total_tokens/cached_tokens/reasoning_tokens`，缺失为 null。它不是订阅剩余额度；`limits:null` 不代表 0 或无限。
 - `completed.quotaEvidence`：本次正常 Responses 响应的被动额度证据，`{status:"observed"|"unavailable",snapshots:[]}`；只提取 `x-codex-…-primary/secondary-used-percent/window-minutes/reset-at` 和 `codex.rate_limits` 流事件，排除 API RPM/TPM。每个快照有 `source:"response_headers"|"stream_event"`、`observed_at`、`limit_id`、`scope:"unverified"`、`primary/secondary`（可为 null）；窗口字段为 `used_percent`（0–100 的有限数）、`window_minutes`、`resets_at`（Unix 秒），周期/时间缺失或无效保留 null，不推定 5h/周或恢复。头和流快照分开保留，流内同桶只留最新一条，每来源最多 16 桶，不跨观测补字段。无有效额度时为 unavailable，不等于 0%。不读取/转发原始 headers、Cookie、凭据、正文或任意事件字段，不新增模型请求；helper 和 Python stream 复用完成事件透传，Dashboard 当前忽略此字段。成功完成事件中的候选证据经 Python 字段白名单校验后，以 `quota_evidence` 写入现有 `gpt_chat_requests.audit_json`，沿用 profile/request 隔离与审计删除规则，不新增表。仅保存来源、有效观测时间、桶标识及两个窗口的数字，scope 始终为 unverified；每来源最多 16 桶，同来源同桶整条替换、不跨快照或跨请求补值。无有效候选时记录 unavailable；旧 helper 未带字段则不补记录，错误/取消不生成成功额度证据。不能假定每轮都有数字，也不能由缺失推定 0%、无限或额度恢复。该证据尚不能作为账号总额度、应用限额、模型额度或可用性判定；SIWC 真实返回及与同账号官方页的对应关系仍需验收。公开连接状态继续 `limits:null`。
 - `error`：`error={code,message,retryable,status?,requestId?,param?,responseShape?,action}`。code/status/请求标识保留官方诊断，原始响应正文、令牌和可能回显的请求文字不透传。`action` 为 reconnect / usage_settings / enable_sharing / retry / inspect。
@@ -243,6 +244,7 @@ SSE 事件 `event: delta | completed | error`，每个 data 是含同名 `type` 
 
 - snapshot 严格白名单：version=1、algorithm=`sha256-json-sorted-v1`、model、body_hash、instructions 的 hash/bytes；parts 的 persona/window/background/capability/recall/current_text/current_time 仅存 hash/bytes；messages 按原序存 role/hash/bytes/source_round_id/prefix_hash；context 只接受应用估算器、余量、预算、真实模型上限 null、纳入/省略轮数及 revision。摘要是 SHA-256 小写 hex；body_hash 对最终 SDK 对象按键排序、数组原序进行 UTF-8 JSON 序列化（store=false、stream=true），不包含本地 request_id、凭据或响应头。prefix_hash 从 instructions hash 起，逐项对“上一前缀 hash + 换行 + 消息 hash”计算；不代表 token 边界。
 - responses 收到已有审计记录时先校验请求对象，并拒绝已有 sending_at 的重发。Node 最终 SDK 调用前再次计算 body_hash，通过私有 `request` 事件让 Python 事务写入 sending_at；只有收到私有 audit_ack 后才发 HTTP。随后 receipt 写 acknowledged_at/安全 request ID；completed/error 写 finished_at、outcome、白名单 usage/response ID。没有回执不推断送达，缺失 token 为 null、真实零保留 0；缓存/推理是输入/输出子集。传输异常没有上游终态时保留未知，不伪造成功。旧客户端未准备证据的传输仍兼容，但不能声称存在发送前审计。
+- 工具请求必须先登记。后续 `prepare-tool-step` 用原 owner 在同一审计行内为下一段登记 step 和 body_hash，上一段须成功并请求工具续接。续接绑定第一段实际使用的订阅连接，连接更换时不会把工具结果发给新账号。各段单独确认发送与终态；包含 JSON Schema 的请求以 Node 对实际 SDK 输入计算的摘要为准。
 - `audit-list` 接 `{session_id,before_cursor?,request_ids?}`；每页最新 20 项，返回 records/before_cursor，request_ids 最多 20 个并返回同 profile/session 的 matched_records，用于精确关联历史页。查询不返回正文或授权数据，status/finish 不改变旧防重语义。永久删除窗口会在同一事务中清空同 profile/session 的 audit_json，保留永久防重回执；其他 profile/session 不受影响。软删除沿用原窗口隐藏与不可追加契约，不清空历史证据。
 
 **上游缓存证据**：helper 的 `completed.cacheEvidence` 只从现有 `response.completed.response` 被动提取 `{version:1,response_model,service_tier,cache_write_tokens,diagnostics}`。`response_model` 为上游实际返回的 GPT/o 系列模型名（最多 200 字符），不是请求 model 的回填；`service_tier` 只接受 auto/default/flex/scale/priority。`cache_write_tokens` 只取 `usage.input_tokens_details.cache_write_tokens`，为 0 至 JavaScript 安全整数上限的整数；缓存读取数继续只用原 usage.cached_tokens，不从总输入推算写入。字段缺失、格式不符或未来未识别值一律 null，真实 0 保留 0。

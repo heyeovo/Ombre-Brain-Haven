@@ -113,14 +113,19 @@ export interface GptCacheEvidence {
 
 export interface StreamResponseOptions {
   model: string;
-  input: string | ResponseInputMessage[];
+  input: string | (ResponseInputMessage | import("openai").OpenAI.Responses.ResponseInputItem)[];
   instructions?: string;
+  tools?: import("openai").OpenAI.Responses.Tool[];
+  tool_choice?: "none";
+  include?: ["reasoning.encrypted_content"];
+  expectedProfileId?: string;
   signal?: AbortSignal;
   onDelta?: (delta: string) => void;
   // Haven audit: awaited before the HTTP call; private-pipe acknowledgement is durable.
   expectedRequestHash?: string;
-  onRequest?: (value: { body_hash: string }) => Promise<void>;
+  onRequest?: (value: { body_hash: string; connection_id?: string }) => Promise<void>;
   onReceipt?: (value: { requestId?: string }) => void;
+  onToolContinuation?: (items: unknown[]) => void;
   // Haven modification 2026-11-15: terminal metadata, never credentials or raw responses.
   onCompleted?: (metadata: { responseId?: string; requestId?: string; usage: Record<string, number> | null; quotaEvidence: GptQuotaEvidence; cacheEvidence: GptCacheEvidence }) => void;
 }

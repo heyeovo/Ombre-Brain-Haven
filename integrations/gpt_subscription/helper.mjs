@@ -34,14 +34,16 @@ async function run(line) {
     else if (command.op === 'stream') {
       let metadata = { usage: null };
       await client.streamResponse({ ...command.request, signal: abort.signal,
+        expectedProfileId: command.expected_connection_id,
+        ...(command.request.tools ? { onToolContinuation: (items) => emit({ type: 'tool_continuation', items }) } : {}),
         ...(command.audit_hash ? { expectedRequestHash: command.audit_hash,
-          onRequest: ({ body_hash }) => new Promise((resolve, reject) => {
+          onRequest: ({ body_hash, connection_id }) => new Promise((resolve, reject) => {
             const timer = setTimeout(() => { acknowledge = undefined; reject(new ChatGPTError('audit_timeout', 'Request audit was not acknowledged.')); }, 15000);
             const cancel = () => { clearTimeout(timer); acknowledge = undefined; reject(new ChatGPTError('cancelled', 'The response was cancelled.')); };
             abort.signal.addEventListener('abort', cancel, { once: true });
             acknowledge = () => { clearTimeout(timer); abort.signal.removeEventListener('abort', cancel); acknowledge = undefined; resolve(); };
             if (abort.signal.aborted) { cancel(); return; }
-            emit({ type: 'request', body_hash });
+            emit({ type: 'request', body_hash, connection_id });
           }),
           onReceipt: (value) => emit({ type: 'receipt', ...value }),
         } : {}),

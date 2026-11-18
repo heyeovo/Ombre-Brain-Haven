@@ -136,7 +136,7 @@ export function createChatGPT(config: ChatGPTConfig): ChatGPTClient {
     return { accessToken: profile.credentials.accessToken, session: safeSession(saved) };
   }, signal);
 
-  async function authenticated<T>(operation: (accessToken: string, signal: AbortSignal) => Promise<T>, callerSignal?: AbortSignal): Promise<T> {
+  async function authenticated<T>(operation: (accessToken: string, signal: AbortSignal, session: SessionState) => Promise<T>, callerSignal?: AbortSignal): Promise<T> {
     assertIdle();
     const controller = new AbortController();
     requests.add(controller);
@@ -147,7 +147,7 @@ export function createChatGPT(config: ChatGPTConfig): ChatGPTClient {
       signal.throwIfAborted();
       if (currentEpoch !== epoch) throw new ChatGPTError("cancelled", "The request was cancelled.");
       publish(connection.session);
-      const result = await operation(connection.accessToken, signal);
+      const result = await operation(connection.accessToken, signal, connection.session);
       signal.throwIfAborted();
       return result;
     } catch (error) {
@@ -330,7 +330,17 @@ export function createChatGPT(config: ChatGPTConfig): ChatGPTClient {
 
     async streamResponse(options) {
       if (!options.model.trim()) throw new ChatGPTError("invalid_request", "Choose a model before starting a request.");
-      return authenticated((accessToken, signal) => streamResponse(accessToken, options, signal), options.signal);
+      return authenticated((accessToken, signal, session) => {
+        if (options.expectedProfileId && options.expectedProfileId !== session.profileId) {
+          throw new ChatGPTError("connection_changed", "ChatGPT connection changed during the tool turn.");
+        }
+        return streamResponse(accessToken, {
+          ...options,
+          ...(options.tools && options.onRequest ? {
+            onRequest: ({ body_hash }) => options.onRequest!({ body_hash, connection_id: session.profileId }),
+          } : {}),
+        }, signal);
+      }, options.signal);
     },
   };
 }

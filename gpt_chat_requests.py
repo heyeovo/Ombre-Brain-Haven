@@ -3,7 +3,9 @@ from contextlib import contextmanager
 import re
 import sqlite3
 import time
+from datetime import datetime, timezone
 import json
+from agent_wake_store import admit_gpt_wake, gpt_wake_can_save, record_gpt_wake_user_activity
 from gpt_context_audit import validate_snapshot, now, apply_event
 
 
@@ -22,8 +24,11 @@ class GPTChatRequests:
                 PRIMARY KEY (profile_id, request_id))""")
             conn.execute("""CREATE INDEX IF NOT EXISTS idx_gpt_chat_active
                 ON gpt_chat_requests(profile_id, session_id, status, expires_at)""")
-            if 'audit_json' not in {row[1] for row in conn.execute('PRAGMA table_info(gpt_chat_requests)')}:
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(gpt_chat_requests)")}
+            if "audit_json" not in existing:
                 conn.execute("ALTER TABLE gpt_chat_requests ADD COLUMN audit_json TEXT NOT NULL DEFAULT ''")
+            if "is_wake" not in existing:
+                conn.execute("ALTER TABLE gpt_chat_requests ADD COLUMN is_wake INTEGER NOT NULL DEFAULT 0")
 
     @contextmanager
     def _connect(self):
@@ -111,8 +116,19 @@ class GPTChatRequests:
                                   (profile_id, session_id, time.time())).fetchone()
             if active:
                 return {"ok": False, "code": "conversation_busy"}
-            conn.execute("INSERT INTO gpt_chat_requests (profile_id, request_id, session_id, fingerprint, owner, status, expires_at) VALUES (?, ?, ?, ?, ?, 'running', ?)",
-                         (profile_id, request_id, session_id, fingerprint, owner, time.time() + self.LEASE_SECONDS))
+            accepted_at = datetime.now(timezone.utc)
+            if body.get("wake") is True and not admit_gpt_wake(
+                conn, profile_id, session_id, request_id, accepted_at, body.get("expected_state_version")
+            ):
+                return {"ok": False, "code": "wake_superseded"}
+            if body.get("user_activity") is True and body.get("wake") is not True:
+                record_gpt_wake_user_activity(conn, profile_id, session_id, accepted_at)
+            conn.execute("""
+                INSERT INTO gpt_chat_requests
+                    (profile_id, request_id, session_id, fingerprint, owner, status, expires_at, is_wake)
+                VALUES (?, ?, ?, ?, ?, 'running', ?, ?)
+            """, (profile_id, request_id, session_id, fingerprint, owner,
+                  time.time() + self.LEASE_SECONDS, int(body.get("wake") is True)))
             return {"ok": True}
 
     def audit(self, profile_id, request_id):
@@ -124,10 +140,15 @@ class GPTChatRequests:
     def audit_event(self, profile_id, request_id, event):
         with self._connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            row = conn.execute('SELECT audit_json FROM gpt_chat_requests WHERE profile_id=? AND request_id=?',
-                               (profile_id, request_id)).fetchone()
-            if not row or not row['audit_json']:
-                raise ValueError('audit record missing')
+            row = conn.execute("""
+                SELECT audit_json, session_id, is_wake FROM gpt_chat_requests WHERE profile_id=? AND request_id=?
+            """, (profile_id, request_id)).fetchone()
+            if not row or not row["audit_json"]:
+                raise ValueError("audit record missing")
+            if row["is_wake"] and event.get("type") == "request" and not gpt_wake_can_save(
+                conn, profile_id, row["session_id"], request_id
+            ):
+                raise ValueError("GPT agent wake is no longer active")
             record = apply_event(json.loads(row['audit_json']), event)
             conn.execute('UPDATE gpt_chat_requests SET audit_json=? WHERE profile_id=? AND request_id=?',
                          (json.dumps(record, ensure_ascii=False), profile_id, request_id))

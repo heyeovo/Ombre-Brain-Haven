@@ -333,12 +333,13 @@ class BarkNotificationStore:
         if version <= 0 or not segments:
             return 0
 
+        speaker = "GPT" if lane_id == "gpt_subscription" else "Claude"
         maximum = max(1, min(20, int(config.get("max_segments") or 8)))
         if len(segments) > maximum:
             visible = segments[:max(0, maximum - 1)]
             visible.append({
                 "kind": "atomic",
-                "markdown": f"Claude 还有 {len(segments) - len(visible)} 段消息，点击打开会话查看。",
+                "markdown": f"{speaker} 还有 {len(segments) - len(visible)} 段消息，点击打开会话查看。",
             })
             segments = visible
         base_url = str(config.get("dashboard_base_url") or "").rstrip("/")
@@ -349,12 +350,12 @@ class BarkNotificationStore:
         for index, segment in enumerate(segments):
             kind = segment["kind"]
             if config.get("hide_body"):
-                body = "Claude 发来了一条新消息，点击打开会话查看。"
+                body = f"{speaker} 发来了一条新消息，点击打开会话查看。"
             elif kind == "atomic":
                 body = (
                     segment["markdown"].strip()
-                    if segment["markdown"].startswith("Claude 还有 ")
-                    else "Claude 还发来了一段代码或结构化内容，点击打开会话查看。"
+                    if segment["markdown"].startswith(f"{speaker} 还有 ")
+                    else f"{speaker} 还发来了一段代码或结构化内容，点击打开会话查看。"
                 )
             else:
                 body = segment["markdown"].strip()
@@ -370,7 +371,7 @@ class BarkNotificationStore:
                 """,
                 (
                     f"{batch_key}:{index}", batch_key, _profile_id(profile_id), str(session_id),
-                    str(lane_id), int(turn_id), index, version, kind, "Claude 主动消息", body,
+                    str(lane_id), int(turn_id), index, version, kind, f"{speaker} 主动消息", body,
                     "active" if index == 0 and delivery != "quiet" else "passive", f"cc:{session_id}", deep_link,
                     int(config.get("segment_interval_ms") or 1000), now, now, now,
                 ),

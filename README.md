@@ -307,6 +307,8 @@ cc 协作者可分别维护基础 system 提示词和长期提示词模块：基
 
 ## 快速部署
 
+GPT 主动唤醒复用 Haven 的调度与 Bark 通知。真实调度默认关闭，启用前须完成 GPT 工具接入合并及聊天可靠性验收。开关配置见 [环境变量](ENV_VARS.md#cc-主动唤醒-runner)。
+
 Outlook 为可选集成，Brain 容器的配置及微软应用注册要求见 [ENV_VARS](ENV_VARS.md#outlook-日历与-microsoft-to-dobrain)，授权凭据随 state 卷持久化。
 
 GPT 订阅传输层为可选能力，仅供本人非商业使用；Gateway 通过独立 Node 辅助进程管理 ChatGPT 授权、刷新、模型列表和可取消的文字流。传输层不自行注入人设或保存历史；Dashboard 的独立 GPT 文字 runner 负责接入 Haven 人设、钉选、召回、日回顾和既有聊天轮次表，服务端请求登记防止重启后重复生成。窗口模型偏好和聊天正文仍以 Haven 为事实源，取消/失败的部分回复带中断状态保存；它不提供工具、附件、房间或主动唤醒。接口与持久化契约见 [reference](docs/reference.md#GPT-订阅授权与传输gateway)。

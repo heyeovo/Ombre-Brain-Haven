@@ -12,7 +12,9 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from agent_wake_store import (AgentWakeStore, delete_agent_wake_session_records, initialize_agent_wake_schema,
-                              _alarm_payloads, _insert_alarm, _delete_alarms, _sync_alarm_mirror)
+                              _alarm_payloads, _insert_alarm, _delete_alarms, _sync_alarm_mirror,
+                              GPT_WAKE_LANE, GPT_WAKE_SWITCHES, GPT_WAKE_HOURS,
+                              gpt_wake_can_save, record_gpt_wake_user_activity)
 from bark_notifications import BarkNotificationStore, initialize_bark_notification_schema
 from conversation_slice_store import (
     delete_conversation_slice_session_records,
@@ -305,6 +307,8 @@ class GatewayStateStore:
 
     @staticmethod
     def _agent_wake_due_at(values: dict[str, Any]) -> str:
+        if values.get("lane_id") == GPT_WAKE_LANE:
+            return AgentWakeStore._computed_due_at(values)
         candidates: list[str] = []
         if (
             bool(values.get("keepalive_enabled"))
@@ -332,6 +336,8 @@ class GatewayStateStore:
             "keepalive_enabled", "keepalive_paused_until_user", "agent_wake_enabled",
             "conversation_silence_enabled", "bark_notification_enabled",
         ):
+            payload[key] = bool(payload.get(key))
+        for key in GPT_WAKE_SWITCHES:
             payload[key] = bool(payload.get(key))
         for key, fallback in (
             ("schedule_version", 0), ("background_turn_limit", 48),
@@ -2605,6 +2611,8 @@ class GatewayStateStore:
             "followup_at", "followup_source_turn_id", "followup_min_minutes",
             "followup_max_count", "followup_count",
         }
+        if lane == GPT_WAKE_LANE:
+            allowed |= GPT_WAKE_SWITCHES | GPT_WAKE_HOURS
         unknown = set(changes) - allowed
         if unknown:
             raise ValueError(f"unsupported agent wake fields: {', '.join(sorted(unknown))}")
@@ -2620,7 +2628,20 @@ class GatewayStateStore:
                 raise SessionStateConflictError(int(expected_version), actual_version)
             values = dict(row)
             for key, value in changes.items():
-                if key in {
+                if key in GPT_WAKE_HOURS:
+                    hours = float(value)
+                    if isinstance(value, bool) or not hours > 0:
+                        raise ValueError("long silence hours must be positive")
+                    try:
+                        datetime.now(timezone.utc) + timedelta(hours=hours)
+                    except OverflowError as exc:
+                        raise ValueError("long silence hours are too large") from exc
+                    values[key] = hours
+                elif key in GPT_WAKE_SWITCHES:
+                    if not isinstance(value, bool):
+                        raise ValueError(f"{key} must be boolean")
+                    values[key] = int(value)
+                elif key in {
                     "keepalive_enabled", "keepalive_paused_until_user", "agent_wake_enabled",
                     "conversation_silence_enabled", "bark_notification_enabled",
                 }:
@@ -2695,6 +2716,13 @@ class GatewayStateStore:
                     profile, session, lane,
                 ),
             )
+            if lane == GPT_WAKE_LANE:
+                conn.execute("""
+                    UPDATE agent_wake_schedules SET long_silence_enabled=?, long_silence_first_hours=?,
+                        long_silence_second_hours=?, random_wake_enabled=?
+                    WHERE profile_id=? AND session_id=? AND lane_id=?
+                """, (values["long_silence_enabled"], values["long_silence_first_hours"],
+                      values["long_silence_second_hours"], values["random_wake_enabled"], profile, session, lane))
             if 'next_agent_wake_at' in changes:
                 _delete_alarms(conn, (profile, session, lane))
                 _insert_alarm(conn, (profile, session, lane), at=values['next_agent_wake_at'], reason=values['wake_reason'])
@@ -2739,6 +2767,10 @@ class GatewayStateStore:
                 values["conversation_silence_check_at"] = ""
                 values["silence_source_turn_id"] = 0
                 values["silence_policy_version"] = ""
+            if lane != GPT_WAKE_LANE and conn.execute("""
+                SELECT 1 FROM agent_wake_schedules WHERE profile_id=? AND session_id=? AND lane_id=?
+            """, (profile, session, GPT_WAKE_LANE)).fetchone():
+                record_gpt_wake_user_activity(conn, profile, session, activity_dt)
             values["last_user_activity_at"] = activity_iso
             values["keepalive_paused_until_user"] = 0
             values["followup_at"] = ""
@@ -2974,6 +3006,10 @@ class GatewayStateStore:
                 raise ConversationConflictError(expected_round, actual_round)
             next_round = actual_round + 1
             source_name = str(source or "gateway").strip() or "gateway"
+            if source_name == GPT_WAKE_LANE and safe_turn_kind == "agent_wake" and not gpt_wake_can_save(
+                conn, safe_profile_id, safe_session_id, safe_request_id
+            ):
+                raise ValueError("GPT agent wake is no longer active")
             rolling_context = self._json_object(session["rolling_context_json"]) if session is not None else {}
             chat_day = _conversation_chat_day(
                 created_at,
@@ -3184,6 +3220,11 @@ class GatewayStateStore:
                     update=wake_update,
                     now_iso=created_iso,
                 )
+            if source_name == GPT_WAKE_LANE and safe_turn_kind == "agent_wake":
+                conn.execute("""
+                    UPDATE agent_wake_runs SET status='completed', completed_at=?, turn_id=?, updated_at=?
+                    WHERE wake_id=? AND profile_id=? AND session_id=? AND lane_id=?
+                """, (created_iso, turn_id, created_iso, safe_request_id, safe_profile_id, safe_session_id, GPT_WAKE_LANE))
             if safe_turn_kind == "agent_wake" and str(assistant_text or "").strip():
                 wake_metadata = wake_update.get("agent_wake")
                 delivery = wake_metadata.get("delivery", "loud") if isinstance(wake_metadata, dict) else "loud"

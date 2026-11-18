@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import random
 import json
 import sqlite3
 import uuid
@@ -14,6 +15,90 @@ CACHE_STATES = {"unarmed", "warm", "cooling", "cold"}
 RUN_STATUSES = {"claimed", "running", "completed", "deferred", "failed", "superseded"}
 TERMINAL_RUN_STATUSES = {"completed", "deferred", "failed", "superseded"}
 MAX_CONSECUTIVE_FAILURES = 5
+GPT_WAKE_LANE = "gpt_subscription"
+GPT_WAKE_SWITCHES = {"long_silence_enabled", "random_wake_enabled"}
+GPT_WAKE_HOURS = {"long_silence_first_hours", "long_silence_second_hours"}
+GPT_WAKE_SLOTS = ("long_silence_first", "long_silence_second", "random_wake_first", "random_wake_second")
+BEIJING = timezone(timedelta(hours=8))
+
+
+def _gpt_wake_candidates(values: dict[str, Any]) -> dict[str, str]:
+    candidates = {}
+    activity = values.get("last_user_activity_at")
+    if values.get("long_silence_enabled") and activity:
+        for cause in GPT_WAKE_SLOTS[:2]:
+            if not values.get(f"{cause}_used"):
+                due = datetime.fromisoformat(activity) + timedelta(hours=values[f"{cause}_hours"])
+                candidates[cause] = _iso(due)
+    if values.get("random_wake_enabled"):
+        for cause in GPT_WAKE_SLOTS[2:]:
+            if values.get(f"{cause}_at") and not values.get(f"{cause}_used"):
+                candidates[cause] = values[f"{cause}_at"]
+    return candidates
+
+
+def record_gpt_wake_user_activity(conn, profile_id, session_id, accepted_at):
+    at = _iso(accepted_at)
+    scope = (profile_id, session_id, GPT_WAKE_LANE)
+    conn.execute("""
+        INSERT INTO agent_wake_schedules
+            (profile_id, session_id, lane_id, last_user_activity_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(profile_id, session_id, lane_id) DO UPDATE SET
+            last_user_activity_at = excluded.last_user_activity_at,
+            long_silence_first_used = 0, long_silence_second_used = 0,
+            retry_at = '', consecutive_failures = 0, last_error = '',
+            schedule_version = schedule_version + 1, lease_owner = '', lease_until = '',
+            updated_at = excluded.updated_at
+    """, (*scope, at, at, at))
+    row = conn.execute("""
+        SELECT * FROM agent_wake_schedules WHERE profile_id=? AND session_id=? AND lane_id=?
+    """, scope).fetchone()
+    conn.execute("""
+        UPDATE agent_wake_schedules SET due_at=? WHERE profile_id=? AND session_id=? AND lane_id=?
+    """, (AgentWakeStore._computed_due_at(dict(row)), *scope))
+
+
+def admit_gpt_wake(conn, profile_id, session_id, wake_id, now, expected_state_version):
+    run = conn.execute("""
+        SELECT r.cause, r.due_at AS run_due, s.*
+        FROM agent_wake_runs r
+        JOIN agent_wake_schedules s USING (profile_id, session_id, lane_id)
+        JOIN conversation_sessions c USING (profile_id, session_id)
+        WHERE r.wake_id=? AND r.profile_id=? AND r.session_id=? AND r.lane_id=?
+          AND r.status='running' AND r.schedule_version=s.schedule_version
+          AND r.lease_owner=s.lease_owner AND s.lease_until>?
+          AND c.local_engine_preference=? AND c.mode='chat' AND COALESCE(c.deleted_at, '')='' AND c.state_version=?
+    """, (wake_id, profile_id, session_id, GPT_WAKE_LANE, _iso(now), GPT_WAKE_LANE, expected_state_version)).fetchone()
+    if not run:
+        return False
+    values = dict(run)
+    cause = run["cause"]
+    if cause not in GPT_WAKE_SLOTS or _gpt_wake_candidates(values).get(cause) != run["run_due"]:
+        return False
+    if cause.startswith("random_wake_") and run["random_wake_day"] != now.astimezone(BEIJING).date().isoformat():
+        return False
+    used_column = f"{cause}_used"
+    values[used_column] = 1
+    conn.execute(f"""
+        UPDATE agent_wake_schedules SET {used_column}=1, due_at=?
+        WHERE profile_id=? AND session_id=? AND lane_id=?
+    """, (AgentWakeStore._computed_due_at(values), profile_id, session_id, GPT_WAKE_LANE))
+    return True
+
+
+def gpt_wake_can_save(conn, profile_id, session_id, wake_id):
+    run = conn.execute("""
+        SELECT r.cause, r.schedule_version AS run_version, s.*, c.local_engine_preference
+        FROM agent_wake_runs r
+        JOIN agent_wake_schedules s USING (profile_id, session_id, lane_id)
+        JOIN conversation_sessions c USING (profile_id, session_id)
+        WHERE r.wake_id=? AND r.profile_id=? AND r.session_id=? AND r.lane_id=? AND r.status='running'
+    """, (wake_id, profile_id, session_id, GPT_WAKE_LANE)).fetchone()
+    if not run or run["local_engine_preference"] != GPT_WAKE_LANE or run["run_version"] != run["schedule_version"]:
+        return False
+    cause = run["cause"]
+    return cause in GPT_WAKE_SLOTS and bool(run[f"{cause}_used"])
 
 
 def _utc_now() -> datetime:
@@ -151,6 +236,17 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
             "keepalive_paused_until_user": "INTEGER NOT NULL DEFAULT 0",
             "agent_wake_enabled": "INTEGER NOT NULL DEFAULT 0",
             "conversation_silence_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "long_silence_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "long_silence_first_hours": "REAL NOT NULL DEFAULT 2",
+            "long_silence_second_hours": "REAL NOT NULL DEFAULT 6",
+            "long_silence_first_used": "INTEGER NOT NULL DEFAULT 0",
+            "long_silence_second_used": "INTEGER NOT NULL DEFAULT 0",
+            "random_wake_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "random_wake_day": "TEXT NOT NULL DEFAULT ''",
+            "random_wake_first_at": "TEXT NOT NULL DEFAULT ''",
+            "random_wake_second_at": "TEXT NOT NULL DEFAULT ''",
+            "random_wake_first_used": "INTEGER NOT NULL DEFAULT 0",
+            "random_wake_second_used": "INTEGER NOT NULL DEFAULT 0",
             "bark_notification_enabled": "INTEGER NOT NULL DEFAULT 0",
             "last_user_activity_at": "TEXT NOT NULL DEFAULT ''",
             "last_model_activity_at": "TEXT NOT NULL DEFAULT ''",
@@ -388,6 +484,8 @@ class AgentWakeStore:
 
     @staticmethod
     def _computed_due_at(values: dict[str, Any]) -> str:
+        if values.get("lane_id") == GPT_WAKE_LANE:
+            return min(_gpt_wake_candidates(values).values(), default="")
         candidates: list[str] = []
         if (
             bool(values.get("keepalive_enabled"))
@@ -411,7 +509,7 @@ class AgentWakeStore:
         if row is None:
             return {}
         payload = dict(row)
-        for key in AgentWakeStore._BOOLEAN_FIELDS:
+        for key in AgentWakeStore._BOOLEAN_FIELDS | GPT_WAKE_SWITCHES:
             payload[key] = bool(payload.get(key))
         payload["schedule_version"] = int(payload.get("schedule_version") or 0)
         payload["background_turn_limit"] = int(payload.get("background_turn_limit") or 0)
@@ -753,6 +851,8 @@ class AgentWakeStore:
 
     @staticmethod
     def _cause(row: sqlite3.Row) -> str:
+        if row["lane_id"] == GPT_WAKE_LANE:
+            return min(_gpt_wake_candidates(dict(row)).items(), key=lambda item: item[1])[0]
         due_at = str(row["due_at"] or "")
         if str(row["followup_at"] or "") == due_at:
             return "agent_followup"
@@ -762,12 +862,64 @@ class AgentWakeStore:
             return "agent_schedule"
         return "cache_keepalive"
 
+    @staticmethod
+    def _schedule_random_wakes(conn, now: datetime) -> None:
+        local_now = now.astimezone(BEIJING)
+        day = local_now.date().isoformat()
+        end = (local_now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        seconds_left = int((end - local_now).total_seconds())
+        if seconds_left < 2:
+            return
+        rows = conn.execute("""
+            SELECT s.* FROM agent_wake_schedules s
+            JOIN conversation_sessions c USING (profile_id, session_id)
+            WHERE s.lane_id=? AND s.random_wake_enabled=1 AND s.random_wake_day!=?
+              AND c.local_engine_preference=? AND c.mode='chat' AND COALESCE(c.deleted_at, '')=''
+              AND (s.lease_until='' OR s.lease_until<=?)
+        """, (GPT_WAKE_LANE, day, GPT_WAKE_LANE, _iso(now))).fetchall()
+        for row in rows:
+            first, second = sorted(random.sample(range(0, seconds_left), 2))
+            values = dict(row)
+            values.update(
+                random_wake_first_at=_iso(now + timedelta(seconds=first)),
+                random_wake_second_at=_iso(now + timedelta(seconds=second)),
+                random_wake_first_used=0, random_wake_second_used=0,
+            )
+            conn.execute("""
+                UPDATE agent_wake_schedules
+                SET random_wake_day=?, random_wake_first_at=?, random_wake_second_at=?,
+                    random_wake_first_used=0, random_wake_second_used=0, due_at=?,
+                    schedule_version=schedule_version+1
+                WHERE profile_id=? AND session_id=? AND lane_id=?
+            """, (day, values["random_wake_first_at"], values["random_wake_second_at"],
+                  AgentWakeStore._computed_due_at(values), row["profile_id"], row["session_id"], GPT_WAKE_LANE))
+
+    @staticmethod
+    def _expire_interrupted_gpt_runs(conn, now_iso: str) -> None:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='gpt_chat_requests'").fetchone():
+            return
+        conn.execute("""
+            UPDATE agent_wake_runs AS r
+            SET status='failed', error='gpt_wake_interrupted', completed_at=?, updated_at=?
+            WHERE r.lane_id=? AND r.status='running'
+              AND EXISTS (
+                SELECT 1 FROM gpt_chat_requests g
+                WHERE g.profile_id=r.profile_id AND g.session_id=r.session_id AND g.request_id=r.wake_id
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM agent_wake_schedules s
+                WHERE s.profile_id=r.profile_id AND s.session_id=r.session_id AND s.lane_id=r.lane_id
+                  AND s.schedule_version=r.schedule_version AND s.lease_owner=r.lease_owner AND s.lease_until>?
+              )
+        """, (now_iso, now_iso, GPT_WAKE_LANE, now_iso))
+
     def claim_due_schedule(
         self,
         *,
         owner: str,
         now: datetime,
         lease_seconds: int = 120,
+        gpt_enabled: bool = False,
     ) -> dict[str, Any]:
         safe_owner = str(owner or "").strip()
         if not safe_owner:
@@ -780,6 +932,9 @@ class AgentWakeStore:
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            if gpt_enabled:
+                self._schedule_random_wakes(conn, now)
+                self._expire_interrupted_gpt_runs(conn, now_iso)
             inactive_before = _iso(
                 now.astimezone(timezone.utc) - timedelta(hours=24), allow_empty=False
             )
@@ -808,17 +963,24 @@ class AgentWakeStore:
                         inactive["schedule_version"],
                     ),
                 )
+            lane_filter = """(lane_id != ? OR EXISTS (
+                SELECT 1 FROM conversation_sessions c
+                WHERE c.profile_id=agent_wake_schedules.profile_id
+                  AND c.session_id=agent_wake_schedules.session_id
+                  AND c.local_engine_preference=agent_wake_schedules.lane_id AND c.mode='chat'
+                  AND COALESCE(c.deleted_at, '')=''
+            ))""" if gpt_enabled else "lane_id != ?"
             row = conn.execute(
-                """
+                f"""
                 SELECT * FROM agent_wake_schedules
-                WHERE due_at != '' AND due_at <= ?
+                WHERE {lane_filter} AND due_at != '' AND due_at <= ?
                   AND consecutive_failures < ?
                   AND (retry_at = '' OR retry_at <= ?)
                   AND (lease_owner = '' OR lease_until = '' OR lease_until <= ?)
                 ORDER BY due_at, profile_id, session_id, lane_id
                 LIMIT 1
                 """,
-                (now_iso, MAX_CONSECUTIVE_FAILURES, now_iso, now_iso),
+                (GPT_WAKE_LANE, now_iso, MAX_CONSECUTIVE_FAILURES, now_iso, now_iso),
             ).fetchone()
             if row is None:
                 conn.commit()
@@ -840,24 +1002,25 @@ class AgentWakeStore:
             if cursor.rowcount != 1:
                 conn.commit()
                 return {}
+            cause = self._cause(row)
             run = conn.execute(
                 """
                 SELECT * FROM agent_wake_runs
                 WHERE profile_id = ? AND session_id = ? AND lane_id = ?
-                  AND schedule_version = ? AND due_at = ?
+                  AND schedule_version = ? AND due_at = ? AND (? != ? OR cause = ?)
                   AND status IN ('claimed', 'running')
                 ORDER BY created_at DESC LIMIT 1
                 """,
                 (
                     row["profile_id"], row["session_id"], row["lane_id"],
-                    row["schedule_version"], row["due_at"],
+                    row["schedule_version"], row["due_at"], row["lane_id"], GPT_WAKE_LANE, cause,
                 ),
             ).fetchone()
             recovered = run is not None
             if run is None:
                 wake_id = f"wake_{uuid.uuid4().hex}"
                 alarms = _alarm_payloads(conn, (row['profile_id'], row['session_id'], row['lane_id']))
-                fired = [item for item in alarms if item['at'] <= now_iso] if self._cause(row) == 'agent_schedule' else []
+                fired = [item for item in alarms if item['at'] <= now_iso] if cause == 'agent_schedule' else []
                 pending = [item for item in alarms if item['at'] > now_iso]
                 conn.execute(
                     """
@@ -868,7 +1031,7 @@ class AgentWakeStore:
                     """,
                     (
                         wake_id, row["profile_id"], row["session_id"], row["lane_id"],
-                        row["schedule_version"], self._cause(row), row["due_at"],
+                        row["schedule_version"], cause, row["due_at"],
                         safe_owner, now_iso, now_iso,
                     ),
                 )
@@ -1143,6 +1306,7 @@ class AgentWakeStore:
         status: str,
         turn_id: int | None = None,
         error: str = "",
+        gpt_failure_kind: str = "",
     ) -> dict[str, Any]:
         safe_status = str(status or "").strip()
         if safe_status not in TERMINAL_RUN_STATUSES:
@@ -1184,10 +1348,12 @@ class AgentWakeStore:
                 elif safe_status == "failed":
                     failures += 1
                     last_error = str(error or "agent wake failed")[:1000]
-                    retry_at = _iso(
-                        _utc_now() + timedelta(seconds=min(900, 30 * (2 ** max(0, failures - 1)))),
-                        allow_empty=False,
+                    if run["lane_id"] == GPT_WAKE_LANE and gpt_failure_kind == "authentication":
+                        failures = MAX_CONSECUTIVE_FAILURES
+                    backoff = 3600 if run["lane_id"] == GPT_WAKE_LANE and gpt_failure_kind == "pro_limit" else min(
+                        900, 30 * (2 ** max(0, failures - 1))
                     )
+                    retry_at = _iso(_utc_now() + timedelta(seconds=backoff), allow_empty=False)
                 elif safe_status == "completed":
                     failures = 0
                     retry_at = ""

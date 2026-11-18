@@ -108,6 +108,7 @@
 | 变量名 | 注入位置 | 说明 |
 |--------|----------|------|
 | `OMBRE_AGENT_WAKE_RUNNER_URL` | Haven Brain | Dashboard wake runner 的完整 URL，例如 `https://dashboard.example/api/cc-agent-wake-runner` |
+| `OMBRE_GPT_AGENT_WAKE_ENABLED` | Haven Brain，默认关闭 | `1` 才允许调度 GPT 主动唤醒。须在窗口 6 合并及 GPT 聊天可靠性验收完成后启用。 |
 | `OMBRE_AGENT_WAKE_RUNNER_TOKEN` | Haven Brain + Dashboard | 两端相同的独立随机共享密钥；只用于 wake callback Bearer 认证，不返回浏览器、不写数据库或 Git |
 
 ## 存储路径

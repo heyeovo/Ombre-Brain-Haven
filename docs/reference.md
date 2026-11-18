@@ -37,7 +37,7 @@ OMBRE_TRANSPORT=streamable-http python server.py
 | `outlook_store.py` | 个人 Outlook 设备码授权、串行刷新、Graph 日历/To Do、言之资源缓存和短码映射；独立 `state_dir/outlook.sqlite` |
 | `gpt_subscription.py` | Gateway 的 GPT 订阅文字、单张图片与工具续接传输：profile 隔离的 Node 私有管道、活跃 request_id 去重、取消与停止收尾、错误分类；MCP 由 Dashboard 执行 |
 | `gpt_subscription_proxy.py` | Brain 的 GPT 对外入口：认证后通过既有内部地址转发至独立 Gateway，保留流式/取消语义；不持有授权或创建第二个 GPT 服务 |
-| `gpt_chat_requests.py` | GPT 聊天请求的持久准入登记、同窗并发互斥与重启后防重复执行；只存摘要/状态，不存正文 |
+| `gpt_chat_requests.py` | GPT 聊天请求的持久准入登记、同窗并发互斥与重启后防重复执行；只存摘要/状态，不存正文。GPT 用户发送重置长沉默与后台消费唤醒机会均同登记事务提交。 |
 | `gpt_context_audit.py` | GPT 无正文审计的严格字段校验、请求对象指纹、执行阶段、真实 usage 与上游缓存/额度候选完成证据白名单投影；永久删除窗口时清除同 profile/session 证据 |
 | `integrations/gpt_subscription/` | 固定官方 SIWC DevKit 源码及许可、AES-GCM 加密、跨进程刷新锁/轮换恢复、stdin 管理导入与本机 SSH 登录交接；Node 依赖由 package-lock 固定 |
 | `server.py` | **Brain** 入口（约 700KB）。MCP 工具注册（`@mcp.tool`）+ REST API（`@mcp.custom_route`）+ 记忆核心 |
@@ -527,6 +527,8 @@ frontmatter 的 `related` 是手工关联字段，`state/memory_edges.jsonl` 是
 依赖 embedding 引擎（`config.yaml` 中 `embedding.enabled`）。返回 `{items, embedding_enabled, total_scanned}`。
 
 ### cc 持久化（Haven 侧）
+
+GPT 主动唤醒在 `gateway_state.db` 的 `agent_wake_schedules` 中用 `gpt_subscription` 线路按 profile 和窗口保存。开关默认关闭，两档小时数默认 2 与 6。当天的两个随机时间与已使用状态按北京时间持久化。前台活动只重置沉默计时，随机机会在同日冲突时重试，过日丢弃。Haven 将 GPT 请求登记与机会消费放在同一事务，避免进程重启后重复发模型请求。保存唤醒轮次时检查登记仍有效，并在同一事务提交唤醒完成和通知 outbox。
 
 GPT 额度候选证据复用请求审计持久化，字段及未知值边界以本文件 `completed.quotaEvidence` 条目为准，不复用 Claude Pro 额度快照。
 

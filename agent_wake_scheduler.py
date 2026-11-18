@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 
-from agent_wake_store import AgentWakeStore
+from agent_wake_store import AgentWakeStore, GPT_WAKE_LANE
 
 
 class AgentWakeScheduler:
@@ -34,6 +35,7 @@ class AgentWakeScheduler:
             owner=self.owner,
             now=current,
             lease_seconds=max(420, int(self.timeout_seconds) + 30),
+            gpt_enabled=os.getenv('OMBRE_GPT_AGENT_WAKE_ENABLED') == '1',
         )
         if not claimed:
             return {"status": "idle"}
@@ -62,7 +64,13 @@ class AgentWakeScheduler:
                     headers={"Authorization": f"Bearer {self.token}"},
                     json=payload,
                 )
-            response.raise_for_status()
+            failure_kind = ""
+            if schedule["lane_id"] == GPT_WAKE_LANE and response.status_code == 503:
+                failure = response.json()
+                if isinstance(failure, dict) and failure.get("failureKind") in {"authentication", "pro_limit"}:
+                    failure_kind = failure["failureKind"]
+            if not failure_kind:
+                response.raise_for_status()
             data = response.json()
             if not isinstance(data, dict):
                 raise ValueError("Dashboard wake runner returned non-object JSON")
@@ -77,6 +85,7 @@ class AgentWakeScheduler:
                 status=status,
                 turn_id=int(data["turn_id"]) if data.get("turn_id") else None,
                 error=str(data.get("error") or data.get("reason") or ""),
+                gpt_failure_kind=failure_kind,
             )
             return {"status": finished["status"], "wake_id": wake_id, "response": data}
         except Exception as exc:

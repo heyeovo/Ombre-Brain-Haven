@@ -307,7 +307,7 @@ cc 协作者可分别维护基础 system 提示词和长期提示词模块：基
 
 ## 快速部署
 
-GPT 主动唤醒复用 Haven 的调度与 Bark 通知。真实调度默认关闭，启用前须完成 GPT 工具接入合并及聊天可靠性验收。开关配置见 [环境变量](ENV_VARS.md#cc-主动唤醒-runner)。
+GPT 主动唤醒复用 Haven 的闹钟、对话沉默检查、Followup、调度与 Bark 通知，并支持长沉默和每日随机唤醒。真实调度默认关闭，启用前须完成 GPT 工具接入合并及聊天可靠性验收。开关配置见 [环境变量](ENV_VARS.md#cc-主动唤醒-runner)。
 
 Outlook 为可选集成，Brain 容器的配置及微软应用注册要求见 [ENV_VARS](ENV_VARS.md#outlook-日历与-microsoft-to-dobrain)，授权凭据随 state 卷持久化。
 

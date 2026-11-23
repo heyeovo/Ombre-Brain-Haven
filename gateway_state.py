@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from agent_wake_store import (AgentWakeStore, delete_agent_wake_session_records, initialize_agent_wake_schema,
                               _alarm_payloads, _insert_alarm, _delete_alarms, _sync_alarm_mirror,
                               GPT_WAKE_LANE, GPT_WAKE_SWITCHES, GPT_WAKE_HOURS,
-                              gpt_wake_can_save, record_gpt_wake_user_activity)
+                              gpt_wake_can_save, heartbeat_policy, record_gpt_wake_user_activity, validate_heartbeat_policy)
 from bark_notifications import BarkNotificationStore, initialize_bark_notification_schema
 from conversation_slice_store import (
     delete_conversation_slice_session_records,
@@ -339,6 +339,7 @@ class GatewayStateStore:
             payload[key] = bool(payload.get(key))
         for key in GPT_WAKE_SWITCHES:
             payload[key] = bool(payload.get(key))
+        payload["heartbeat_policy"] = heartbeat_policy(payload)
         for key, fallback in (
             ("schedule_version", 0), ("background_turn_limit", 48),
             ("agent_wake_min_minutes", 10), ("silence_min_minutes", 8),
@@ -389,6 +390,7 @@ class GatewayStateStore:
         turn_id: int,
         turn_kind: str,
         has_visible_assistant_message: bool,
+        source_request_id: str,
         update: dict[str, Any],
         now_iso: str,
     ) -> dict[str, Any]:
@@ -416,9 +418,17 @@ class GatewayStateStore:
         values["last_error"] = ""
 
         if turn_kind == "user":
-            values["last_user_activity_at"] = cls._agent_wake_timestamp(
-                update.get("user_activity_at") or model_activity_at or now_iso
-            )
+            if (lane_id == GPT_WAKE_LANE and update.get("arm_long_silence") is True
+                    and values["long_silence_request_id"] == source_request_id):
+                values["long_silence_anchor_at"] = model_activity_at or now_iso
+                conn.execute("""
+                    UPDATE agent_wake_schedules SET long_silence_anchor_at=?
+                    WHERE profile_id=? AND session_id=? AND lane_id=?
+                """, (values["long_silence_anchor_at"], *scope))
+            if lane_id != GPT_WAKE_LANE:
+                values["last_user_activity_at"] = cls._agent_wake_timestamp(
+                    update.get("user_activity_at") or model_activity_at or now_iso
+                )
             values["keepalive_paused_until_user"] = 0
             if bool(values.get("conversation_silence_enabled")) and update.get("sample_silence") is True:
                 minimum = max(1, min(1440, int(values.get("silence_min_minutes") or 8)))
@@ -2612,7 +2622,7 @@ class GatewayStateStore:
             "followup_max_count", "followup_count",
         }
         if lane == GPT_WAKE_LANE:
-            allowed |= GPT_WAKE_SWITCHES | GPT_WAKE_HOURS
+            allowed |= GPT_WAKE_SWITCHES | GPT_WAKE_HOURS | {"heartbeat_policy"}
         unknown = set(changes) - allowed
         if unknown:
             raise ValueError(f"unsupported agent wake fields: {', '.join(sorted(unknown))}")
@@ -2628,7 +2638,9 @@ class GatewayStateStore:
                 raise SessionStateConflictError(int(expected_version), actual_version)
             values = dict(row)
             for key, value in changes.items():
-                if key in GPT_WAKE_HOURS:
+                if key == "heartbeat_policy":
+                    values["heartbeat_policy_json"] = json.dumps(validate_heartbeat_policy(value), sort_keys=True)
+                elif key in GPT_WAKE_HOURS:
                     hours = float(value)
                     if isinstance(value, bool) or not hours > 0:
                         raise ValueError("long silence hours must be positive")
@@ -2678,6 +2690,11 @@ class GatewayStateStore:
                 values["silence_policy_version"] = ""
             if int(values.get("silence_min_minutes") or 8) > int(values.get("silence_max_minutes") or 25):
                 raise ValueError("silence_min_minutes cannot exceed silence_max_minutes")
+            if lane == GPT_WAKE_LANE and (
+                values["heartbeat_enabled"] != row["heartbeat_enabled"]
+                or ("heartbeat_policy" in changes and heartbeat_policy(values) != heartbeat_policy(dict(row)))
+            ):
+                values["heartbeat_at"] = ""
             values["due_at"] = self._agent_wake_due_at(values)
             conn.execute(
                 """
@@ -2719,10 +2736,12 @@ class GatewayStateStore:
             if lane == GPT_WAKE_LANE:
                 conn.execute("""
                     UPDATE agent_wake_schedules SET long_silence_enabled=?, long_silence_first_hours=?,
-                        long_silence_second_hours=?, random_wake_enabled=?
+                        long_silence_second_hours=?, random_wake_enabled=?, heartbeat_enabled=?,
+                        heartbeat_policy_json=?, heartbeat_at=?
                     WHERE profile_id=? AND session_id=? AND lane_id=?
                 """, (values["long_silence_enabled"], values["long_silence_first_hours"],
-                      values["long_silence_second_hours"], values["random_wake_enabled"], profile, session, lane))
+                      values["long_silence_second_hours"], values["random_wake_enabled"], values["heartbeat_enabled"],
+                      values["heartbeat_policy_json"], values["heartbeat_at"], profile, session, lane))
             if 'next_agent_wake_at' in changes:
                 _delete_alarms(conn, (profile, session, lane))
                 _insert_alarm(conn, (profile, session, lane), at=values['next_agent_wake_at'], reason=values['wake_reason'])
@@ -3217,6 +3236,7 @@ class GatewayStateStore:
                     has_visible_assistant_message=(
                         safe_turn_kind == "agent_wake" and bool(str(assistant_text or "").strip())
                     ),
+                    source_request_id=safe_request_id,
                     update=wake_update,
                     now_iso=created_iso,
                 )

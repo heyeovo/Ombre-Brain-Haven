@@ -16,15 +16,111 @@ RUN_STATUSES = {"claimed", "running", "completed", "deferred", "failed", "supers
 TERMINAL_RUN_STATUSES = {"completed", "deferred", "failed", "superseded"}
 MAX_CONSECUTIVE_FAILURES = 5
 GPT_WAKE_LANE = "gpt_subscription"
-GPT_WAKE_SWITCHES = {"long_silence_enabled", "random_wake_enabled"}
+GPT_WAKE_SWITCHES = {"long_silence_enabled", "random_wake_enabled", "heartbeat_enabled"}
 GPT_WAKE_HOURS = {"long_silence_first_hours", "long_silence_second_hours"}
 GPT_WAKE_SLOTS = ("long_silence_first", "long_silence_second", "random_wake_first", "random_wake_second")
+GPT_LEGACY_WAKE_FIELDS = {
+    "agent_followup": "followup_at",
+    "conversation_silence": "conversation_silence_check_at",
+    "agent_schedule": "next_agent_wake_at",
+}
 BEIJING = timezone(timedelta(hours=8))
+HEARTBEAT_DEFAULTS = {
+    "min_minutes": 90, "max_minutes": 150,
+    "sleep_start": "03:00", "sleep_end": "09:00",
+    "sleep_min_minutes": 180, "sleep_max_minutes": 240,
+    "daily_limit": 6, "avoid_minutes": 30,
+}
+
+
+def validate_heartbeat_policy(value):
+    if not isinstance(value, dict) or set(value) != set(HEARTBEAT_DEFAULTS):
+        raise ValueError("heartbeat_policy must include all heartbeat settings")
+    for key, item in value.items():
+        if key in ("sleep_start", "sleep_end"):
+            if not isinstance(item, str) or len(item) != 5:
+                raise ValueError(f"{key} must be HH:mm")
+            if datetime.strptime(item, "%H:%M").strftime("%H:%M") != item:
+                raise ValueError(f"{key} must be HH:mm")
+        elif type(item) is not int or not (0 if key == "avoid_minutes" else 1) <= item <= 1440:
+            raise ValueError(f"invalid {key}")
+    for prefix in ("", "sleep_"):
+        if value[f"{prefix}min_minutes"] > value[f"{prefix}max_minutes"]:
+            raise ValueError(f"{prefix}min_minutes cannot exceed max_minutes")
+    return value
+
+
+def heartbeat_policy(values):
+    return {**HEARTBEAT_DEFAULTS, **json.loads(values.get("heartbeat_policy_json") or "{}")}
+
+
+def _next_heartbeat(now, policy):
+    def asleep(instant):
+        local = instant.astimezone(BEIJING).strftime("%H:%M")
+        start, end = policy["sleep_start"], policy["sleep_end"]
+        if start <= end:
+            return start <= local < end
+        return local >= start or local < end
+
+    if not asleep(now):
+        normal = now + timedelta(minutes=random.randint(policy["min_minutes"], policy["max_minutes"]))
+        if not asleep(normal):
+            return _iso(normal)
+    return _iso(now + timedelta(minutes=random.randint(policy["sleep_min_minutes"], policy["sleep_max_minutes"])))
+
+
+def _heartbeat_near_other_wake(conn, run, now, minutes):
+    scope = (run["profile_id"], run["session_id"], GPT_WAKE_LANE)
+    lower = _iso(now - timedelta(minutes=minutes))
+    upper = _iso(now + timedelta(minutes=minutes))
+    if run["random_wake_enabled"] and run["random_wake_day"] == now.astimezone(BEIJING).date().isoformat():
+        for slot in GPT_WAKE_SLOTS[2:]:
+            if not run[f"{slot}_used"] and lower <= run[f"{slot}_at"] <= upper:
+                return True
+    if run["agent_wake_enabled"] and conn.execute("""
+        SELECT 1 FROM agent_wake_alarms
+        WHERE profile_id=? AND session_id=? AND lane_id=? AND at BETWEEN ? AND ?
+        LIMIT 1
+    """, (*scope, lower, upper)).fetchone():
+        return True
+    return conn.execute("""
+        SELECT 1 FROM agent_wake_runs
+        WHERE profile_id=? AND session_id=? AND lane_id=?
+          AND cause IN ('random_wake_first','random_wake_second','agent_schedule')
+          AND status IN ('running','completed','failed') AND started_at BETWEEN ? AND ?
+        LIMIT 1
+    """, (*scope, lower, upper)).fetchone() is not None
+
+
+def _advance_heartbeat(conn, values, now):
+    policy = heartbeat_policy(values)
+    local = now.astimezone(BEIJING)
+    day = local.date().isoformat()
+    count = values["heartbeat_count"] if values["heartbeat_day"] == day else 0
+    reached_limit = count >= policy["daily_limit"]
+    allowed = not reached_limit and not _heartbeat_near_other_wake(conn, values, now, policy["avoid_minutes"])
+    count += int(allowed)
+    base = now
+    if count >= policy["daily_limit"]:
+        base = (local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    values.update(heartbeat_at=_next_heartbeat(base, policy), heartbeat_day=day, heartbeat_count=count)
+    conn.execute("""
+        UPDATE agent_wake_schedules SET heartbeat_at=?, heartbeat_day=?, heartbeat_count=?, due_at=?
+        WHERE profile_id=? AND session_id=? AND lane_id=?
+    """, (values["heartbeat_at"], day, count, AgentWakeStore._computed_due_at(values),
+          values["profile_id"], values["session_id"], GPT_WAKE_LANE))
+    return allowed
+
 
 
 def _gpt_wake_candidates(values: dict[str, Any]) -> dict[str, str]:
-    candidates = {}
-    activity = values.get("last_user_activity_at")
+    candidates = {
+        cause: values[field] for cause, field in GPT_LEGACY_WAKE_FIELDS.items()
+        if values.get(field) and values.get(
+            "conversation_silence_enabled" if cause == "conversation_silence" else "agent_wake_enabled"
+        )
+    }
+    activity = values.get("long_silence_anchor_at")
     if values.get("long_silence_enabled") and activity:
         for cause in GPT_WAKE_SLOTS[:2]:
             if not values.get(f"{cause}_used"):
@@ -34,23 +130,28 @@ def _gpt_wake_candidates(values: dict[str, Any]) -> dict[str, str]:
         for cause in GPT_WAKE_SLOTS[2:]:
             if values.get(f"{cause}_at") and not values.get(f"{cause}_used"):
                 candidates[cause] = values[f"{cause}_at"]
+    if values.get("heartbeat_enabled") and values.get("heartbeat_at"):
+        candidates["agent_heartbeat"] = values["heartbeat_at"]
     return candidates
 
 
-def record_gpt_wake_user_activity(conn, profile_id, session_id, accepted_at):
+def record_gpt_wake_user_activity(conn, profile_id, session_id, accepted_at, request_id=""):
     at = _iso(accepted_at)
     scope = (profile_id, session_id, GPT_WAKE_LANE)
     conn.execute("""
         INSERT INTO agent_wake_schedules
-            (profile_id, session_id, lane_id, last_user_activity_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (profile_id, session_id, lane_id, last_user_activity_at, long_silence_request_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(profile_id, session_id, lane_id) DO UPDATE SET
             last_user_activity_at = excluded.last_user_activity_at,
+            long_silence_request_id = excluded.long_silence_request_id, long_silence_anchor_at = '',
             long_silence_first_used = 0, long_silence_second_used = 0,
+            conversation_silence_check_at = '', silence_source_turn_id = 0, silence_policy_version = '',
+            followup_at = '', followup_source_turn_id = 0, followup_count = 0,
             retry_at = '', consecutive_failures = 0, last_error = '',
             schedule_version = schedule_version + 1, lease_owner = '', lease_until = '',
             updated_at = excluded.updated_at
-    """, (*scope, at, at, at))
+    """, (*scope, at, request_id, at, at))
     row = conn.execute("""
         SELECT * FROM agent_wake_schedules WHERE profile_id=? AND session_id=? AND lane_id=?
     """, scope).fetchone()
@@ -61,7 +162,7 @@ def record_gpt_wake_user_activity(conn, profile_id, session_id, accepted_at):
 
 def admit_gpt_wake(conn, profile_id, session_id, wake_id, now, expected_state_version):
     run = conn.execute("""
-        SELECT r.cause, r.due_at AS run_due, s.*
+        SELECT r.cause, r.due_at AS run_due, r.fired_alarm_ids, s.*
         FROM agent_wake_runs r
         JOIN agent_wake_schedules s USING (profile_id, session_id, lane_id)
         JOIN conversation_sessions c USING (profile_id, session_id)
@@ -74,10 +175,28 @@ def admit_gpt_wake(conn, profile_id, session_id, wake_id, now, expected_state_ve
         return False
     values = dict(run)
     cause = run["cause"]
-    if cause not in GPT_WAKE_SLOTS or _gpt_wake_candidates(values).get(cause) != run["run_due"]:
+    if _gpt_wake_candidates(values).get(cause) != run["run_due"]:
         return False
     if cause.startswith("random_wake_") and run["random_wake_day"] != now.astimezone(BEIJING).date().isoformat():
         return False
+    scope = (profile_id, session_id, GPT_WAKE_LANE)
+    if cause == "agent_heartbeat":
+        return _advance_heartbeat(conn, values, now)
+    if cause == "agent_schedule":
+        for alarm_id in json.loads(run["fired_alarm_ids"]):
+            _delete_alarms(conn, scope, alarm_id)
+        _sync_alarm_mirror(conn, scope)
+        return True
+    if cause in GPT_LEGACY_WAKE_FIELDS:
+        field = GPT_LEGACY_WAKE_FIELDS[cause]
+        values[field] = ""
+        source_fields = ("followup_source_turn_id=0" if cause == "agent_followup"
+                         else "silence_source_turn_id=0, silence_policy_version=''")
+        conn.execute(f"""
+            UPDATE agent_wake_schedules SET {field}='', {source_fields}, due_at=?
+            WHERE profile_id=? AND session_id=? AND lane_id=?
+        """, (AgentWakeStore._computed_due_at(values), *scope))
+        return True
     used_column = f"{cause}_used"
     values[used_column] = 1
     conn.execute(f"""
@@ -98,7 +217,12 @@ def gpt_wake_can_save(conn, profile_id, session_id, wake_id):
     if not run or run["local_engine_preference"] != GPT_WAKE_LANE or run["run_version"] != run["schedule_version"]:
         return False
     cause = run["cause"]
-    return cause in GPT_WAKE_SLOTS and bool(run[f"{cause}_used"])
+    if cause in GPT_WAKE_SLOTS:
+        return bool(run[f"{cause}_used"])
+    return (cause in GPT_LEGACY_WAKE_FIELDS or cause == "agent_heartbeat") and conn.execute("""
+        SELECT 1 FROM gpt_chat_requests
+        WHERE profile_id=? AND session_id=? AND request_id=? AND is_wake=1
+    """, (profile_id, session_id, wake_id)).fetchone() is not None
 
 
 def _utc_now() -> datetime:
@@ -225,6 +349,9 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    upgrade_long_silence_anchor = "long_silence_anchor_at" not in {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(agent_wake_schedules)").fetchall()
+    }
     _ensure_columns(
         conn,
         "agent_wake_schedules",
@@ -239,6 +366,13 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
             "long_silence_enabled": "INTEGER NOT NULL DEFAULT 0",
             "long_silence_first_hours": "REAL NOT NULL DEFAULT 2",
             "long_silence_second_hours": "REAL NOT NULL DEFAULT 6",
+            "long_silence_request_id": "TEXT NOT NULL DEFAULT ''",
+            "long_silence_anchor_at": "TEXT NOT NULL DEFAULT ''",
+            "heartbeat_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "heartbeat_policy_json": "TEXT NOT NULL DEFAULT '{}'",
+            "heartbeat_at": "TEXT NOT NULL DEFAULT ''",
+            "heartbeat_day": "TEXT NOT NULL DEFAULT ''",
+            "heartbeat_count": "INTEGER NOT NULL DEFAULT 0",
             "long_silence_first_used": "INTEGER NOT NULL DEFAULT 0",
             "long_silence_second_used": "INTEGER NOT NULL DEFAULT 0",
             "random_wake_enabled": "INTEGER NOT NULL DEFAULT 0",
@@ -323,6 +457,17 @@ def initialize_agent_wake_schema(conn: sqlite3.Connection) -> None:
                 row["profile_id"], row["session_id"], row["lane_id"],
             ),
         )
+    if upgrade_long_silence_anchor:
+        for row in conn.execute(
+            "SELECT * FROM agent_wake_schedules WHERE lane_id=?", (GPT_WAKE_LANE,)
+        ).fetchall():
+            due_at = AgentWakeStore._computed_due_at(dict(row))
+            if due_at != row["due_at"]:
+                conn.execute("""
+                    UPDATE agent_wake_schedules SET due_at=?, schedule_version=schedule_version+1,
+                        lease_owner='', lease_until=''
+                    WHERE profile_id=? AND session_id=? AND lane_id=?
+                """, (due_at, row["profile_id"], row["session_id"], GPT_WAKE_LANE))
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_wake_schedule_scope
@@ -509,6 +654,7 @@ class AgentWakeStore:
         if row is None:
             return {}
         payload = dict(row)
+        payload["heartbeat_policy"] = heartbeat_policy(payload)
         for key in AgentWakeStore._BOOLEAN_FIELDS | GPT_WAKE_SWITCHES:
             payload[key] = bool(payload.get(key))
         payload["schedule_version"] = int(payload.get("schedule_version") or 0)
@@ -895,6 +1041,24 @@ class AgentWakeStore:
                   AgentWakeStore._computed_due_at(values), row["profile_id"], row["session_id"], GPT_WAKE_LANE))
 
     @staticmethod
+    def _schedule_heartbeats(conn, now: datetime) -> None:
+        rows = conn.execute("""
+            SELECT s.* FROM agent_wake_schedules s
+            JOIN conversation_sessions c USING (profile_id, session_id)
+            WHERE s.lane_id=? AND s.heartbeat_enabled=1 AND s.heartbeat_at=''
+              AND c.local_engine_preference=? AND c.mode='chat' AND COALESCE(c.deleted_at, '')=''
+              AND (s.lease_until='' OR s.lease_until<=?)
+        """, (GPT_WAKE_LANE, GPT_WAKE_LANE, _iso(now))).fetchall()
+        for row in rows:
+            values = dict(row)
+            values["heartbeat_at"] = _next_heartbeat(now, heartbeat_policy(values))
+            conn.execute("""
+                UPDATE agent_wake_schedules SET heartbeat_at=?, due_at=?
+                WHERE profile_id=? AND session_id=? AND lane_id=?
+            """, (values["heartbeat_at"], AgentWakeStore._computed_due_at(values),
+                  row["profile_id"], row["session_id"], GPT_WAKE_LANE))
+
+    @staticmethod
     def _expire_interrupted_gpt_runs(conn, now_iso: str) -> None:
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='gpt_chat_requests'").fetchone():
             return
@@ -934,6 +1098,7 @@ class AgentWakeStore:
             conn.execute("BEGIN IMMEDIATE")
             if gpt_enabled:
                 self._schedule_random_wakes(conn, now)
+                self._schedule_heartbeats(conn, now)
                 self._expire_interrupted_gpt_runs(conn, now_iso)
             inactive_before = _iso(
                 now.astimezone(timezone.utc) - timedelta(hours=24), allow_empty=False

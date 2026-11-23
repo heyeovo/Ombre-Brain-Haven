@@ -139,7 +139,7 @@ class GPTChatRequests:
             ):
                 return {"ok": False, "code": "wake_superseded"}
             if body.get("user_activity") is True and body.get("wake") is not True:
-                record_gpt_wake_user_activity(conn, profile_id, session_id, accepted_at)
+                record_gpt_wake_user_activity(conn, profile_id, session_id, accepted_at, request_id)
             conn.execute("""
                 INSERT INTO gpt_chat_requests
                     (profile_id, request_id, session_id, fingerprint, owner, status, expires_at, is_wake)

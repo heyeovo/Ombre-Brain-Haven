@@ -46,8 +46,13 @@ def public_error(detail: dict) -> dict:
 
 
 def validate_request(body: object) -> dict:
-    if not isinstance(body, dict) or set(body) - {"request_id", "model", "input", "instructions", "tools", "tool_choice", "include", "step"}:
+    if not isinstance(body, dict) or set(body) - {"request_id", "model", "input", "instructions", "tools", "tool_choice", "include", "step", "reasoning"}:
         raise GPTSubscriptionError("invalid_request", "GPT 请求包含不受支持的字段。", 400)
+    if "reasoning" in body:
+        reasoning = body["reasoning"]
+        if (not isinstance(reasoning, dict) or set(reasoning) != {"effort"} or not isinstance(reasoning["effort"], str)
+                or reasoning["effort"] not in {"none", "minimal", "low", "medium", "high", "xhigh", "max"}):
+            raise GPTSubscriptionError("invalid_request", "GPT reasoning effort 无效。", 400)
     request_id = body.get("request_id")
     if not isinstance(request_id, str) or not ID_PATTERN.fullmatch(request_id):
         raise GPTSubscriptionError("invalid_request", "请提供有效的 request_id。", 400)

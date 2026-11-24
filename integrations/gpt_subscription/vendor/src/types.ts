@@ -38,6 +38,10 @@ export interface LoginProfile {
 export interface ChatGPTModel {
   slug: string;
   displayName: string;
+  contextWindow?: number;
+  maxOutputTokens?: number;
+  reasoningEfforts?: string[];
+  defaultReasoningEffort?: string;
 }
 
 /** Implement in the trusted local process with an OS-backed secret store. Never use plaintext or a hardcoded key. */
@@ -115,6 +119,7 @@ export interface StreamResponseOptions {
   model: string;
   input: string | (ResponseInputMessage | import("openai").OpenAI.Responses.ResponseInputItem)[];
   instructions?: string;
+  reasoning?: { effort: Exclude<import("openai").OpenAI.ReasoningEffort, null> };
   tools?: import("openai").OpenAI.Responses.Tool[];
   tool_choice?: "none";
   include?: ["reasoning.encrypted_content"];

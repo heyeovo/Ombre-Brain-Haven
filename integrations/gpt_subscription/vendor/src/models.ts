@@ -18,7 +18,19 @@ export async function listModels(accessToken: string, signal: AbortSignal): Prom
         typeof model.display_name !== "string" || !model.display_name.trim() || model.display_name.length > 200) {
       throw new ChatGPTError("invalid_model_catalog", "ChatGPT returned an incomplete model listing. Try again.", true, response.status);
     }
-    result.push({ slug: model.slug, displayName: model.display_name });
+    const positive = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) > 0;
+    const rawEfforts = model.supported_reasoning_efforts ?? model.supported_reasoning_levels;
+    const efforts = Array.isArray(rawEfforts) ? rawEfforts.flatMap((value) => {
+      const effort = typeof value === 'string' ? value : isObject(value) ? value.effort : undefined;
+      return typeof effort === 'string' && /^[a-z]{1,16}$/.test(effort) ? [effort] : [];
+    }) : [];
+    const defaultEffort = model.default_reasoning_effort ?? model.default_reasoning_level;
+    result.push({ slug: model.slug, displayName: model.display_name,
+      ...(positive(model.context_window) ? { contextWindow: model.context_window } : {}),
+      ...(positive(model.max_output_tokens) ? { maxOutputTokens: model.max_output_tokens } : {}),
+      ...(efforts.length ? { reasoningEfforts: [...new Set(efforts)] } : {}),
+      ...(typeof defaultEffort === 'string' && efforts.includes(defaultEffort) ? { defaultReasoningEffort: defaultEffort } : {}),
+    });
   }
   return result;
 }

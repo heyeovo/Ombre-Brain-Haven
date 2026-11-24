@@ -5213,12 +5213,17 @@ class GatewayStateStore:
         gpt_overrides = None
         if "gpt_subscription_overrides" in updates:
             raw_gpt = updates["gpt_subscription_overrides"]
-            if not isinstance(raw_gpt, dict) or set(raw_gpt) - {"model"}:
-                raise ValueError("gpt_subscription_overrides only accepts model")
+            if not isinstance(raw_gpt, dict) or set(raw_gpt) - {"model", "effort"}:
+                raise ValueError("gpt_subscription_overrides only accepts model and effort")
             model = raw_gpt.get("model", "")
             if not isinstance(model, str) or len(model) > 200:
                 raise ValueError("gpt_subscription_overrides.model must be a string up to 200 characters")
             gpt_overrides = {"model": model.strip()} if model.strip() else {}
+            effort = raw_gpt.get("effort", "")
+            if not isinstance(effort, str) or effort not in {"", "none", "minimal", "low", "medium", "high", "xhigh", "max"}:
+                raise ValueError("gpt_subscription_overrides.effort is invalid")
+            if effort:
+                gpt_overrides["effort"] = effort
         overrides: dict[str, Any] | None = None
         if "selfhost_overrides" in updates:
             raw_overrides = updates.get("selfhost_overrides")

@@ -151,6 +151,7 @@ export async function streamResponse(
       input: input.map(message => "type" in message && message.type ? message
         : "role" in message && typeof message.content === "string" ? { role: message.role, content: message.content } : message),
       ...(options.instructions !== undefined ? { instructions: options.instructions } : {}),
+      ...(options.reasoning ? { reasoning: options.reasoning } : {}),
       ...(options.tools ? { tools: options.tools } : {}),
       ...(options.tool_choice ? { tool_choice: options.tool_choice } : {}),
       ...(options.include ? { include: options.include } : {}),

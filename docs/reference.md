@@ -612,3 +612,7 @@ grep -oE "@mcp\.custom_route\(\"[^\"]*\"" server.py
 ```
 
 ---
+
+### GPT 模型能力与力度
+
+订阅模型目录只透传有效的正整数 `context_window/max_output_tokens` 为 `contextWindow/maxOutputTokens`，以及上游声明的支持力度/默认力度；缺失不推断或补固定容量。会话 `gpt_subscription_overrides` 接受独立的 `model/effort`，继续使用现有按 profile/session 隔离的 JSON 持久层，不新增表结构。`reasoning` 请求仅允许有效的 `effort` 并原样纳入真实请求与审计 body hash。审计兼容旧 null 模型容量和新目录容量，应用预算允许未知 null。

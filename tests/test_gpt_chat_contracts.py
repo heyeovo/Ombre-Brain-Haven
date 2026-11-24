@@ -26,6 +26,17 @@ class GPTChatContracts(unittest.TestCase):
         return self.store.patch_conversation_session_state(
             profile_id=profile, session_id="s", persona_id="ombre", updates=updates)
 
+    def test_effort_is_durable_profile_scoped_and_invalid_updates_are_atomic(self):
+        self.save(gpt_subscription_overrides={"model": "fixture", "effort": "high"})
+        reopened = GatewayStateStore(self.path)
+        state = reopened.get_conversation_session_state(profile_id="default", session_id="s")
+        self.assertEqual(state["gpt_subscription_overrides"], {"model": "fixture", "effort": "high"})
+        self.assertEqual(reopened.get_conversation_session_state(profile_id="other", session_id="s"), {})
+        with self.assertRaises(ValueError):
+            self.save(gpt_subscription_overrides={"model": "fixture", "effort": "invalid"})
+        self.assertEqual(reopened.get_conversation_session_state(profile_id="default", session_id="s")["gpt_subscription_overrides"],
+                         {"model": "fixture", "effort": "high"})
+
     def test_old_schema_upgrade_repeat_init_and_reopen(self):
         # Simulate the pre-GPT schema, preserving a real old session.
         self.save(selfhost_overrides={"model": "old"})

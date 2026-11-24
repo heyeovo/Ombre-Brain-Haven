@@ -46,9 +46,12 @@ def validate_snapshot(value):
     context = value["context"]
     keys(context, ("estimator", "estimate_safety_ratio", "input_tokens_estimated", "application_input_budget",
                    "model_context_limit", "included_history_rounds", "omitted_history_rounds", "context_revision"))
-    if context["estimator"] != "utf8-bytes-div-3-v1" or context["estimate_safety_ratio"] != 1.05 or context["model_context_limit"] is not None:
+    if context["estimator"] != "utf8-bytes-div-3-v1" or context["estimate_safety_ratio"] != 1.05:
         raise ValueError("invalid audit estimator")
-    for key in ("input_tokens_estimated", "application_input_budget", "included_history_rounds", "omitted_history_rounds", "context_revision"):
+    for key in ("application_input_budget", "model_context_limit"):
+        if context[key] is not None and (type(context[key]) is not int or not 0 < context[key] <= 100_000_000):
+            raise ValueError("invalid model capacity")
+    for key in ("input_tokens_estimated", "included_history_rounds", "omitted_history_rounds", "context_revision"):
         if type(context[key]) is not int or not 0 <= context[key] <= 10_000_000:
             raise ValueError("invalid audit context")
     return value

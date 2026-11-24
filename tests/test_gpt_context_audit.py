@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from gpt_chat_requests import GPTChatRequests
-from gpt_context_audit import cache_evidence, quota_evidence, request_hash
+from gpt_context_audit import cache_evidence, quota_evidence, request_hash, validate_snapshot
 from gpt_subscription import GPTSubscriptionService
 from gateway_state import GatewayStateStore
 from gateway import GatewayService
@@ -32,6 +32,17 @@ def quota_snapshot(limit_id='codex', source='response_headers'):
 
 
 class GPTContextAudit(unittest.TestCase):
+    def test_capacity_evidence_accepts_verified_numbers_and_preserves_unknown(self):
+        for capacity in (None, 400000):
+            value = snapshot()
+            value['context'].update(application_input_budget=capacity, model_context_limit=capacity)
+            self.assertEqual(validate_snapshot(value)['context']['model_context_limit'], capacity)
+        for invalid in (False, -1, '400000'):
+            value = snapshot()
+            value['context']['model_context_limit'] = invalid
+            with self.assertRaises(ValueError):
+                validate_snapshot(value)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.path = str(Path(self.temp.name) / 'state.db')
